@@ -62,8 +62,8 @@ def evaluate_model(model, X_test, y_test):
 
 def mix_serving(model, train_loader, forward_batch_size, backward_batch_size, total_training_requests, total_inference_requests, X_test, y_test, learning_rate=0.001, epochs=10):
     optimizer = torch.optim.Adam(model.params(), lr=learning_rate)
-    print("Total Training:" + str(total_training_requests))
-    print("Total Inference:" + str(total_inference_requests))
+    print("Total Training:" + str(total_training_requests * epochs))
+    print("Total Inference:" + str(total_inference_requests * epochs))
     loss_history = []
     accuracy_history = []
     with tqdm(total=total_training_requests * epochs, desc="Training Progress") as train_pbar, \
