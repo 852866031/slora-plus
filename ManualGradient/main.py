@@ -83,7 +83,7 @@ def mix_serving(model, train_loader, forward_batch_size, backward_batch_size, to
                     loss = model.manual_backward_with_optimizer(optimizer, backward_batch)
                     train_pbar.update(num_requests)
         
-            # Flush remaining activations at the end of serving
+            # Flush remaining activations
             batch_info = model.backward_cache.get_batch(backward_batch_size, flush=True)
             if batch_info is not None:
                     num_requests, backward_batch = batch_info
@@ -119,15 +119,10 @@ def main():
     epochs = 200
     learning_rate = 0.001
     train_batch_size = 32
-    
-    # Load data
+
     train_loader, total_training, total_inference, test_data = load_iris_data(batch_size=batch_size, train_count=train_count, epochs=epochs)
     X_test, y_test = test_data
-    
-    # Initialize model
     model = MLPManual()
-    
-    # Run mixed serving
     mix_serving(model, train_loader, batch_size, train_batch_size, total_training, total_inference, X_test, y_test, learning_rate, epochs)
 
 
