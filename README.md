@@ -1,6 +1,6 @@
 # S-LoRA
 
-[Google doc link](https://github.com/S-LoRA/S-LoRA)
+[S-LoRA](https://github.com/S-LoRA/S-LoRA)
 
 If you have a fresh environment (ubuntu) do the following to start docker:
 
