@@ -7,11 +7,35 @@ from sklearn.datasets import load_iris
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, TensorDataset
-from models import MLPManual
+from models import MLPManual, MLP
 from tqdm import tqdm
 
 
-def load_iris_data(batch_size=32, train_count=8, epochs=100):
+def load_iris_batches(batch_size=32):
+    # Load the iris dataset
+    iris = load_iris()
+    X = torch.tensor(iris.data, dtype=torch.float32)
+    y = torch.tensor(iris.target, dtype=torch.long)
+
+    # Normalize features
+    scaler = StandardScaler()
+    X = torch.tensor(scaler.fit_transform(X), dtype=torch.float32)
+
+    # Calculate the number of batches
+    num_samples = X.shape[0]
+    num_batches = num_samples // batch_size
+    batches = []
+
+    # Create batches
+    for batch_idx in range(num_batches):
+        indices = torch.arange(batch_idx * batch_size, (batch_idx + 1) * batch_size)
+        batch_X = X[indices]
+        batch_y = y[indices]
+        batches.append((batch_X, batch_y))
+    return batches
+
+
+def load_iris_data(batch_size=32, train_count=8):
     iris = load_iris()
     X, y = iris.data, iris.target
     scaler = StandardScaler()
@@ -48,7 +72,6 @@ def load_iris_data(batch_size=32, train_count=8, epochs=100):
     return batches, total_training, total_inference, (X_test, y_test)
 
 def evaluate_model(model, X_test, y_test):
-    """Evaluate the model on the test dataset and return loss and accuracy."""
     with torch.no_grad():
         predictions = model.evaluate(X_test)
         loss_fn = torch.nn.CrossEntropyLoss()
@@ -82,7 +105,6 @@ def mix_serving(model, train_loader, forward_batch_size, backward_batch_size, to
                     num_requests, backward_batch = batch_info
                     loss = model.manual_backward_with_optimizer(optimizer, backward_batch)
                     train_pbar.update(num_requests)
-        
             # Flush remaining activations
             batch_info = model.backward_cache.get_batch(backward_batch_size, flush=True)
             if batch_info is not None:
@@ -109,8 +131,7 @@ def mix_serving(model, train_loader, forward_batch_size, backward_batch_size, to
     plt.xlabel('Epochs')
     plt.ylabel('Accuracy')
     plt.title('Test Accuracy Over Epochs')
-    
-    plt.show()
+
 
 
 def main():
@@ -120,14 +141,41 @@ def main():
     learning_rate = 0.001
     train_batch_size = 32
 
-    train_loader, total_training, total_inference, test_data = load_iris_data(batch_size=batch_size, train_count=train_count, epochs=epochs)
+    train_loader, total_training, total_inference, test_data = load_iris_data(batch_size=batch_size, train_count=train_count)
     X_test, y_test = test_data
     model = MLPManual()
+    model_1 = MLP(model)
     mix_serving(model, train_loader, batch_size, train_batch_size, total_training, total_inference, X_test, y_test, learning_rate, epochs)
 
+    optimizer = optim.Adam(model_1.params(), lr=0.001)  # Set learning rate to 0.001
+    # Training loop with mini-batches
+    epochs = 200
+    loss_history = []
+    accuracy_history = []
+    batches_1 = load_iris_batches()
+    for epoch in range(epochs):
+        for batch_X, batch_y in batches_1:
+            model_1.train_step(optimizer, batch_X, batch_y)
 
+        test_loss, test_accuracy = evaluate_model(model_1, X_test, y_test)
+        loss_history.append(test_loss)
+        accuracy_history.append(test_accuracy)
 
-
+    epochs_range = range(1, epochs + 1)
+    plt.figure(figsize=(12, 5))
+    
+    plt.subplot(1, 2, 1)
+    plt.plot(epochs_range, loss_history, marker='o', linestyle='-')
+    plt.xlabel('Epochs')
+    plt.ylabel('Loss')
+    plt.title('MLP Test Loss Over Epochs')
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(epochs_range, accuracy_history, marker='o', linestyle='-')
+    plt.xlabel('Epochs')
+    plt.ylabel('Accuracy')
+    plt.title('MLP Test Accuracy Over Epochs')
+    plt.show()
 
 if __name__ == "__main__":
     main()
