@@ -26,3 +26,17 @@ It will show the container names, copy the name and do:
 ```
 sudo docker exec -it <container_name> bash
 ```
+
+For test: 
+```
+python3 -m venv transformer_env
+source transformer_env/bin/activate
+pip install --upgrade pip
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+pip install torchtext
+pip install datasets
+pip install tqdm
+pip install numpy
+pip install matplotlib
+pip install pickle5
+```

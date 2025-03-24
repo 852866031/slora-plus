@@ -171,9 +171,23 @@ class TransformerDecoderManual:
         self.W2 = torch.randn(dim_feedforward, d_model, dtype=torch.float32).requires_grad_()
         self.b2 = torch.zeros(d_model, dtype=torch.float32).requires_grad_()
 
+        self.ln1_weight = torch.ones(d_model).requires_grad_()
+        self.ln1_bias = torch.zeros(d_model).requires_grad_()
+        self.ln2_weight = torch.ones(d_model).requires_grad_()
+        self.ln2_bias = torch.zeros(d_model).requires_grad_()
         self.dropout_layer = nn.Dropout(dropout)
-        self.layer_norm1 = nn.LayerNorm(d_model)
-        self.layer_norm2 = nn.LayerNorm(d_model)
+
+    def layer_norm1(self, x, eps=1e-5):
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, unbiased=False, keepdim=True)
+        normalized = (x - mean) / torch.sqrt(var + eps)
+        return self.ln1_weight * normalized + self.ln1_bias
+    
+    def layer_norm2(self, x, eps=1e-5):
+        mean = x.mean(dim=-1, keepdim=True)
+        var = x.var(dim=-1, unbiased=False, keepdim=True)
+        normalized = (x - mean) / torch.sqrt(var + eps)
+        return self.ln2_weight * normalized + self.ln2_bias
 
     def scaled_dot_product_attention(self, Q, K, V):
         d_k = Q.size(-1)
@@ -204,11 +218,87 @@ class TransformerDecoderManual:
         tgt2 = self.feedforward(tgt)
         tgt = self.layer_norm2(tgt + self.dropout_layer(tgt2))
         return tgt
+    
+    def manual_forward(self, A_prev):
+        W_q = self.W_q 
+        W_k = self.W_k
+        W_v = self.W_v 
+        W_o = self.W_o
+        W_norm1 = self.ln1_weight
+        b_norm1 = self.ln1_bias 
+        W1 = self.W1
+        b1 = self.b1
+        W2 = self.W2
+        b2 = self.b2
+        W_norm2 = self.ln2_weight
+        b_norm2 = self.ln2_bias 
+        
+        batch_size, seq_len, d_model = A_prev.shape
+        nhead = W_q.shape[0] // (d_model // W_o.shape[0])
+
+        # ----- Forward pass (with nn.LayerNorm) -----
+        Q = A_prev @ W_q
+        K = A_prev @ W_k
+        V = A_prev @ W_v
+
+        Q_heads = Q.view(batch_size, -1, self.nhead, self.d_model // self.nhead).transpose(1, 2)
+        K_heads = K.view(batch_size, -1, self.nhead, self.d_model // self.nhead).transpose(1, 2)
+        V_heads = V.view(batch_size, -1, self.nhead, self.d_model // self.nhead).transpose(1, 2)
+
+        scores = (Q_heads @ K_heads.transpose(-2, -1)) / math.sqrt(Q_heads.size(-1))
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_output_heads = attn_weights @ V_heads
+        attn_output = attn_output_heads.transpose(1, 2).contiguous().view(batch_size, -1, d_model)
+        attn_out_proj = attn_output @ W_o
+
+        # LayerNorm1
+        eps = 1e-5
+        x1 = A_prev + attn_out_proj
+        x1_mean = x1.mean(dim=-1, keepdim=True)
+        x1_var = x1.var(dim=-1, unbiased=False, keepdim=True)
+        Z1_norm = (x1 - x1_mean) / torch.sqrt(x1_var + eps)
+        Z1_out = self.ln1_weight * Z1_norm + self.ln1_bias
+
+        # Feedforward network
+        FF_intermediate = F.relu(Z1_out @ W1 + b1)
+        FF_output = FF_intermediate @ W2 + b2
+
+        # LayerNorm2 (nn.LayerNorm initialized with params)
+        x2 = Z1_out + FF_output
+        x2_mean = x2.mean(dim=-1, keepdim=True)
+        x2_var = x2.var(dim=-1, unbiased=False, keepdim=True)
+        Z2_norm = (x2 - x2_mean) / torch.sqrt(x2_var + eps)
+        Z2_out = self.ln2_weight * Z2_norm + self.ln2_bias
+
+        ### Forward pass 
+        self.dropout_layer.eval()
+        tgt = A_prev
+        tgt2 = self.multi_head_attention(tgt, tgt, tgt)
+        tgt3 = self.layer_norm1(tgt + self.dropout_layer(tgt2))
+        tgt4 = self.feedforward(tgt3)
+        tgt5 = self.layer_norm2(tgt3 + self.dropout_layer(tgt4))
+
+        def compare_tensors(manual_tensor, auto_tensor):
+            """Compare two tensors and return comparison results"""
+            
+            max_diff = torch.max(torch.abs(manual_tensor - auto_tensor)).item()
+            mean_diff = torch.mean(torch.abs(manual_tensor - auto_tensor)).item()
+            is_close = torch.allclose(manual_tensor, auto_tensor, rtol=1e-4, atol=1e-4)
+            return {
+                'max_diff': max_diff,
+                'mean_diff': mean_diff,
+                'matches': is_close
+            }
+
+        return torch.equal(attn_out_proj, tgt2) and torch.equal(Z1_out, tgt3) and torch.equal(FF_output, tgt4) and torch.equal(Z2_out, tgt5)
+
 
     def params(self):
         return [
             self.W_q, self.W_k, self.W_v, self.W_o,
-            self.W1, self.b1, self.W2, self.b2
+            self.ln1_weight, self.ln1_bias,
+            self.W1, self.b1, self.W2, self.b2,
+            self.ln2_weight, self.ln2_bias,
         ]
     
 class TransformerBackwardCache:
@@ -235,8 +325,8 @@ class TransformerBackwardCache:
 
         # Flatten the list of activations
         activations = [torch.cat([act[i] for act in activations], dim=0) for i in range(len(activations[0]))]
-        print("Batch Generated: Size: ", num_requests)
-        print("Activations num: ", len(activations))
+        #print("Batch Generated: Size: ", num_requests)
+        #print("Activations num: ", len(activations))
         return num_requests, (
             torch.cat(input_ids),
             *activations,
@@ -244,23 +334,54 @@ class TransformerBackwardCache:
         )
 
 class SimpleTransformerLM:
-    def __init__(self, vocab_size, d_model=512, nhead=8, dim_feedforward=2048, dropout=0.1):
+    def __init__(self, vocab_size, output_size, d_model=512, nhead=8, dim_feedforward=2048, dropout=0.1):
         self.vocab_size = vocab_size
         self.d_model = d_model
+        self.output_size = output_size
         self.embedding = torch.nn.Embedding(vocab_size, d_model)
         self.positional_encoding = self._generate_positional_encoding(d_model, 5000)
         self.decoder_layers = [
             TransformerDecoderManual(d_model, nhead, dim_feedforward, dropout),
-            TransformerDecoderManual(d_model, nhead, dim_feedforward, dropout)
         ]
-        self.output_layer = torch.nn.Linear(d_model, vocab_size)
+        self.output_layer = torch.nn.Linear(d_model, self.output_size)
         self.backward_cache = TransformerBackwardCache()
         self.layers_info = [
             ("embedding", 1, None),
-            ("decoder", 8, "layer_norm"),
-            ("decoder", 8, "layer_norm"),
+            ("decoder", 12, None),
             ("output", 2, None)
         ]
+
+    def copy_params_from(self, other):
+        """Copy parameters from another SimpleTransformerLM instance."""
+        # Copy embedding parameters
+        self.embedding.weight.data.copy_(other.embedding.weight.data)
+        
+        # Copy decoder layer parameters
+        for self_layer, other_layer in zip(self.decoder_layers, other.decoder_layers):
+            # Copy multi-head attention parameters
+            self_layer.W_q.data.copy_(other_layer.W_q.data)
+            self_layer.W_k.data.copy_(other_layer.W_k.data)
+            self_layer.W_v.data.copy_(other_layer.W_v.data)
+            self_layer.W_o.data.copy_(other_layer.W_o.data)
+            
+            # Copy feedforward network parameters
+            self_layer.W1.data.copy_(other_layer.W1.data)
+            self_layer.b1.data.copy_(other_layer.b1.data)
+            self_layer.W2.data.copy_(other_layer.W2.data)
+            self_layer.b2.data.copy_(other_layer.b2.data)
+            
+            # Copy layer norm parameters
+            self_layer.ln1_weight.data.copy_(other_layer.ln1_weight.data)
+            self_layer.ln1_bias.data.copy_(other_layer.ln1_bias.data)
+            self_layer.ln2_weight.data.copy_(other_layer.ln2_weight.data)
+            self_layer.ln2_bias.data.copy_(other_layer.ln2_bias.data)
+        
+        # Copy output layer parameters
+        self.output_layer.weight.data.copy_(other.output_layer.weight.data)
+        self.output_layer.bias.data.copy_(other.output_layer.bias.data)
+        
+        # Copy positional encoding
+        self.positional_encoding.data.copy_(other.positional_encoding.data)
 
     def _generate_positional_encoding(self, d_model, max_len):
         pe = torch.zeros(max_len, d_model)
@@ -283,17 +404,17 @@ class SimpleTransformerLM:
         with torch.no_grad():
             seq_len = input_ids.size(1)
             embeddings = self.embedding(input_ids) + self.positional_encoding[:, :seq_len, :]
-            print(f"Embedding layer input shape: {input_ids.shape}, output shape: {embeddings.shape}")
+            #print(f"Embedding layer input shape: {input_ids.shape}, output shape: {embeddings.shape}")
             tgt = embeddings
             activations = [tgt]
             for i, layer in enumerate(self.decoder_layers):
                 input_shape = tgt.shape
                 tgt = layer.forward(tgt)
                 output_shape = tgt.shape
-                print(f"Decoder layer {i+1} input shape: {input_shape}, output shape: {output_shape}")
+                #print(f"Decoder layer {i+1} input shape: {input_shape}, output shape: {output_shape}")
                 activations.append(tgt)
             logits = self.output_layer(tgt)
-            print(f"Output layer input shape: {tgt.shape}, output shape: {logits.shape} \n")
+            #print(f"Output layer input shape: {tgt.shape}, output shape: {logits.shape} \n")
             activations.append(logits)
             
             # Save activations and labels for samples marked with 1 in train_filter
@@ -311,11 +432,12 @@ class SimpleTransformerLM:
         # Use TransformerCustomBackwardFunction to compute gradients
         layers_info = self.layers_info
         params = self.params()
-        print("Added Params: ", len(params))
-        print("Added Activations: ", len(activations))
+        #print("Added Params: ", len(params))
+        #print("Added Activations: ", len(activations))
         logits = TransformerCustomBackwardFunction.apply(layers_info, *params, *activations)
+        logits = logits[:, -1, :]  # Shape: (batch_size, output_size)
         loss_fn = torch.nn.CrossEntropyLoss()
-        loss = loss_fn(logits.view(-1, self.vocab_size), labels.view(-1))
+        loss = loss_fn(logits.view(-1, self.output_size), labels.view(-1))
 
         optimizer.zero_grad()
         loss.backward()
@@ -330,3 +452,42 @@ class SimpleTransformerLM:
         params.append(self.output_layer.weight)
         params.append(self.output_layer.bias)
         return params
+    
+    def dict_params(self):
+        params_dict = {
+            'embedding': {
+                'weight': self.embedding.weight
+            },
+            'decoder_layers': {},
+            'output_layer': {
+                'weight': self.output_layer.weight,
+                'bias': self.output_layer.bias
+            }
+        }
+        
+        # Organize decoder layers
+        for i, layer in enumerate(self.decoder_layers):
+            params_dict['decoder_layers'][f'layer_{i}'] = {
+                'attention': {
+                    'W_q': layer.W_q,
+                    'W_k': layer.W_k,
+                    'W_v': layer.W_v,
+                    'W_o': layer.W_o
+                },
+                'feedforward': {
+                    'W1': layer.W1,
+                    'b1': layer.b1,
+                    'W2': layer.W2,
+                    'b2': layer.b2
+                },
+                'layer_norm1': {
+                    'weight': layer.ln1_weight,
+                    'bias': layer.ln1_bias
+                },
+                'layer_norm2': {
+                    'weight': layer.ln2_weight,
+                    'bias': layer.ln2_bias
+                }
+            }
+        
+        return params_dict
