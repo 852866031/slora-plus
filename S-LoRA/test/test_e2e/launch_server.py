@@ -3,7 +3,7 @@ import os
 
 # base_model = "dummy-llama-7b"
 base_model = "huggyllama/llama-7b"
-adapter_dirs = ["tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
+adapter_dirs = ["tloen/alpaca-lora-7b"]
 
 
 if __name__ == "__main__":
@@ -19,8 +19,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     
-    if args.num_adapter is None: args.num_adapter = 4
-    if args.num_token is None: args.num_token = 10000
+    if args.num_adapter is None: args.num_adapter = 1
+    if args.num_token is None: args.num_token = 1000
     if args.pool_size_lora is None: args.pool_size_lora = 0
  
     cmd = f"python -m slora.server.api_server --max_total_token_num {args.num_token}"
@@ -42,5 +42,5 @@ if __name__ == "__main__":
         cmd += " --prefetch False"
     if args.no_mem_pool:
         cmd += " --no-mem-pool"
-
+    print(cmd)
     os.system(cmd)

@@ -60,8 +60,38 @@ def generate_requests(num_adapters, alpha, req_rate, cv, duration,
     intervals = np.random.gamma(shape, scale, tot_req)
     for i in range(tot_req):
         tic += intervals[i]
+        print(test_prompt(id))
         requests.append(Request(i, adapter_dirs[ind[i]][0], adapter_dirs[ind[i]][1],
                                 test_prompt(id), int(input_lens[i]), int(output_lens[i]),
                                 tic))
     return requests
 
+def generate_num_requests(num_adapters, alpha, req_rate, cv, duration,
+                      input_range, output_range,
+                      adapter_dirs, # (base_dir, adapter_dir)
+                      seed=42, id=1):
+    np.random.seed(seed)
+
+    tot_req = int(req_rate * duration)
+
+    # generate adapter id
+    probs = np.random.power(alpha, tot_req)
+    ind = (probs * num_adapters).astype(int)
+
+    # generate input output len
+    input_lens = np.random.randint(input_range[0], input_range[1], tot_req)
+    output_lens = np.random.randint(output_range[0], output_range[1], tot_req)
+
+    # generate timestamp
+    requests = []
+    tic = 0
+    shape = 1 / (cv * cv)
+    scale = cv * cv / req_rate
+    # intervals = np.random.exponential(1.0 / req_rate, tot_req)
+    intervals = np.random.gamma(shape, scale, tot_req)
+    for i in range(tot_req):
+        tic += intervals[i]
+        requests.append(Request(i, adapter_dirs[ind[i]][0], adapter_dirs[ind[i]][1],
+                                test_prompt(id), int(input_lens[i]), int(output_lens[i]),
+                                tic))
+    return requests

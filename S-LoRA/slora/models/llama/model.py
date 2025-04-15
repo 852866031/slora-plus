@@ -1,5 +1,6 @@
 import os
 import json
+from slora.models.llama.backward_engine import LlamaBackwardEngine
 import torch
 from slora.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from slora.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -35,6 +36,7 @@ class LlamaTpPartModel(TpPartBaseModel):
                  max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False):
         super().__init__(tp_rank, world_size, weight_dir,
                          max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy)
+        self.backward_engine = LlamaBackwardEngine(self.mem_manager, self.config)
         return
     
     def _init_config(self):

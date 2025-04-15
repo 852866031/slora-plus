@@ -17,6 +17,39 @@ from slora.models.llama.infer_struct import LlamaInferStateInfo
 from slora.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv, destindex_copy_quantize_kv
 from slora.common.basemodel import TransformerLayerInferTpl
 
+@torch.no_grad()
+def context_attention_fwd_pytorch(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
+    B = b_seq_len.shape[0]
+    S, H, D = k.shape
+    hidden_dim = H * D
+    scale = 1.0 / (D ** 0.5)
+    q = q.view(S, H, D)
+
+    for i in range(B):
+        start = b_start_loc[i].item()
+        seqlen = b_seq_len[i].item()
+        end = start + seqlen
+
+        q_i = q[start:end]
+        k_i = k[start:end]
+        v_i = v[start:end]
+        q_i = q_i.transpose(0, 1)  # [H, L, D]
+        k_i = k_i.transpose(0, 1)  # [H, L, D]
+        v_i = v_i.transpose(0, 1)  # [H, L, D]
+
+        attn_scores = torch.matmul(q_i, k_i.transpose(-1, -2)) * scale
+
+        mask = torch.tril(torch.ones((seqlen, seqlen), dtype=torch.bool, device=q.device))
+        attn_scores = attn_scores.masked_fill(~mask, float('-inf'))
+
+        attn_probs = torch.nn.functional.softmax(attn_scores, dim=-1)
+        context = torch.matmul(attn_probs, v_i)  # [H, L, D]
+        context = context.transpose(0, 1).contiguous().view(seqlen, hidden_dim)
+
+        # Write into output buffer
+        o[start:end].copy_(context)
+ 
+
 class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     """
     """
@@ -34,7 +67,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
 
     
     def _att_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
-        return rmsnorm_forward(input, weight=layer_weight.att_norm_weight_, eps=self.eps_)
+        tmp = rmsnorm_forward(input, weight=layer_weight.att_norm_weight_, eps=self.eps_)
+        return tmp
     
     def _ffn_norm(self, input, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight)->torch.Tensor:
         return rmsnorm_forward(input, weight=layer_weight.ffn_norm_weight_, eps=self.eps_)
@@ -62,6 +96,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
     
     def _context_attention_kernel(self, q, k, v, infer_state:LlamaInferStateInfo, layer_weight)->torch.Tensor:
         o_tensor = torch.empty_like(q)
+        '''
         context_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
                               k.view(-1, self.tp_k_head_num_, self.head_dim_),
                               v.view(-1, self.tp_v_head_num_, self.head_dim_),
@@ -69,6 +104,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                               infer_state.b_start_loc,
                               infer_state.b_seq_len,
                               infer_state.max_len_in_batch)
+        '''
+        context_attention_fwd_pytorch(q, k, v, o_tensor, infer_state.b_start_loc, infer_state.b_seq_len, infer_state.max_len_in_batch)
         return o_tensor
     
     def _token_attention_kernel(self, q, infer_state:LlamaInferStateInfo, layer_weight)->torch.Tensor:

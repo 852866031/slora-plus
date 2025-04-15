@@ -33,6 +33,9 @@ class InferSamplingParams:
         return
 
 
+from ..mixed_req_queue import rprint
+
+
 @dataclass
 class InferBatch:
     batch_id: int
@@ -58,58 +61,75 @@ class InferBatch:
 
     adapter_dirs: List[str]
 
+    finetune_mask: torch.Tensor  # Added
+
     @classmethod
     @torch.no_grad()
-    def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager:MemoryManager, vocab_size: int):
+    def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager: MemoryManager, vocab_size: int):
+        rprint("infer_batch: initing batch")
 
         input_lengths = []
         all_input_ids = []
         requests_idx_mapping = {}
-        
+
         out_token_id_counts = []
         sampling_param_list = []
-        
+        finetune_flags = []
+
         nopad_total_token_num = 0
         nopad_max_len_in_batch = 0
         nopad_b_loc = torch.empty((len(requests), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
         nopad_b_start_loc = torch.zeros(len(requests), dtype=torch.int32, device='cuda')
 
-        # here sort the requests by adapter
-        # requests.sort(key=lambda x: x["adapter_dir"] if x["adapter_dir"] is not None else "")
-
         adapter_dirs = []
 
+        mem_manager.finetune_input_ids = []
+
         for i, r in enumerate(requests):
-            # request id -> idx in list mapping
             requests_idx_mapping[r['request_id']] = i
 
             tokenized_input = r['input_id']
+            is_finetuning = r.get("is_finetuning", False)
+
+            if is_finetuning:
+                full_input_tensor = torch.tensor(tokenized_input, dtype=torch.int64, device=device)
+                mem_manager.finetune_input_ids.append(full_input_tensor)
+                rprint("Saved finetune input ids shape", full_input_tensor.shape)
+
+            if is_finetuning and len(tokenized_input) > 1:
+                tokenized_input = tokenized_input[:-1]
+                rprint("truncated shape", len(tokenized_input))
 
             input_length = len(tokenized_input)
             input_lengths.append(input_length)
             all_input_ids.append(tokenized_input)
             out_token_id_counts.append(collections.defaultdict(int))
 
-            # postprocessor
             sampling_param = r["sampling_param"]
             sampling_param["vocab_size"] = vocab_size
             sampling_param_list.append(InferSamplingParams(**sampling_param))
-            
+
             nopad_total_token_num += input_length
             nopad_max_len_in_batch = max(nopad_max_len_in_batch, input_length)
 
             adapter_dirs.append(r["adapter_dir"])
-            
-        nopad_b_seq_len = torch.tensor(input_lengths, dtype=torch.int32, device="cuda")
-        nopad_b_start_loc[1:] = torch.cumsum(nopad_b_seq_len, dim=0, dtype=torch.int32)[0:-1]
+            finetune_flags.append(1 if is_finetuning else 0)
+
+        # Create masks and tensor metadata
+        finetune_mask = torch.tensor(finetune_flags, dtype=torch.uint8, device=device)
+        nopad_b_seq_len = torch.tensor(input_lengths, dtype=torch.int32, device=device)
+
+        if len(requests) > 1:
+            nopad_b_start_loc[1:] = torch.cumsum(nopad_b_seq_len, dim=0, dtype=torch.int32)[:-1]
+
+        # Flatten all input ids into a single tensor
         if len(requests) > 1:
             input_ids = np.concatenate(all_input_ids, dtype=np.int64)
         else:
             input_ids = all_input_ids[0]
 
-        # Create tensors on device
         input_ids = torch.tensor(input_ids, dtype=torch.int64, device=device)
-
+        rprint("input_ids shape", input_ids.shape)
         return cls(
             batch_id=batch_id,
             requests=requests,
@@ -126,7 +146,84 @@ class InferBatch:
             sampling_param_list=sampling_param_list,
             mem_manager=mem_manager,
             adapter_dirs=adapter_dirs,
+            finetune_mask=finetune_mask
         )
+
+    # @classmethod
+    # @torch.no_grad()
+    # def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager:MemoryManager, vocab_size: int):
+    #     rprint("infer_batch: initing batch")
+    #     input_lengths = []
+    #     all_input_ids = []
+    #     requests_idx_mapping = {}
+        
+    #     out_token_id_counts = []
+    #     sampling_param_list = []
+    #     finetune_flags = []
+        
+    #     nopad_total_token_num = 0
+    #     nopad_max_len_in_batch = 0
+    #     nopad_b_loc = torch.empty((len(requests), setting['max_req_total_len'] + 12), dtype=torch.long, device='cuda')
+    #     nopad_b_start_loc = torch.zeros(len(requests), dtype=torch.int32, device='cuda')
+    #     ## For request i, the token at position j is stored at memory location nopad_b_loc[i][j].
+    #     ## The i-th request’s tokens start at position nopad_b_start_loc[i] in the flat input_ids tensor.
+    #     # here sort the requests by adapter
+    #     # requests.sort(key=lambda x: x["adapter_dir"] if x["adapter_dir"] is not None else "")
+
+    #     adapter_dirs = []
+
+    #     for i, r in enumerate(requests):
+    #         # request id -> idx in list mapping
+    #         requests_idx_mapping[r['request_id']] = i
+
+    #         tokenized_input = r['input_id']
+
+    #         input_length = len(tokenized_input)
+    #         input_lengths.append(input_length)
+    #         all_input_ids.append(tokenized_input)
+    #         out_token_id_counts.append(collections.defaultdict(int))
+
+    #         # postprocessor
+    #         sampling_param = r["sampling_param"]
+    #         sampling_param["vocab_size"] = vocab_size
+    #         sampling_param_list.append(InferSamplingParams(**sampling_param))
+            
+    #         nopad_total_token_num += input_length
+    #         nopad_max_len_in_batch = max(nopad_max_len_in_batch, input_length)
+
+    #         adapter_dirs.append(r["adapter_dir"])
+
+    #         finetune_flags.append(1 if r.get("is_finetuning", False) else 0)
+        
+    #     finetune_mask = torch.tensor(finetune_flags, dtype=torch.uint8, device=device)
+    #     nopad_b_seq_len = torch.tensor(input_lengths, dtype=torch.int32, device="cuda")
+    #     nopad_b_start_loc[1:] = torch.cumsum(nopad_b_seq_len, dim=0, dtype=torch.int32)[0:-1]
+    #     if len(requests) > 1:
+    #         input_ids = np.concatenate(all_input_ids, dtype=np.int64)
+    #     else:
+    #         input_ids = all_input_ids[0]
+
+    #     # Create tensors on device
+    #     input_ids = torch.tensor(input_ids, dtype=torch.int64, device=device)
+
+    #     return cls(
+    #         batch_id=batch_id,
+    #         requests=requests,
+    #         requests_idx_mapping=requests_idx_mapping,
+    #         input_ids=input_ids,
+    #         input_lengths=input_lengths,
+    #         all_input_ids=all_input_ids,
+    #         nopad_total_token_num=nopad_total_token_num,
+    #         nopad_max_len_in_batch=nopad_max_len_in_batch,
+    #         nopad_b_loc=nopad_b_loc,
+    #         nopad_b_start_loc=nopad_b_start_loc,
+    #         nopad_b_seq_len=nopad_b_seq_len,
+    #         out_token_id_counts=out_token_id_counts,
+    #         sampling_param_list=sampling_param_list,
+    #         mem_manager=mem_manager,
+    #         adapter_dirs=adapter_dirs,
+    #         finetune_mask=finetune_mask 
+    #     )
     
     @torch.no_grad()
     def free_self(self):
@@ -222,6 +319,7 @@ class InferBatch:
             sampling_param_list=[self.sampling_param_list[_i] for _i in indices],
             mem_manager=self.mem_manager,
             adapter_dirs=adapter_dirs,
+            finetune_mask=None 
         )
 
 

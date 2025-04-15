@@ -13,7 +13,7 @@ from slora.utils.infer_utils import calculate_time, mark_start, mark_end
 from slora._kernels import dispatch_bgmv
 from ...server.router.mixed_req_queue import rprint
 
-class LoraUnorderedBatchInfer:
+class LoraUnorderedBatchMixed:
 
     def __init__(self, base_model, adapters, infer_adapter=None):
         self.base_model = base_model
@@ -50,19 +50,20 @@ class LoraUnorderedBatchInfer:
             b_loc, # mapping to memory pool
             b_start_loc, # the start index of each request
             b_seq_len, # the current length of each request
+            finetune_mask,
             is_prefill=True,
             use_bmm=True,
             no_lora_compute=False,
             no_lora_copy=False):
 
-        rprint("LoraUnorderedBatchInfer: batchsize", batch_size)
-        rprint("LoraUnorderedBatchInfer: total_token_num", total_token_num)
-        rprint("LoraUnorderedBatchInfer: max_len_in_batch", max_len_in_batch)
-        rprint("LoraUnorderedBatchInfer: input_ids shape", input_ids.shape)
-        rprint("LoraUnorderedBatchInfer: b_loc shape", b_loc.shape)
-        rprint("LoraUnorderedBatchInfer: b_start_loc shape", b_start_loc.shape)
-        rprint("LoraUnorderedBatchInfer: b_seq_len shape", b_seq_len.shape)
-        rprint("LoraUnorderedBatchInfer: is_prefill",is_prefill)
+        rprint("LoraUnorderedBatchMixed: batchsize", batch_size)
+        rprint("LoraUnorderedBatchMixed: total_token_num", total_token_num)
+        rprint("LoraUnorderedBatchMixed: max_len_in_batch", max_len_in_batch)
+        rprint("LoraUnorderedBatchMixed: input_ids shape", input_ids.shape)
+        rprint("LoraUnorderedBatchMixed: b_loc shape", b_loc.shape)
+        rprint("LoraUnorderedBatchMixed: b_start_loc shape", b_start_loc.shape)
+        rprint("LoraUnorderedBatchMixed: b_seq_len shape", b_seq_len.shape)
+        rprint("LoraUnorderedBatchMixed: is_prefill",is_prefill)
         # Notice that batch_lora only support decoding
         assert len(b_loc) == len(b_start_loc) == len(b_seq_len)
         self.delta = []
@@ -75,10 +76,9 @@ class LoraUnorderedBatchInfer:
             # self.b_start_loc = torch.cumsum(torch.cat([torch.tensor([0], dtype=torch.long, device="cuda"), b_seq_len[:-1]]), dim=0)
             for _ in range(3):
                 self.delta.append(torch.zeros((len(self.batch_req_bins), self.max_lora_dim), dtype=torch.float16, device="cuda"))
-
             return self._prefill(batch_size, total_token_num, max_len_in_batch,
                                  input_ids,
-                                 b_loc, b_start_loc, b_seq_len, no_lora_compute)
+                                 b_loc, b_start_loc, b_seq_len, finetune_mask, no_lora_compute)
         else:
             for _ in range(3):
                 self.delta.append(torch.zeros((len(b_seq_len), self.max_lora_dim), dtype=torch.float16, device="cuda"))
@@ -90,29 +90,41 @@ class LoraUnorderedBatchInfer:
 
     def _prefill(self, batch_size, total_token_num, max_len_in_batch,
                  input_ids,
-                 b_loc, b_start_loc, b_seq_len, no_lora_compute=False):
+                 b_loc, b_start_loc, b_seq_len, finetune_mask, no_lora_compute=False):
 
+        rprint("LoraUnorderedBatchMixed: Prefill called")
         infer_state = self.base_model.infer_state_class()
+        rprint("Infer_state class", type(infer_state))
         infer_state.is_prefill = True
         infer_state.batch_size = batch_size
         infer_state.total_token_num = total_token_num
         infer_state.max_len_in_batch = max_len_in_batch
+
         assert (input_ids.shape[0] == total_token_num)
         assert (b_loc.shape[0] == b_start_loc.shape[0] == b_seq_len.shape[0])
 
+        infer_state.finetune_mask = torch.zeros(input_ids.shape[0], dtype=torch.bool, device="cuda")
+        for i in range(batch_size):
+            if finetune_mask[i] == 1:
+                start = b_start_loc[i].item()
+                length = b_seq_len[i].item()
+                infer_state.finetune_mask[start : start + length] = True
+
         b_seq_len_numpy = b_seq_len.cpu().numpy()
-        position_ids = torch.from_numpy(np.concatenate([np.arange(0, b_seq_len_numpy[i])
-                                        for i in range(len(b_seq_len_numpy))], axis=0)).cuda()
+        position_ids = torch.from_numpy(np.concatenate([
+            np.arange(0, b_seq_len_numpy[i]) for i in range(len(b_seq_len_numpy))
+            ], axis=0)).cuda()
         infer_state.position_cos = torch.index_select(
                 self.base_model._cos_cached, 0, position_ids).view(position_ids.shape[0], -1)
         infer_state.position_sin = torch.index_select(
                 self.base_model._sin_cached, 0, position_ids).view(position_ids.shape[0], -1)
         position_ids = None
-
+        rprint("LoraUnorderedBatchMixed, positional ids initialized")
         infer_state.b_loc = b_loc
         infer_state.b_start_loc = b_start_loc
         infer_state.b_seq_len = b_seq_len
         infer_state.mem_manager = self.base_model.mem_manager
+        rprint("LoraUnorderedBatchMixed, mem_manager type", type(infer_state.mem_manager))
         infer_state.prefill_mem_index = self.base_model.mem_manager.alloc(infer_state.total_token_num)
         infer_state.prefill_key_buffer = torch.empty(
                 (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
@@ -120,8 +132,9 @@ class LoraUnorderedBatchInfer:
         infer_state.prefill_value_buffer = torch.empty(
                 (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
+        rprint("LoraUnorderedBatchMixed, mem initialized")
         init_bloc(b_loc, b_seq_len, max_len_in_batch, infer_state.prefill_mem_index)
-        
+        rprint("LoraUnorderedBatchMixed, bloc initialized")
         predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute)
         return predict_logics
 
@@ -165,17 +178,58 @@ class LoraUnorderedBatchInfer:
                                           input_ids, b_loc, b_start_loc, b_seq_len, False)
         predict_logics = self._token_forward(input_ids, infer_state, no_lora_compute, no_lora_copy)
         return predict_logics
+    
+    def _context_backward(self, finetuning_adapter):
+        if hasattr(self.base_model, "backward_engine"):
+            backward_engine = self.base_model.backward_engine
+        else:
+            return
+        logits_and_targets = backward_engine.get_logits_and_targets()
+        logit_grad = backward_engine._logit_backward(logits_and_targets)
+        rprint("Logit grad shape", logit_grad.shape)
+        grad_transformer_out = backward_engine._post_layer_backward(logit_grad, self.base_model.pre_post_weight)
+        rprint("Grad transformer out shape", grad_transformer_out.shape)
+        for i in reversed(range(self.base_model.layers_num)):
+            layer_weight = self.base_model.trans_layers_weight[i]
+            grad_transformer_out = backward_engine._lora_context_backward(i, grad_transformer_out, layer_weight, finetuning_adapter) 
+            #break
+
+
+
+    def save_finetune_activations_to_buffer(self, layer_id, input_embs, infer_state):
+        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
+        finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
+        prev_total = sum(infer_state.mem_manager.request_token_info)
+        num_new_tokens = finetune_activations.shape[0]
+        # Step 2: write activations
+        infer_state.mem_manager.finetune_activation_buffer[layer_id][prev_total : prev_total + num_new_tokens] = finetune_activations
+        # Step 3: count finetuning tokens per request using finetune_mask
+        if layer_id == 0:
+            b_start_loc = infer_state.b_start_loc
+            b_seq_len = infer_state.b_seq_len
+            batch_size = infer_state.batch_size
+            rprint("Saved finetuning hidden state shape", finetune_activations.shape)
+            for i in range(batch_size):
+                start = b_start_loc[i].item()
+                end = start + b_seq_len[i].item()
+                n_finetune_tokens = finetune_mask[start:end].sum().item()
+                infer_state.mem_manager.request_token_info.append(n_finetune_tokens)
 
 
     @final
     def _context_forward(self, input_ids, infer_state, no_lora_compute=False):
         cuda_input_ids = input_ids
+        rprint("Input ids shape", cuda_input_ids.shape)
         input_embs = self.base_model.pre_infer.context_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
         for i in range(self.base_model.layers_num):
             input_embs = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-        predict_logics = self.base_model.post_infer.token_forward(
-                input_embs, infer_state, self.base_model.pre_post_weight, return_logics=True)
+            self.save_finetune_activations_to_buffer(i, input_embs, infer_state)
+        predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
+                input_embs, infer_state, self.base_model.pre_post_weight)
+        for logits in finetune_logits_per_request:
+            rprint("\t", logits.shape)
+        infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
         return predict_logics
 
 
@@ -190,12 +244,19 @@ class LoraUnorderedBatchInfer:
                 input_embs, infer_state, self.base_model.pre_post_weight, return_logics=True)
         return predict_logics
 
+    def save_ffn_input_to_buffer(self, layer_id, input_embs, infer_state):
+        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
+        finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
+        prev_total = sum(infer_state.mem_manager.request_token_info)
+        num_new_tokens = finetune_activations.shape[0]
+        infer_state.mem_manager.ffn_input_buffer[layer_id][prev_total : prev_total + num_new_tokens] = finetune_activations
 
     @final
     def _lora_context_forward(self, layer_id, input_embs, infer_state, no_lora_compute=False):
         self._lora_context_attention(layer_id, input_embs, infer_state, no_lora_compute)
         layer_weight = self.base_model.trans_layers_weight[layer_id]
         layer_infer = self.base_model.layers_infer[layer_id]
+        self.save_ffn_input_to_buffer(layer_id, input_embs, infer_state)
         layer_infer._context_ffn(input_embs, infer_state, layer_weight)
         return input_embs
 

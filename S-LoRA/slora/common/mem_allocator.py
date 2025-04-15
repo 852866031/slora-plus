@@ -1,6 +1,8 @@
 import gc
 import torch
-
+from typing import List, Tuple
+from slora.server.router.mixed_req_queue import rprint
+import torch.nn.functional as F
 
 # TODO: will it slow down the program?
 def suffix_cumsum(tensor, dim=-1, dtype=torch.int32):
@@ -20,7 +22,10 @@ class MemoryAllocator:
         self.cache_size = cache_size
 
         self.reset_all_pool()
-
+        rprint("MemoryAllocator initialized, \n\ttot_size", tot_size)
+        rprint("\thead_dim", head_dim)
+        rprint("\tlayer_num", layer_num)
+        rprint("\tdtype", dtype)
 
     def get_memory_size(self):
         dsize = 2 if self.dtype == torch.float16 else None
@@ -232,7 +237,58 @@ class MemoryAllocator:
         self.value_buffer = [torch.empty((self.tot_size, self.head_num, self.head_dim),
                                        dtype=self.dtype, device="cuda")
                            for _ in range(self.layer_num)]
- 
+        
+        rprint("Reset total size", self.tot_size)
+        self.finetune_activation_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
+                                        dtype=self.dtype, device="cuda") 
+                            for _ in range(self.layer_num)]
+        
+        self.ffn_input_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
+                                        dtype=self.dtype, device="cuda") 
+                            for _ in range(self.layer_num)]
+        # [layer_id, slot_id, head_num * head_dim]
+        self.request_token_info = []
+        # mem_manager.request_token_info = [num_finetune_tokens_request_1, ...]
+        self.finetune_input_ids = [] #List[input_ids_tensor]
+        self.finetune_logits_per_request = []
+        
+
+    def get_finetune_activations(self, layer_id):
+        """
+        Return all saved activations for a given layer as a batch tensor.
+        """
+        if not self.request_token_info:
+            return None  # No activations saved
+
+        total_tokens = sum(self.request_token_info)
+        return self.finetune_activation_buffer[layer_id][:total_tokens]
+
+    def get_ffn_input(self, layer_id):
+        """
+        Return all saved activations for a given layer as a batch tensor.
+        """
+        if not self.request_token_info:
+            return None  # No activations saved
+
+        total_tokens = sum(self.request_token_info)
+        return self.ffn_input_buffer[layer_id][:total_tokens]
+
+    def get_concatenated_finetune_input_ids(self):
+        return torch.cat(self.finetune_input_ids, dim=0).to('cuda')
+
+    def print_finetune_activation_summary(self):
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+
+        total_layers = len(self.finetune_activation_buffer)
+        total_tokens = sum(self.request_token_info)
+
+        print(f"{GREEN}=== Finetune Activation Summary ==={RESET}")
+        print(f"{GREEN}Layers: {total_layers}{RESET}")
+        print(f"{GREEN}Total finetune tokens per layer saved: {total_tokens}{RESET}")
+        print(f"{GREEN}Total requests: {len(self.request_token_info)}{RESET}")
+        print(f"{GREEN}Buffer shape per layer: {self.finetune_activation_buffer[0].shape if total_layers > 0 else 'N/A'}{RESET}")
+        print(f"{GREEN}=== End of Summary ==={RESET}")
 
     def reset_all_cache(self):
         self.reset_all_pool()

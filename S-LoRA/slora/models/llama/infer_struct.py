@@ -8,6 +8,7 @@ class LlamaInferStateInfo(InferStateInfo):
         self.position_cos = None
         self.position_sin = None
         self.other_kv_index = None
+        self.finetuning_mask = None
     
     def init_some_extra_state(self, 
             model, 

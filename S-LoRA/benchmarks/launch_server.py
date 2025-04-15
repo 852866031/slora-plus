@@ -103,5 +103,5 @@ if __name__ == "__main__":
 
         sys.exit(0)
 
-    # print(cmd)
+    print(cmd)
     os.system(cmd)

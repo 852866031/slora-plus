@@ -4,10 +4,9 @@ import numpy as np
 from typing import List
 from ..io_struct import Batch, Req
 from slora.utils.infer_utils import  calculate_time
-
+from pprint import pprint
 
 class ReqQueue:
-
     def __init__(self, max_total_tokens, batch_max_tokens, running_max_req_size) -> None:
         self.max_total_tokens = max_total_tokens
         assert batch_max_tokens is not None
@@ -79,6 +78,8 @@ class ReqQueue:
                 break
 
         if len(can_run_list) != 0:
+            # d = can_run_list[0].to_rpc_obj()
+            # pprint(d)
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
             return new_batch

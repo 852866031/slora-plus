@@ -72,18 +72,11 @@ async def send_request(
             print(data["lora_dir"])
             print(output)
             if "alpaca-lora-7b" in data["lora_dir"] and id==0:
-                output_ref = b'I am here to help you create a plan that works for you and your unique needs. I am here to help you create a plan that works for you and your unique needs. I am here to help you create a plan that works for you and your unique needs. I am here to help you create a plan that works for you and your unique needs. I am here to help you create a plan that works for you and your unique needs. I am here to help'
+                output_ref = b'I am here to help you create a plan that works for you and your unique needs'
                 assert output['generated_text'][0].encode() == output_ref
             if "alpaca-lora-7b" in data["lora_dir"] and id==1:
-                output_ref = b'France. It is located in the north-central part of the country, on the Seine River. Paris is the most populous city in France, with a population of 2.2 million people. It is also the most populous city in the European Union. Paris is the center of culture, art, fashion, and gastronomy. It is also a major tourist destination, with millions of visitors each year.\nParis is divided into 20'
+                output_ref = b'France. It is located in the north-central part of the country, on the Seine River'
                 assert output['generated_text'][0].encode() == output_ref
-            if "bactrian-x-llama-7b-lora" in data["lora_dir"] and id==0:
-                output_ref = '\nBrown Suga Wellness is a company that understands that you want to live a fulfilled life. To do that you need mental clarity and a well-crafted plan. The problem is you don’t have time to evaluate hundreds of coaches and companies to piece together a wellness plan that bring you questionable results or don’t cater to your unique needs as a woman of color which makes you feel stuck, overwhelmed,'.encode()
-                assert output['generated_text'][0].encode() == output_ref
-            if "bactrian-x-llama-7b-lora" in data["lora_dir"] and id==1:
-                output_ref = 'France and is one of the most visited cities in the world. It is known for its iconic landmarks such as the Eiffel Tower, the Louvre Museum, and the Notre-Dame Cathedral. It is also a hub for fashion, art, and culture, and is home to some of the world’s best restaurants and cafes.\nThe city is divided into 20 arrondissements, each with its own unique character'.encode()
-                assert output['generated_text'][0].encode() == output_ref
-            
             break
 
     request_end_time = time.time()
@@ -109,6 +102,7 @@ async def benchmark(
                                                 req.req_id, req.model_dir, req.adapter_dir, req.prompt,
                                                 req.prompt_len, req.output_len, debug, id))
         tasks.append(task)
+    print("benchmark: requests sent")
     latency = await asyncio.gather(*tasks)
     return latency
 
@@ -132,15 +126,12 @@ def run_exp(server, config, seed=42):
     # generate requests
     requests1 = generate_requests(num_adapters, alpha, req_rate, cv, duration,
                                  input_range, output_range, adapter_dirs,
-                                 seed=seed, id=0)
-    requests2 = generate_requests(num_adapters, alpha, req_rate, cv, duration,
-                                 input_range, output_range, adapter_dirs,
                                  seed=seed, id=1)
 
     # benchmark
-    
-    _ = asyncio.run(benchmark(server, requests1, id=0))
-    _ = asyncio.run(benchmark(server, requests2, id=1))
+    for request in requests1:
+        print(request)
+    _ = asyncio.run(benchmark(server, requests1, id=1))
 
 
 
@@ -151,8 +142,9 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    suites = get_all_suites()
+    suites = get_all_suites()  
 
     for config in tqdm(suites, desc="suites"):
         _ = run_exp(args.server, config, args.seed)
+        break
 

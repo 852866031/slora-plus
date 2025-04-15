@@ -1,7 +1,8 @@
 import gc
 import torch
 import torch.nn as nn
-
+from slora.server.router.mixed_req_queue import rprint
+from pprint import pprint
 
 class LoraLayerWeight:
     def __init__(self, layer_num, tp_rank, world_size, lora_config, network_config, data_type=torch.float16,
@@ -97,6 +98,7 @@ class LoraLayerWeight:
 
     def load_hf_weights(self, weights, swap=False, dummy=False):
         if dummy:
+            rprint("is dummy")
             self.load_dummy_weights(swap)
             return
 
@@ -110,7 +112,6 @@ class LoraLayerWeight:
         prefix = list(weights.keys())[0]
         prefix = prefix[:prefix.find("layers")] + f"layers.{self.layer_num_}.self_attn"
         tp_idx = (split_n_embed * self.tp_rank_, split_n_embed * (self.tp_rank_ + 1))
-
         # q_proj A, B
         if f"{prefix}.q_proj.lora_A.weight" in weights:
             self.q_lora_A = weights[f"{prefix}.q_proj.lora_A.weight"][:, tp_idx[0]:tp_idx[1]]

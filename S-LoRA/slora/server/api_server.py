@@ -66,6 +66,7 @@ app = FastAPI()
 
 isFirst = True
 
+from pprint import pprint
 
 def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse:
     return JSONResponse({"message": message}, status_code=status_code.value)
@@ -78,6 +79,7 @@ def healthcheck():
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
+    print("api_server.py: generate called")
     global isFirst
     if isFirst:
         loop = asyncio.get_event_loop()
@@ -85,6 +87,7 @@ async def generate(request: Request) -> Response:
         isFirst = False
 
     request_dict = await request.json()
+    pprint(request_dict)
     adapter_dir = request_dict["lora_dir"] if "lora_dir" in request_dict else None
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
@@ -134,9 +137,11 @@ async def generate_stream(request: Request) -> Response:
         isFirst = False
 
     request_dict = await request.json()
+    print(request_dict)
     adapter_dir = request_dict["lora_dir"] if "lora_dir" in request_dict else None
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
+    pprint(sample_params_dict)
     return_details = sample_params_dict.pop("return_details", False)
     sampling_params = SamplingParams(**sample_params_dict)
     sampling_params.verify()
@@ -364,7 +369,7 @@ def main():
     parser.add_argument("--pool-size-lora", type=int, default=0)
     parser.add_argument("--prefetch", action="store_true")
     parser.add_argument("--prefetch-size", type=int, default=0)
-    parser.add_argument("--scheduler", type=str, default="slora")
+    parser.add_argument("--scheduler", type=str, default="slora_plus")
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--batch-num-adapters", type=int, default=None)
     parser.add_argument("--enable-abort", action="store_true")
@@ -378,9 +383,13 @@ def main():
     parser.add_argument("--bmm", action="store_true")
     parser.add_argument("--no-lora", action="store_true")
     ''' end of slora arguments '''
+    ''' finetune arguments '''
+    parser.add_argument("--finetuning_data_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetune_test.csv")
+    parser.add_argument("--finetuning_prepare_size", type=int, default=8)
+    parser.add_argument("--finetuning_lora_path", type=str, default="dummy_finetune_lora")
+    ''' end of finetune arguments '''
 
     args = parser.parse_args()
-
     assert args.max_req_input_len < args.max_req_total_len
     setting["max_req_total_len"] = args.max_req_total_len
     setting["nccl_port"] = args.nccl_port

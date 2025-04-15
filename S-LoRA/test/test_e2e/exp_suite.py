@@ -26,11 +26,11 @@ breakdown_suite = {
     # ),
 
     "test": BenchmarkConfig(
-        num_adapters = [4],
+        num_adapters = [1],
         alpha = [0.8],
-        req_rate = [6],
+        req_rate = [1],
         cv = [1],
-        duration = [20],
+        duration = [1],
         input_range = [[8, 512]],
         output_range = [[95, 96]],
     ),

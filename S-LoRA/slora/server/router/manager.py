@@ -13,6 +13,7 @@ from ..sampling_params import SamplingParams
 from ..io_struct import Req, Batch, BatchAbortReq
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
+from .mixed_req_queue import Mixed_ReqQueue
 from rpyc.utils.classic import obtain
 from slora.utils.infer_utils import calculate_time
 from ..io_struct import BatchTokenIdOut, AbortReq
@@ -26,7 +27,7 @@ from slora.server.router.cluster_req_queue import ClusterReqQueue
 from slora.server.router.vtc_req_queue import VTCReqQueue
 from slora.server.router.pets_req_queue import PETSReqQueue
 from slora.server.router.peft_req_queue import PEFTReqQueue
-
+from .mixed_req_queue import rprint
 
 def get_scheduler(input_params, adapter_dirs):
     if input_params.scheduler == "vtc_fair":
@@ -47,12 +48,15 @@ def get_scheduler(input_params, adapter_dirs):
     elif input_params.scheduler == "slora":
         return ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                         input_params.running_max_req_size)
+    elif input_params.scheduler == "slora_plus":
+        return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
+                              input_params.running_max_req_size, input_params.finetune_params)
     else:
         raise Exception("unrecognized scheduler")
 
-
+from pprint import pprint
+back_flag = True
 class RouterManager:
-
     def __init__(self, weightdir, adapter_dirs, load_way, world_size, eos_id,
                  router_port, detokenization_port, model_rpc_ports,
                  input_params,
@@ -63,21 +67,24 @@ class RouterManager:
         self.load_way = load_way
         self.mode = mode
         self.input_params = input_params
+        self.finetune_params = input_params.finetune_params
 
         if self.input_params.prefetch:
             self.prefetch_stream = torch.cuda.Stream()
         else:
             self.prefetch_stream = None
 
+        pprint(input_params.__dict__)
+        pprint(input_params.finetune_params.__dict__)
+        self.req_queue = get_scheduler(input_params, adapter_dirs)
+        rprint("router: req_queue created, type", input_params.scheduler)
         # get adapter rank
         self.lora_ranks = {}
         for lora_dir in adapter_dirs:
             config, _ = get_lora_config(lora_dir, input_params.dummy)
             self.lora_ranks[lora_dir] = config["r"]
-        self.lora_ranks[None] = 0
-
-        self.req_queue = get_scheduler(input_params, adapter_dirs)
-
+        self.lora_ranks[input_params.finetune_params.finetuning_lora_path] = get_lora_config(adapter_dirs[-1], input_params.dummy)[0]["r"]
+        self.lora_ranks[None] = 0       
         self.running_batch: Batch = None
         self.eos_id = eos_id
         self.has_wait_tokens = 0
@@ -92,6 +99,7 @@ class RouterManager:
         self.model_rpc_ports = model_rpc_ports
 
         self.stats_tool = Stats(log_stats, log_stats_interval)
+        self.finished_finetune_list = []
 
 
     async def wait_to_model_ready(self):
@@ -113,6 +121,7 @@ class RouterManager:
                     self.mode,
                     input_params=self.input_params,
                     prefetch_stream=self.prefetch_stream,
+                    finetuning_lora_path=self.finetune_params.finetuning_lora_path,
                 ))
 
         await asyncio.gather(*init_model_ret)
@@ -143,6 +152,7 @@ class RouterManager:
         sampling_params: SamplingParams,
         request_id: str
     ):
+        rprint("router: add_req called")
         req = Req(adapter_dir, request_id, prompt_ids, sampling_params)
         self.req_queue.append(req)
         self.send_to_detokenization.send_pyobj(req.to_req_detokenization_state())
@@ -167,7 +177,7 @@ class RouterManager:
             counter_count += 1
             if self.running_batch is not None:
                 if counter_count % 50 == 0:
-                    print("current batch size:", len(self.running_batch.reqs), "token used ratio:", self.running_batch.calcu_used_tokens() / self.input_params.max_total_token_num)
+                    rprint("\ncurrent batch size:", len(self.running_batch.reqs), "token used ratio:", self.running_batch.calcu_used_tokens() / self.input_params.max_total_token_num)
                     pass
                 self.stats_tool.print_stats()
                 
@@ -179,23 +189,32 @@ class RouterManager:
         事件处理循环
         """
         # 删除所有已经 finished 的 req
+        global back_flag
         if self.running_batch is None:
             new_batch = self.req_queue.generate_new_batch(self.running_batch, self.lora_ranks)
+            # Just for hardcoded test, remove later from here
+            if new_batch is not None:
+                for req in new_batch.reqs:
+                    if req.needs_to_notify_detokenize:
+                        self.send_to_detokenization.send_pyobj(req.to_req_detokenization_state())
+            #end here
             if self.input_params.enable_abort and len(self.req_queue.abort_req_list) > 0:
                 self.send_to_detokenization.send_pyobj(BatchAbortReq(self.req_queue.abort_req_list))
                 self.req_queue.reset_abort_list()
             if new_batch is not None:
+                rprint("router: new_batch formed")
                 self.stats_tool.count_prompt_tokens(new_batch)
                 self.running_batch = new_batch
 
                 if not self.input_params.no_lora:
                     # load adapters
+                    rprint("router: merging lora")
                     ret = []
                     for tp_rank in range(self.world_size):
                         ret.append(self.model_rpcs[tp_rank].load_adapters(new_batch.adapter_dirs))
+                    rprint("router: load_adapters called")
                     await asyncio.gather(*ret)
 
-                
                 # merge adapter to base model
                 if self.input_params.scheduler == "peft":
                     torch.cuda.synchronize()
@@ -206,9 +225,12 @@ class RouterManager:
             
                 torch.cuda.synchronize()
                 await self._prefill_batch(self.running_batch)
+                rprint("router: calling filter running batch")
                 await self._filter_runing_batch()
                 self.has_wait_tokens = 0
-            return
+            elif back_flag and len(self.finished_finetune_list)==7:
+                back_flag = await self._start_back_batch()
+            return        
 
         if self.has_wait_tokens < self.max_wait_tokens:
             self.stats_tool.count_output_tokens(self.running_batch)
@@ -254,12 +276,20 @@ class RouterManager:
         
 
     async def _init_batch(self, batch: Batch):
+        rprint("router: calling rpc to init batch")
         reqs = [r.to_rpc_obj() for r in batch.reqs]
         rets = [self.model_rpcs[tp_rank].init_batch(batch.batch_id, reqs) for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
         return
+        
+    async def _start_back_batch(self):
+        rprint("router: start back batch")
+        rets = [self.model_rpcs[tp_rank].back_batch(len(self.finished_finetune_list)) for tp_rank in range(self.world_size)]
+        await asyncio.gather(*rets)
+        return False
 
     async def _prefill_batch(self, batch, minibatch=True):
+        rprint("router: prefill batch called")
         await self._init_batch(batch)
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -268,6 +298,21 @@ class RouterManager:
         else:
             req_to_out_token_id = ans[0]
         self._add_token_id_to_req(batch, req_to_out_token_id)
+        
+        rprint("router: force finetuning tokens to be eos")
+        count = 0
+        for req in batch.reqs:
+            if getattr(req, 'is_finetuning', False):
+                req_id = req.request_id
+                if req_id in req_to_out_token_id:
+                    _, metadata = req_to_out_token_id[req_id]
+                    req_to_out_token_id[req_id] = (self.eos_id, {'id': self.eos_id, 'logprob': metadata['logprob']})
+                    req.output_ids.append(self.eos_id)
+                    count +=1
+                    self.finished_finetune_list.append(req_id)
+
+        rprint("router: # finetuning tokens marked as finished", count)
+        rprint("router: # total requests in batch", len(batch.reqs))
         has_new_finished_req = batch.mark_finished_req(self.eos_id)
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
         await self._handle_finish_req(batch, has_new_finished_req, minibatch=True)
@@ -349,14 +394,17 @@ class RouterManager:
         batch_out = BatchTokenIdOut()
         for req_id, (new_token_id, new_gen_metadata) in req_ans.items():
             req = batch.id_to_reqs[req_id]
+            if req.is_finetuning:
+                continue
             batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.has_generate_finished, req.aborted))
-    
+        rprint("router: outbatch size", len(batch_out.reqs_infs))
         self.send_to_detokenization.send_pyobj(batch_out)
         return
 
     async def loop_for_netio_req(self):
         while True:
             recv_req = await self.recv_from_httpserver.recv_pyobj()
+            print("router: request received from httpserver")
             if isinstance(recv_req, tuple) and len(recv_req) == 4:
                 adapter_dir, prompt_ids, sampling_params, request_id = recv_req
                 self.add_req(adapter_dir, prompt_ids, sampling_params, request_id)
@@ -400,6 +448,12 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                bmm=args.bmm,
                                no_lora=args.no_lora,
                                fair_weights=args.fair_weights,
+                               model_weightdir=args.model_dir,
+                               tokenizer_mode=args.tokenizer_mode,
+                               trust_remote_code=args.trust_remote_code,
+                               finetuning_data_path=args.finetuning_data_path,
+                               finetuning_prepare_size=args.finetuning_prepare_size,
+                               finetuning_lora_path=args.finetuning_lora_path,
                               )
 
     try:

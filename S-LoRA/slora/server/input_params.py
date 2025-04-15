@@ -17,6 +17,20 @@ class ServeParams:
         return ret
 
 
+class FinetuneParams:
+    def __init__(self, model_weightdir: str,
+                 tokenizor_mode: str,
+                 trust_remote_code: bool,
+                 finetuning_data_path: str,
+                 finetuning_prepare_size: int,
+                 finetuning_lora_path: str):
+        self.model_weightdir = model_weightdir
+        self.tokenizor_mode = tokenizor_mode
+        self.trust_remote_code = trust_remote_code
+        self.finetuning_data_path = finetuning_data_path
+        self.finetuning_prepare_size = finetuning_prepare_size
+        self.finetuning_lora_path = finetuning_lora_path
+
 class InputParams:
 
     def __init__(
@@ -49,6 +63,13 @@ class InputParams:
         no_lora,
         # fairness
         fair_weights,
+        # finetuning parameters
+        model_weightdir,
+        tokenizer_mode,
+        trust_remote_code=True,
+        finetuning_data_path="",
+        finetuning_prepare_size=0,
+        finetuning_lora_path="",
     ) -> None:
         self.max_req_total_len = max_req_total_len
         self.max_total_token_num = max_total_token_num
@@ -76,6 +97,13 @@ class InputParams:
         self.bmm = bmm
         self.no_lora = no_lora
         
-        self.fair_weights = fair_weights
+        self.finetune_params = FinetuneParams(
+            model_weightdir=model_weightdir,
+            tokenizor_mode=tokenizer_mode,
+            trust_remote_code=trust_remote_code,
+            finetuning_data_path=finetuning_data_path,
+            finetuning_prepare_size=finetuning_prepare_size,
+            finetuning_lora_path=finetuning_lora_path
+        )
         return
  

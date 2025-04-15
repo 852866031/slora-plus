@@ -120,7 +120,7 @@ def train_model_manual(dataloader, vocab_size, num_epochs=5, learning_rate=1e-4,
     print("Training complete.")
     return model, loss_list
 
-def plot_training_loss(loss_list, title="Training Loss Over Time"):
+def plot_training_loss(loss_list, filename, title="Training Loss Over Time"):
     losses = np.array(loss_list)
     plt.figure(figsize=(10, 6))
     plt.xticks(range(1, len(losses)+1, 1))
@@ -130,9 +130,9 @@ def plot_training_loss(loss_list, title="Training Loss Over Time"):
     plt.ylabel('Loss')
     plt.grid(True)
     plt.legend()
-    plt.show()
+    plt.savefig("plot.png") 
                     
-num_samples = 32*10
+num_samples = 32*100
 batch_size=32
 dataset = get_sms_spam_dataset(num_samples)
 tokenizer = train_custom_tokenizer(dataset, vocab_size=5000)  # Train custom tokenizer
@@ -147,5 +147,5 @@ start = time.time()
 model, loss_list_1 = train_model(dataloader, vocab_size)
 print(f"Torch Training done in {time.time() - start:.4f} seconds")
 print(loss_list)
-plot_training_loss(loss_list)
-plot_training_loss(loss_list_1)
+plot_training_loss(loss_list, "manual_plot.png")
+plot_training_loss(loss_list_1, "torch_plot.png")

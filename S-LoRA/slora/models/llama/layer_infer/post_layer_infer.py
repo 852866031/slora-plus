@@ -55,4 +55,38 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         else:
             ans_logics = gather_data.permute(1, 0).float()
             gather_data = None
-            return ans_logics
+            return ans_logics   
+    
+    def token_forward_with_finetune_outputs(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
+        batch_size = infer_state.batch_size
+        embed_dim = self.embed_dim_
+
+        token_mask = infer_state.finetune_mask  # [total_token_num], bool tensor
+
+        # Project all finetune token embeddings
+        finetune_input = input_embdings[token_mask]                          # [N, D]
+        finetune_input = self._norm(finetune_input, infer_state, layer_weight)  # [N, D]
+        finetune_logits = torch.mm(finetune_input, layer_weight.lm_head_weight_.T)  # [N, vocab_size]
+
+        # Compute last-token logits for all requests
+        last_input = torch.empty((batch_size, embed_dim), device=input_embdings.device, dtype=torch.float16)
+        if infer_state.is_prefill:
+            last_index = torch.cumsum(infer_state.b_seq_len, dim=0, dtype=torch.long) - 1
+            last_input[:, :] = input_embdings[last_index, :]
+        else:
+            last_input[:, :] = input_embdings[-batch_size:, :]
+
+        last_input = self._norm(last_input, infer_state, layer_weight)  # [B, D]
+        last_token_logits = torch.mm(last_input, layer_weight.lm_head_weight_.T)  # [B, vocab_size]
+
+        # Split finetune logits by request using start/length info
+        finetune_logits_per_request = []
+        token_idx = 0
+        for i in range(batch_size):
+            start = infer_state.b_start_loc[i].item()
+            length = infer_state.b_seq_len[i].item()
+            if torch.any(token_mask[start : start + length]):
+                finetune_logits_per_request.append(finetune_logits[token_idx : token_idx + length])
+                token_idx += length
+
+        return last_token_logits, finetune_logits_per_request

@@ -2,9 +2,8 @@ from .sampling_params import SamplingParams
 from typing import Dict, List, Optional, Tuple
 import asyncio
 
-
 class Req:
-    def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams):
+    def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams, is_finetuning=False):
         self.adapter_dir = adapter_dir
         self.request_id = request_id
         self.prompt_ids = prompt_ids
@@ -16,12 +15,16 @@ class Req:
         self.has_generate_finished = False
         self.aborted = False
 
+        self.is_finetuning = is_finetuning
+        self.needs_to_notify_detokenize = False
+        
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,
                 "request_id": self.request_id,
                 "input_id": self.prompt_ids,
                 "output_len": self.max_output_len,
-                "sampling_param": self.sample_params.to_dict() }
+                "sampling_param": self.sample_params.to_dict(),
+                "is_finetuning": self.is_finetuning }
 
     def to_req_detokenization_state(self):
         out = ReqDetokenizationState(self.request_id, self.prompt_ids, self.max_output_len, self.sample_params.ignore_eos)
@@ -30,6 +33,8 @@ class Req:
         return out
     
     def stop_sequences_matched(self):
+        if self.sample_params.stop_sequences == None: #TODO: remove this, just for model can run
+            return True
         for stop_token_ids in self.sample_params.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:
@@ -93,17 +98,24 @@ class Batch:
         return tokens
 
     def mark_finished_req(self, eos_id):
+        from .router.mixed_req_queue import rprint
         has_new_finish = False
+        count = 0
         for req in self.reqs:
             if req.stop_sequences_matched():
                 req.has_generate_finished = True
                 has_new_finish = True
-            if req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
+                count += 1
+            elif req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
                 req.has_generate_finished = True
                 has_new_finish = True
-            if len(req.output_ids) >= req.max_output_len or req.aborted:
+                count += 1
+            elif len(req.output_ids) >= req.max_output_len or req.aborted:
                 req.has_generate_finished = True
                 has_new_finish = True
+                count += 1
+        
+        rprint("#Finished reqs:", count)   
         return has_new_finish
 
     def filter_finished(self):
