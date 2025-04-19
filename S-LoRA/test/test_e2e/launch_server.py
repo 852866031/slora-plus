@@ -28,6 +28,9 @@ if __name__ == "__main__":
     cmd += f" --tokenizer_mode auto"
     cmd += f" --pool-size-lora {args.pool_size_lora}"
 
+    finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
+    cmd += f" --finetuning_lora_path {finetuning_lora_dir}"
+
     num_iter = args.num_adapter // len(adapter_dirs) + 1
     for i in range(num_iter):
         for adapter_dir in adapter_dirs:

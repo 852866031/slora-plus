@@ -39,6 +39,7 @@ class InferAdapter:
         )
 
 
+
     # @calculate_time(show=True, min_cost_ms=0)
     def load_lora_A(self, adapter, loc, prefetch=False):
         r = adapter.r
@@ -61,7 +62,7 @@ class InferAdapter:
             #self.mem_manager.key_buffer[i][loc[r * 2:r * 3]] = w_combined[2].T.reshape(r, head_num, head_dim)
             #self.mem_manager.key_buffer[i][loc[r * 3:r * 4]] = w_combined[3].T.reshape(r, head_num, head_dim)
 
-            adapter.layers[i].offload_from_gpu()
+            adapter.layers[i].offload_from_gpu(requires_update=adapter.is_finetuning_adapter)
 
 
     # @calculate_time(show=True, min_cost_ms=0)
@@ -86,7 +87,7 @@ class InferAdapter:
             #self.mem_manager.value_buffer[i][loc[r * 2:r * 3]] = w_combined[6].reshape(r, head_num, head_dim)
             #self.mem_manager.value_buffer[i][loc[r * 3:r * 4]] = w_combined[7].reshape(r, head_num, head_dim)
 
-            adapter.layers[i].offload_from_gpu()
+            adapter.layers[i].offload_from_gpu(requires_update=adapter.is_finetuning_adapter)
 
     # @calculate_time(show=True, min_cost_ms=0)
     def load_adapters(self, adapters, prefetch=False):
@@ -203,11 +204,13 @@ class InferAdapter:
         left_ind = []
         new_adapter_dirs = []
         self.idx_map = {}
+        removed_adapter_dirs = []
         for i, adapter_dir in enumerate(self.adapter_dirs):
             if (adapter_dir not in reserve_adapter_dirs and
                 (adapter_dir not in self.prefetch_tag or
                  self.prefetch_tag[adapter_dir] != self.cur_tag)):
                 remove_ind.append(self.a_loc[self.a_start[i]:self.a_start[i] + self.a_len[i]])
+                removed_adapter_dirs.append(adapter_dir)
             else:
                 left_ind.append(i)
                 self.idx_map[adapter_dir] = len(new_adapter_dirs)

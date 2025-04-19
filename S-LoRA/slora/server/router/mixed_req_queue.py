@@ -25,13 +25,14 @@ def get_finetuning_sampling_params() -> SamplingParams:
         top_p=1.0,
         top_k=1,
         ignore_eos=False,     # Typically handle EOS in training
-        max_new_tokens=4,   # Arbitrary placeholder
+        max_new_tokens=1,   # Arbitrary placeholder
         stop_sequences=[]
     )
     return sp
 
 
 def rprint(*args):
+    return
     RED = "\033[91m"
     RESET = "\033[0m"
     print(RED + " ".join(str(arg) for arg in args) + RESET)
@@ -57,7 +58,8 @@ class Mixed_ReqQueue:
         self.finetuning_data_path = finetune_params.finetuning_data_path
         self.finetuning_prepare_size = finetune_params.finetuning_prepare_size
         self.finetuning_lora_path = finetune_params.finetuning_lora_path  
-        self.finetuning_pool_size = 8
+        self.finetuning_pool_size = 16
+        self.repeat_file = 100
     
         try: 
             self.tokenizer = get_tokenizer(finetune_params.model_weightdir, 
@@ -84,6 +86,7 @@ class Mixed_ReqQueue:
     def prepare_finetuning_requests(self):
         loaded_count = 0
         try:
+            finetune_req_buffer = []
             with open(self.finetuning_data_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     text = line.strip()
@@ -99,15 +102,29 @@ class Mixed_ReqQueue:
                         request_id=uuid.uuid4().hex,     # Unique request ID
                         prompt_ids=prompt_ids,
                         sample_params=get_finetuning_sampling_params(),
-                        is_finetuning=True               # Mark this request as fine-tuning
+                        is_finetuning=True,               # Mark this request as fine-tuning
+                        text=text,  # Store the original text for reference
                     )
                     
                     # Append to our fine-tuning queue
-                    self.finetuning_req_list.append(new_req)
+                    finetune_req_buffer.append(new_req)
 
                     loaded_count += 1
                     if loaded_count >= self.finetuning_prepare_size:
                         break
+                
+                for i in range(self.repeat_file):
+                    for req in finetune_req_buffer:
+                        new_req = Req(
+                            adapter_dir=self.finetuning_lora_path,                
+                            request_id=uuid.uuid4().hex,     # Unique request ID
+                            prompt_ids=req.prompt_ids[:],
+                            sample_params=get_finetuning_sampling_params(),
+                            is_finetuning=True,               # Mark this request as fine-tuning
+                            text=req.text,
+                        )
+                        self.finetuning_req_list.append(new_req)
+                        loaded_count += 1
                 print(f"Loaded {loaded_count} fine-tuning requests.")
         except FileNotFoundError:
             print(f"Could not find finetuning_data_path: {self.finetuning_data_path}")
@@ -200,24 +217,24 @@ class Mixed_ReqQueue:
             aborted_count = 0
             if(len(self.finetuning_req_list)>0):
                 rprint("Adding finetuning requests, #available requests in list", len(self.finetuning_req_list))
-                rprint("Adding finetuning requests, batch_max_tokens", self.batch_max_tokens)
             for index, req in enumerate(self.finetuning_req_list):
+                if len(can_run_list) >= self.finetuning_pool_size:
+                    break
                 if req.aborted:
                     aborted_count += 1
                     continue
                 if ((new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
-                    if index == len(self.finetuning_req_list) - 1:
-                        req.is_finetuning = False
-                        req.needs_to_notify_detokenize = True
                     can_run_list.append(req)
                     new_batch_total_tokens += req.input_len
                 else:
                     break
-            
+
             if len(can_run_list) > 0:
+                can_run_list[-1].is_finetuning = False
+                can_run_list[-1].needs_to_notify_detokenize = True
+                print("Inference request text:", can_run_list[-1].text)
                 new_batch = Batch(uuid.uuid4().hex, can_run_list)
                 self.finetuning_req_list = self.finetuning_req_list[len(can_run_list) + aborted_count:]
-                rprint("#Remaining requests in finetuning list", len(self.finetuning_req_list))
                 return new_batch
             else:
                 return None

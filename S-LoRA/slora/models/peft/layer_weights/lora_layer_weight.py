@@ -227,7 +227,6 @@ class LoraLayerWeight:
 
         return
 
-
     def load_to_gpu(self, prefetch=False, bmm=False):
         if not bmm:
             if self.w_combined is None:
@@ -235,6 +234,8 @@ class LoraLayerWeight:
                     self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
                 else:
                     self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
+            else:
+                self.w_combined = self.w_combined.to("cuda", non_blocking=True)
         else:
             if self.q_lora_A is None:
                 self.q_lora_A = self.q_lora_A_home.to("cuda", non_blocking=True)
@@ -247,16 +248,56 @@ class LoraLayerWeight:
                 self.o_lora_B = self.o_lora_B_home.to("cuda", non_blocking=True)
  
 
-    def offload_from_gpu(self):
+    def refresh_combined_weights(self):
+        rank = self.lora_config["r"]
+        num_head = self.network_config["num_attention_heads"]
+
+        # Safety check
+        for name in [
+            "q_lora_A", "k_lora_A", "v_lora_A", "o_lora_A",
+            "q_lora_B", "k_lora_B", "v_lora_B", "o_lora_B"
+        ]:
+            param = getattr(self, name)
+            if param is None:
+                raise ValueError(f"[refresh_combined_weights] {name} is not loaded onto GPU")
+
+        # Build combined tensor
+        combined = torch.concat([
+            self.q_lora_A.T.reshape(rank, num_head, -1),
+            self.k_lora_A.T.reshape(rank, num_head, -1),
+            self.v_lora_A.T.reshape(rank, num_head, -1),
+            self.o_lora_A.T.reshape(rank, num_head, -1),
+            self.q_lora_B.T.reshape(rank, num_head, -1),
+            self.k_lora_B.T.reshape(rank, num_head, -1),
+            self.v_lora_B.T.reshape(rank, num_head, -1),
+            self.o_lora_B.T.reshape(rank, num_head, -1),
+        ], dim=0)  # shape: [8 * r, num_head, hidden_dim_per_head]
+
+        self.w_combined = combined.reshape(2, 4 * rank, num_head, -1).contiguous()
+        return self.w_combined
+
+    def offload_from_gpu(self, requires_update=False):
         if self.no_lora_swap:
             return
-        #assert self.q_lora_A is not None
-        self.w_combined = None
-        self.q_lora_A = None
-        self.q_lora_B = None
-        self.k_lora_A = None
-        self.k_lora_B = None
-        self.v_lora_A = None
-        self.v_lora_B = None
-        self.o_lora_A = None
-        self.o_lora_B = None
+        if requires_update and self.q_lora_A is not None:
+            self.refresh_combined_weights()
+            self.w_combined_home = self.w_combined.to("cpu", non_blocking=True).pin_memory()
+            self.q_lora_A_home = self.q_lora_A.to("cpu", non_blocking=True).pin_memory()
+            self.q_lora_B_home = self.q_lora_B.to("cpu", non_blocking=True).pin_memory()
+            self.k_lora_A_home = self.k_lora_A.to("cpu", non_blocking=True).pin_memory()
+            self.k_lora_B_home = self.k_lora_B.to("cpu", non_blocking=True).pin_memory()
+            self.v_lora_A_home = self.v_lora_A.to("cpu", non_blocking=True).pin_memory()
+            self.v_lora_B_home = self.v_lora_B.to("cpu", non_blocking=True).pin_memory()
+            self.o_lora_A_home = self.o_lora_A.to("cpu", non_blocking=True).pin_memory()
+            self.o_lora_B_home = self.o_lora_B.to("cpu", non_blocking=True).pin_memory()
+        else:
+            #assert self.q_lora_A is not None
+            self.w_combined = None
+            self.q_lora_A = None
+            self.q_lora_B = None
+            self.k_lora_A = None
+            self.k_lora_B = None
+            self.v_lora_A = None
+            self.v_lora_B = None
+            self.o_lora_A = None
+            self.o_lora_B = None

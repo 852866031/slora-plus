@@ -64,7 +64,7 @@ class DeTokenizationManager:
                             new_text = ''
                         else:
                             new_text = out_text[len(req_out.output_str):]
-                            print(f"detoken process has new_text: {new_text}")
+                            print(f"detoken process has new_text: \033[92m{new_text}\033[0m")
                             req_out.output_str = out_text
                         new_batch_str_out.reqs_infs.append((req_id, new_text, new_gen_metadata, True if abort else finished, abort))
                         if finished or abort:
@@ -72,7 +72,6 @@ class DeTokenizationManager:
                                 del self.req_id_to_out[req_id]
                             except:
                                 pass
-                    print("DetokenizationManager: send to httpserver")
                     self.send_to_httpserver.send_pyobj(new_batch_str_out)
             except Exception as e:
                 print(f"detoken process has exception {str(e)}")

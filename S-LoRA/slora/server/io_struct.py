@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 import asyncio
 
 class Req:
-    def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams, is_finetuning=False):
+    def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams, is_finetuning=False, text=None):
         self.adapter_dir = adapter_dir
         self.request_id = request_id
         self.prompt_ids = prompt_ids
@@ -17,6 +17,7 @@ class Req:
 
         self.is_finetuning = is_finetuning
         self.needs_to_notify_detokenize = False
+        self.text = text
         
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,
@@ -76,8 +77,13 @@ class Batch:
         self.id_to_reqs = {req.request_id: req for req in reqs}
 
         self.adapter_dirs = set()
+        self.finetuning_adapter_dir = None
         for req in reqs:
             self.adapter_dirs.add(req.adapter_dir)
+            if req.is_finetuning:
+                if self.finetuning_adapter_dir!= None and self.finetuning_adapter_dir != req.adapter_dir:
+                    raise ValueError("Batch contains multiple finetuning adapters.")
+                self.finetuning_adapter_dir = req.adapter_dir
 
     def input_tokens(self):
         batch_input_tokens = 0
@@ -114,8 +120,11 @@ class Batch:
                 req.has_generate_finished = True
                 has_new_finish = True
                 count += 1
-        
-        rprint("#Finished reqs:", count)   
+            elif req.is_finetuning:
+                req.has_generate_finished = True
+                has_new_finish = True
+                count += 1
+         
         return has_new_finish
 
     def filter_finished(self):

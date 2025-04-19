@@ -251,6 +251,11 @@ class MemoryAllocator:
         # mem_manager.request_token_info = [num_finetune_tokens_request_1, ...]
         self.finetune_input_ids = [] #List[input_ids_tensor]
         self.finetune_logits_per_request = []
+    
+    def reset_activation_pool(self):
+        self.request_token_info = []
+        self.finetune_input_ids = [] #List[input_ids_tensor]
+        self.finetune_logits_per_request = []
         
 
     def get_finetune_activations(self, layer_id):

@@ -385,8 +385,8 @@ def main():
     ''' end of slora arguments '''
     ''' finetune arguments '''
     parser.add_argument("--finetuning_data_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetune_test.csv")
-    parser.add_argument("--finetuning_prepare_size", type=int, default=8)
-    parser.add_argument("--finetuning_lora_path", type=str, default="dummy_finetune_lora")
+    parser.add_argument("--finetuning_prepare_size", type=int, default=9999999999999999)
+    parser.add_argument("--finetuning_lora_path", type=str, default="")
     ''' end of finetune arguments '''
 
     args = parser.parse_args()

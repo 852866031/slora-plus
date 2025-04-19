@@ -33,6 +33,7 @@ from .post_process import sample
 
 from ..mixed_req_queue import rprint
 from pprint import pprint
+from slora.models.lora_adam_optimizer import LoRAAdamOptimizer
 
 class ModelRpcServer(rpyc.Service):
 
@@ -54,12 +55,15 @@ class ModelRpcServer(rpyc.Service):
         self.prefetch_stream = prefetch_stream
 
         self.cache = {}
+        self.original_weights = {}
 
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
         torch.cuda.set_device(rank_id)
 
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
         print("weight dir", weight_dir)
+        self.loss_list = []
+        self.back_step = 0
         try:
             self.model_type = model_cfg["model_type"]
             if self.model_type == "llama":
@@ -90,20 +94,40 @@ class ModelRpcServer(rpyc.Service):
         self.adapter_id = {}
         target_adapter_dir = None
         for adapter_dir in tqdm(adapter_dirs, desc="load adapters"):
-            print("Adding adapter", adapter_dir)
+            rprint("Adding adapter", adapter_dir)
             target_adapter_dir = adapter_dir
             self.adapter_id[adapter_dir] = len(self.adapters)
             self.adapters.append(LoraTpPartAdapter(rank_id, world_size, adapter_dir, model_cfg,
                                                    swap=input_params.swap, dummy=input_params.dummy,
                                                    no_lora_swap=input_params.no_lora_swap,
 						   prefetch_stream=prefetch_stream))
-        self.adapter_id[finetuning_lora_path] = len(self.adapters)
-        print("Duplicating adapter for finetuning", target_adapter_dir)
-        self.adapters.append(LoraTpPartAdapter(rank_id, world_size, target_adapter_dir, model_cfg,
-                                                   swap=input_params.swap, dummy=input_params.dummy,
-                                                   no_lora_swap=input_params.no_lora_swap,
-						                            prefetch_stream=prefetch_stream)) #this duplicate the last adatper for finetuning
-        self.finetuning_adapter = self.adapters[-1]
+
+        if finetuning_lora_path != "":
+            self.adapter_id[finetuning_lora_path] = len(self.adapters)
+            print("Loading finetuning adapter", finetuning_lora_path)
+            self.adapters.append(LoraTpPartAdapter(rank_id, world_size, finetuning_lora_path, model_cfg,
+                                                    swap=input_params.swap, dummy=input_params.dummy,
+                                                    no_lora_swap=input_params.no_lora_swap,
+                                                        prefetch_stream=prefetch_stream, is_finetuning_adapter=True))
+            self.finetuning_adapter = self.adapters[-1]
+            self.finetuning_optimizer = LoRAAdamOptimizer(self.finetuning_adapter, lr=1e-4)
+
+            not_on_gpu = getattr(self.finetuning_adapter.layers[0], 'q_lora_A', None) is None
+            for layer_id, layer in enumerate(self.finetuning_adapter.layers):
+                for name in [
+                    "q_lora_A", "q_lora_B",
+                    "k_lora_A", "k_lora_B",
+                    "v_lora_A", "v_lora_B",
+                    "o_lora_A", "o_lora_B"
+                ]:
+                    if not_on_gpu:
+                        param = getattr(layer, name + "_home")
+                    else:
+                        param = getattr(layer, name)
+
+                    # Save initial param for comparison
+                    self.original_weights[f"{layer_id}.{name}"] = param.clone().detach().cpu()
+
         
         self.adapter_id[None] = len(self.adapters)
         self.adapters.append(None)
@@ -117,14 +141,12 @@ class ModelRpcServer(rpyc.Service):
             self.infer_adapter = InferAdapter.init(self.model.mem_manager,
                                                    prefetch_stream)
         ''' finish init adapters '''
-        
         set_random_seed(2147483647)
         return
 
 
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
-        rprint("model_rpc: exposed_load_adapters called")
         if not self.input_params.bmm:
             adapters = []
             for adapter_dir in adapter_dirs:
@@ -156,7 +178,6 @@ class ModelRpcServer(rpyc.Service):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_add_batch(self, batch_id, reqs, dtype):
-        rprint("model_rpc: add batch")
         if self.world_size != 1:
             batch_id, reqs, dtype = obtain(batch_id), obtain(reqs), obtain(dtype)
         import torch
@@ -173,8 +194,8 @@ class ModelRpcServer(rpyc.Service):
     def exposed_prefill_batch(self, batch_id):
         return self.forward(batch_id, is_prefill=True)
 
-    def exposed_back_batch(self, batchsize):
-        return self.backward(batchsize)
+    def exposed_back_batch(self, total_num_batches):
+        return self.backward(total_num_batches)
 
     # @calculate_time(show=True, min_cost_ms=200)
     # @calculate_time(show=True, min_cost_ms=0)
@@ -211,7 +232,6 @@ class ModelRpcServer(rpyc.Service):
         return
     
     def forward(self, batch_id, is_prefill):
-        rprint("model_rpc: forward called")
         batch: InferBatch = self.cache.pop(batch_id)
         # print(batch.requests)
         # print([req["request_id"] for req in batch.requests])
@@ -239,7 +259,6 @@ class ModelRpcServer(rpyc.Service):
             adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in batch.adapter_dirs]
             if self.input_params.no_lora_compute:
                 engine = LoraUnorderedBatchInfer(self.model, adapters)
-                rprint("model_rpc: by if inference engine: LoraUnorderedBatchInfer")
             elif self.input_params.bmm:
                 torch.cuda.empty_cache()
                 compressed_dirs = [batch.adapter_dirs[0]]
@@ -254,13 +273,10 @@ class ModelRpcServer(rpyc.Service):
                         cnt = 1
                 adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in compressed_dirs]
                 engine = LoraBmmInfer(self.model, adapters, adapter_sep)
-                rprint("model_rpc: inference engine: LoraBmmInfer")
             elif self.input_params.finetune_params.finetuning_data_path!=None:
                 engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter)
-                rprint("model_rpc: elif inference engine: LoraUnorderedBatchMixed")
             else:
                 engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
-                rprint("model_rpc: by else inference engine: LoraUnorderedBatchInfer")
             kwargs["no_lora_compute"] = self.input_params.no_lora_compute
             # kwargs["no_lora_copy"] = self.input_params.no_lora_copy 
 
@@ -293,15 +309,59 @@ class ModelRpcServer(rpyc.Service):
         self.cache[batch.batch_id] = batch
         return output_dict
 
-    def backward(self, batchsize):
-        rprint("model_rpc: backward called")
+    def print_loss_list(self):
+        print("=== Loss List ===")
+        for i, loss in enumerate(self.loss_list):
+            print(f"Batch {i}: Loss = {loss:.6f}")
+        print("=== End of Loss List ===")
+
+
+    def compare_lora_drift_per_layer(self):
+        """
+        Compares current LoRA weights to the originally saved weights,
+        and prints per-layer total drift (sum of L2 norms across q/k/v/o).
+        """
+        print("=== LoRA Parameter Drift by Layer ===")
+        for layer_id, layer in enumerate(self.finetuning_adapter.layers):
+            total_drift = 0.0
+            for name in [
+                "q_lora_A", "q_lora_B",
+                "k_lora_A", "k_lora_B",
+                "v_lora_A", "v_lora_B",
+                "o_lora_A", "o_lora_B"
+            ]:
+                key = f"{layer_id}.{name}"
+                original = self.original_weights[key].to(layer.__dict__[name].device)
+                current = getattr(layer, name)
+                drift = torch.norm(current - original).item()
+                total_drift += drift
+
+            if total_drift!=0:
+                print(f"Layer {layer_id:02d}: total ∆W = {total_drift:.6f}")
+
+    def backward(self, total_num_batches):
+        GREEN = '\033[92m'
+        RESET = '\033[0m'
+        print(f"{GREEN}=== Start of Backward ==={RESET}")
         adapters = [self.finetuning_adapter]
         self.exposed_load_adapters([self.finetuning_adapter.lora_dir])
         engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter)
         mem_manager = self.model.mem_manager
-        mem_manager.print_finetune_activation_summary()
-        self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
-        engine._context_backward(self.finetuning_adapter)
+        #mem_manager.print_finetune_activation_summary()
+        if self.finetuning_adapter.layers[0].q_lora_A is None:
+            self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
+            self.finetuning_optimizer.load_to_gpu()
+            print("load finetuning adapter to gpu")
+        #self.compare_lora_drift_per_layer()
+        loss = engine._context_backward(self.finetuning_adapter, self.finetuning_optimizer)
+        self.loss_list.append(loss)
+        mem_manager.reset_activation_pool()
+        #self.compare_lora_drift_per_layer()
+        self.exposed_offload_adapters()
+        print(f"{GREEN}=== End of Backward ==={RESET}")
+        self.back_step+=1
+        if self.back_step == total_num_batches:
+            self.print_loss_list()
         return
     
     
@@ -440,7 +500,9 @@ class ModelRpcClient:
             self._merge_adapter = rpyc.async_(self.model.merge_adapter)
             self._add_batch = async_wrap(self.model.add_batch)
             self._prefill_batch = async_wrap(self.model.prefill_batch)
+
             self._back_batch = async_wrap(self.model.back_batch)
+
             self._decode_batch = async_wrap(self.model.decode_batch)
             self._filter_batch = async_wrap(self.model.filter_batch)
             self._merge_batch = async_wrap(self.model.merge_batch)
@@ -454,7 +516,9 @@ class ModelRpcClient:
             self._unmerge_adapter = self.model.exposed_unmerge_adapter
             self._add_batch = self.model.exposed_add_batch
             self._prefill_batch = self.model.exposed_prefill_batch
+
             self._back_batch = self.model.exposed_back_batch
+            
             self._decode_batch = self.model.exposed_decode_batch
             self._filter_batch = self.model.exposed_filter_batch
             self._merge_batch = self.model.exposed_merge_batch
@@ -476,7 +540,6 @@ class ModelRpcClient:
 
 
     async def load_adapters(self, reqs, prefetch=False):
-        rprint("model_rpc: load_adapters calls _load_adapters")
         self._load_adapters(reqs, prefetch=prefetch)
 
 
@@ -491,7 +554,6 @@ class ModelRpcClient:
 
 
     async def init_batch(self, batch_id, reqs):
-        rprint("model_rpc: init_batch calls add batch")
         ans = self._add_batch(batch_id, reqs, "fp16")
         if self.use_rpc:
             await ans
@@ -500,16 +562,14 @@ class ModelRpcClient:
             return
 
     async def prefill_batch(self, batch_id):
-        rprint("model_rpc: pre_fill batch called")
         ans = self._prefill_batch(batch_id)
         if self.use_rpc:
             return await ans
         else:
             return ans
-        
-    async def back_batch(self, batchsize):
-        rprint("model_rpc: back batch called")
-        ans = self._back_batch(batchsize)
+
+    async def back_batch(self, total_num_batches):
+        ans = self._back_batch(total_num_batches)
         if self.use_rpc:
             return await ans
         else:

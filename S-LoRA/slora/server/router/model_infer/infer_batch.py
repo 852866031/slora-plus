@@ -94,11 +94,9 @@ class InferBatch:
             if is_finetuning:
                 full_input_tensor = torch.tensor(tokenized_input, dtype=torch.int64, device=device)
                 mem_manager.finetune_input_ids.append(full_input_tensor)
-                rprint("Saved finetune input ids shape", full_input_tensor.shape)
 
             if is_finetuning and len(tokenized_input) > 1:
                 tokenized_input = tokenized_input[:-1]
-                rprint("truncated shape", len(tokenized_input))
 
             input_length = len(tokenized_input)
             input_lengths.append(input_length)
@@ -428,3 +426,4 @@ class InferBatch:
         p_seq_len = torch.tensor(p_seq_len, dtype=torch.int32, device="cuda")
         p_cumsum_seq_len = torch.cumsum(p_seq_len, dim=0, dtype=torch.int32)
         return presence_penalties, frequency_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch
+

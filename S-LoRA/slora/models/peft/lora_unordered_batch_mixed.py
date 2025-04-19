@@ -12,6 +12,7 @@ from slora.utils.infer_utils import mark_cost_time
 from slora.utils.infer_utils import calculate_time, mark_start, mark_end
 from slora._kernels import dispatch_bgmv
 from ...server.router.mixed_req_queue import rprint
+import hashlib
 
 class LoraUnorderedBatchMixed:
 
@@ -38,6 +39,7 @@ class LoraUnorderedBatchMixed:
                 self.req_bins[i] = idx
         
         self.kv_embed_dim = base_model.tp_k_head_num_ * base_model.head_dim_
+        self.last_adapter_combined_A = {}
 
 
     @torch.no_grad()
@@ -60,10 +62,6 @@ class LoraUnorderedBatchMixed:
         rprint("LoraUnorderedBatchMixed: total_token_num", total_token_num)
         rprint("LoraUnorderedBatchMixed: max_len_in_batch", max_len_in_batch)
         rprint("LoraUnorderedBatchMixed: input_ids shape", input_ids.shape)
-        rprint("LoraUnorderedBatchMixed: b_loc shape", b_loc.shape)
-        rprint("LoraUnorderedBatchMixed: b_start_loc shape", b_start_loc.shape)
-        rprint("LoraUnorderedBatchMixed: b_seq_len shape", b_seq_len.shape)
-        rprint("LoraUnorderedBatchMixed: is_prefill",is_prefill)
         # Notice that batch_lora only support decoding
         assert len(b_loc) == len(b_start_loc) == len(b_seq_len)
         self.delta = []
@@ -119,12 +117,10 @@ class LoraUnorderedBatchMixed:
         infer_state.position_sin = torch.index_select(
                 self.base_model._sin_cached, 0, position_ids).view(position_ids.shape[0], -1)
         position_ids = None
-        rprint("LoraUnorderedBatchMixed, positional ids initialized")
         infer_state.b_loc = b_loc
         infer_state.b_start_loc = b_start_loc
         infer_state.b_seq_len = b_seq_len
         infer_state.mem_manager = self.base_model.mem_manager
-        rprint("LoraUnorderedBatchMixed, mem_manager type", type(infer_state.mem_manager))
         infer_state.prefill_mem_index = self.base_model.mem_manager.alloc(infer_state.total_token_num)
         infer_state.prefill_key_buffer = torch.empty(
                 (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
@@ -132,9 +128,7 @@ class LoraUnorderedBatchMixed:
         infer_state.prefill_value_buffer = torch.empty(
                 (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
-        rprint("LoraUnorderedBatchMixed, mem initialized")
         init_bloc(b_loc, b_seq_len, max_len_in_batch, infer_state.prefill_mem_index)
-        rprint("LoraUnorderedBatchMixed, bloc initialized")
         predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute)
         return predict_logics
 
@@ -179,21 +173,25 @@ class LoraUnorderedBatchMixed:
         predict_logics = self._token_forward(input_ids, infer_state, no_lora_compute, no_lora_copy)
         return predict_logics
     
-    def _context_backward(self, finetuning_adapter):
+    def _context_backward(self, finetuning_adapter, optimizer):
         if hasattr(self.base_model, "backward_engine"):
             backward_engine = self.base_model.backward_engine
         else:
             return
         logits_and_targets = backward_engine.get_logits_and_targets()
+        loss = backward_engine.compute_total_loss(logits_and_targets)
+        print(f"\033[92mLoss: {loss:.12f}\033[0m")
         logit_grad = backward_engine._logit_backward(logits_and_targets)
-        rprint("Logit grad shape", logit_grad.shape)
+        #rprint("Logit grad shape", logit_grad.shape)
+        #rprint("Logit grad norm: {:.6f}".format(logit_grad.norm().item()))
         grad_transformer_out = backward_engine._post_layer_backward(logit_grad, self.base_model.pre_post_weight)
-        rprint("Grad transformer out shape", grad_transformer_out.shape)
+        #rprint("Grad transformer out shape", grad_transformer_out.shape)
+        #rprint("grad_transformer_out grad norm: {:.6f}".format(grad_transformer_out.norm().item()))
         for i in reversed(range(self.base_model.layers_num)):
             layer_weight = self.base_model.trans_layers_weight[i]
-            grad_transformer_out = backward_engine._lora_context_backward(i, grad_transformer_out, layer_weight, finetuning_adapter) 
-            #break
-
+            grad_transformer_out = backward_engine._lora_context_backward(i, grad_transformer_out, layer_weight, finetuning_adapter, optimizer) 
+        optimizer.step()
+        return loss
 
 
     def save_finetune_activations_to_buffer(self, layer_id, input_embs, infer_state):
@@ -202,13 +200,12 @@ class LoraUnorderedBatchMixed:
         prev_total = sum(infer_state.mem_manager.request_token_info)
         num_new_tokens = finetune_activations.shape[0]
         # Step 2: write activations
-        infer_state.mem_manager.finetune_activation_buffer[layer_id][prev_total : prev_total + num_new_tokens] = finetune_activations
+        infer_state.mem_manager.finetune_activation_buffer[layer_id][prev_total : prev_total + num_new_tokens] = finetune_activations.clone()
         # Step 3: count finetuning tokens per request using finetune_mask
-        if layer_id == 0:
+        if layer_id == self.base_model.layers_num - 1:
             b_start_loc = infer_state.b_start_loc
             b_seq_len = infer_state.b_seq_len
             batch_size = infer_state.batch_size
-            rprint("Saved finetuning hidden state shape", finetune_activations.shape)
             for i in range(batch_size):
                 start = b_start_loc[i].item()
                 end = start + b_seq_len[i].item()
@@ -227,8 +224,6 @@ class LoraUnorderedBatchMixed:
             self.save_finetune_activations_to_buffer(i, input_embs, infer_state)
         predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
                 input_embs, infer_state, self.base_model.pre_post_weight)
-        for logits in finetune_logits_per_request:
-            rprint("\t", logits.shape)
         infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
         return predict_logics
 
@@ -386,8 +381,20 @@ class LoraUnorderedBatchMixed:
 
         return q        
 
+    def get_w_combined_A(self, a_loc, a_start, a_len, adapter_index, layer_id):
+        start_idx = a_start[adapter_index].item()
+        length = a_len[adapter_index].item()
+        indices = a_loc[start_idx: start_idx + length]  # flat index range in key_buffer
+        return self.key_buffer[layer_id][indices]
+    
+    
+    def hash_tensor(self, tensor: torch.Tensor) -> str:
+        return hashlib.sha256(tensor.detach().to('cpu').float().numpy().tobytes()).hexdigest()
 
     def _lora_get_qkv(self, layer_id, input_embs, cache_k, cache_v, infer_state, no_lora_compute=False)->torch.Tensor:
+        # current_w_combined_A = self.get_w_combined_A(
+        #     self.infer_adapter.a_loc, self.infer_adapter.a_start, self.infer_adapter.a_len, 0, layer_id)
+        # print(f"hashed current_w_combined_A for layer {layer_id}, {self.hash_tensor(current_w_combined_A)}")
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]

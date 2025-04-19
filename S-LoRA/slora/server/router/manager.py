@@ -55,7 +55,7 @@ def get_scheduler(input_params, adapter_dirs):
         raise Exception("unrecognized scheduler")
 
 from pprint import pprint
-back_flag = True
+back_flag = False
 class RouterManager:
     def __init__(self, weightdir, adapter_dirs, load_way, world_size, eos_id,
                  router_port, detokenization_port, model_rpc_ports,
@@ -173,7 +173,7 @@ class RouterManager:
     async def loop_for_fwd(self,):
         counter_count = 0
         while True:
-            await self._step()
+            await self._step(counter_count)
             counter_count += 1
             if self.running_batch is not None:
                 if counter_count % 50 == 0:
@@ -184,13 +184,16 @@ class RouterManager:
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
 
-    async def _step(self):
+    async def _step(self, counter_count):
         """
         事件处理循环
         """
         # 删除所有已经 finished 的 req
         global back_flag
         if self.running_batch is None:
+            if back_flag:
+                back_flag = await self._start_back_batch()
+                return
             new_batch = self.req_queue.generate_new_batch(self.running_batch, self.lora_ranks)
             # Just for hardcoded test, remove later from here
             if new_batch is not None:
@@ -208,11 +211,9 @@ class RouterManager:
 
                 if not self.input_params.no_lora:
                     # load adapters
-                    rprint("router: merging lora")
                     ret = []
                     for tp_rank in range(self.world_size):
                         ret.append(self.model_rpcs[tp_rank].load_adapters(new_batch.adapter_dirs))
-                    rprint("router: load_adapters called")
                     await asyncio.gather(*ret)
 
                 # merge adapter to base model
@@ -225,11 +226,9 @@ class RouterManager:
             
                 torch.cuda.synchronize()
                 await self._prefill_batch(self.running_batch)
-                rprint("router: calling filter running batch")
                 await self._filter_runing_batch()
                 self.has_wait_tokens = 0
-            elif back_flag and len(self.finished_finetune_list)==7:
-                back_flag = await self._start_back_batch()
+                back_flag = True
             return        
 
         if self.has_wait_tokens < self.max_wait_tokens:
@@ -283,8 +282,7 @@ class RouterManager:
         return
         
     async def _start_back_batch(self):
-        rprint("router: start back batch")
-        rets = [self.model_rpcs[tp_rank].back_batch(len(self.finished_finetune_list)) for tp_rank in range(self.world_size)]
+        rets = [self.model_rpcs[tp_rank].back_batch(self.req_queue.repeat_file) for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
         return False
 
@@ -303,16 +301,8 @@ class RouterManager:
         count = 0
         for req in batch.reqs:
             if getattr(req, 'is_finetuning', False):
-                req_id = req.request_id
-                if req_id in req_to_out_token_id:
-                    _, metadata = req_to_out_token_id[req_id]
-                    req_to_out_token_id[req_id] = (self.eos_id, {'id': self.eos_id, 'logprob': metadata['logprob']})
-                    req.output_ids.append(self.eos_id)
-                    count +=1
-                    self.finished_finetune_list.append(req_id)
+                count +=1
 
-        rprint("router: # finetuning tokens marked as finished", count)
-        rprint("router: # total requests in batch", len(batch.reqs))
         has_new_finished_req = batch.mark_finished_req(self.eos_id)
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
         await self._handle_finish_req(batch, has_new_finished_req, minibatch=True)

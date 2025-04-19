@@ -8,64 +8,35 @@ from slora.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
 from slora.utils.model_load import hf_load_config
 from slora.server.router.mixed_req_queue import rprint
 
-def create_lora_adapter(
-    adapter_dir: str,
-    base_model: str,
-    network_config: dict,
-    rank: int = 8,
-    lora_alpha: int = 8,
-    target_modules: list = None,
-    use_safetensors: bool = False,
-    tp_rank: int = 0,
-    world_size: int = 1,
-    no_lora_swap: bool = False,
-    prefetch_stream=None
-):
-    if os.path.exists(adapter_dir):
-        print(f"LoRA adapter directory '{adapter_dir}' already exists. Skipping creation.")
-        return
 
-    os.makedirs(adapter_dir, exist_ok=True)
-
-    if target_modules is None:
-        target_modules = ["q_proj", "k_proj", "v_proj", "o_proj"]
-
-    # 1) Create the adapter config dictionary
-    adapter_config = {
-        "base_model_name_or_path": base_model,
-        "r": rank,
-        "lora_alpha": lora_alpha,
-        "target_modules": target_modules,
-        "bias": "none",
-        "enable_lora": None,
-        "fan_in_fan_out": False,
-        "inference_mode": True,
-        "lora_alpha": 16,
-        "lora_dropout": 0.05,
-        "merge_weights": False,
-        "modules_to_save": None,
-        "peft_type": "LORA",
-        "r": 16,
-        "task_type": "CAUSAL_LM"
-    }
-
-    config_path = os.path.join(adapter_dir, "adapter_config.json")
-    with open(config_path, "w") as f:
-        json.dump(adapter_config, f, indent=2)
-    print(f"Created {config_path}")
-
-    layers = [
-        LoraLayerWeight(i, tp_rank, world_size, adapter_config, network_config, torch.float16,
-                        no_lora_swap=no_lora_swap, prefetch_stream=prefetch_stream).init_dummy(not no_lora_swap)
-        for i in range(network_config["num_hidden_layers"])
-        ]
-    #TODO: finish this code so that we create a new adapter for finetuning
+def get_lora_config_finetune():
+    config = {"base_model_name_or_path": "decapoda-research/llama-7b-hf",
+                  "bias": "none",
+                  "enable_lora": None,
+                  "fan_in_fan_out": False,
+                  "inference_mode": True,
+                  "lora_alpha": 16,
+                  "lora_dropout": 0.05,
+                  "merge_weights": False,
+                  "modules_to_save": None,
+                  "peft_type": "LORA",
+                  "r": 16,
+                  "target_modules": [
+                  "q_proj",
+                  "k_proj",
+                  "v_proj",
+                  "o_proj"
+                  ],
+                  "task_type": "CAUSAL_LM"
+                 }
+    return config
 
 
 def get_lora_config(lora_dir, dummy):
     if dummy:
         return get_lora_config_json(lora_dir), lora_dir
     else:
+        rprint("loading adapter config from", lora_dir)
         lora_dir = re.sub(r'-(\d+)$', '', lora_dir)
         return hf_load_config(lora_dir)
 
@@ -74,7 +45,7 @@ def get_lora_config(lora_dir, dummy):
 class LoraTpPartAdapter:
 
     def __init__(self, tp_rank, world_size, lora_dir, network_config,
-                 swap=False, dummy=False, no_lora_swap=False, prefetch_stream=None):
+                 swap=False, dummy=False, no_lora_swap=False, prefetch_stream=None, is_finetuning_adapter=False):
         assert world_size == 1
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
@@ -84,8 +55,9 @@ class LoraTpPartAdapter:
         self.r = self.lora_config["r"]
         self.lora_alpha = self.lora_config["lora_alpha"]
         self.scaling = self.lora_alpha / self.r
+        self.is_finetuning_adapter = is_finetuning_adapter
         
- 
+        rprint("loading adapter from", lora_dir)
         self.layers = [
             LoraLayerWeight(i, tp_rank, world_size, self.lora_config, network_config, torch.float16,
                             no_lora_swap=no_lora_swap, prefetch_stream=prefetch_stream)
@@ -96,6 +68,14 @@ class LoraTpPartAdapter:
 
         load_hf_weights("fp16", lora_dir, transformer_layer_list=self.layers,
                         swap=swap, dummy=dummy)
+        
+    def check_all_lora_b_zero(self):
+        for id , layer in enumerate(self.layers):
+            if torch.all(layer.q_lora_B_home == 0) and torch.all(layer.k_lora_B_home == 0) \
+                and torch.all(layer.v_lora_B_home == 0) and torch.all(layer.o_lora_B_home == 0):
+                print(f"LoRA B are all zeros  in layer {id}")
+            else:
+                rprint(f"[Not all zeros] in layer {id}")
 
     def is_on_gpu(self,):
         return (self.layers[0].w_combined is not None)
@@ -111,6 +91,6 @@ class LoraTpPartAdapter:
                 layer_weight.load_to_gpu(bmm=bmm)
 
 
-    def offload_from_gpu(self,):
+    def offload_from_gpu(self, requires_update=False):
         for layer_weight in self.layers:
-            layer_weight.offload_from_gpu()
+            layer_weight.offload_from_gpu(requires_update)
