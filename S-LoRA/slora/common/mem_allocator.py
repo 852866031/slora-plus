@@ -242,7 +242,8 @@ class MemoryAllocator:
         self.finetune_activation_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
                                         dtype=self.dtype, device="cuda") 
                             for _ in range(self.layer_num)]
-        
+        self.input_layer_output = torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
+                                        dtype=self.dtype, device="cuda") 
         self.ffn_input_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
                                         dtype=self.dtype, device="cuda") 
                             for _ in range(self.layer_num)]
@@ -257,6 +258,12 @@ class MemoryAllocator:
         self.finetune_input_ids = [] #List[input_ids_tensor]
         self.finetune_logits_per_request = []
         
+    def get_input_layer_output(self):
+        if not self.request_token_info:
+            return None  # No activations saved
+
+        total_tokens = sum(self.request_token_info)
+        return self.input_layer_output[:total_tokens]
 
     def get_finetune_activations(self, layer_id):
         """

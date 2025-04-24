@@ -274,7 +274,7 @@ class ModelRpcServer(rpyc.Service):
                 adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in compressed_dirs]
                 engine = LoraBmmInfer(self.model, adapters, adapter_sep)
             elif self.input_params.finetune_params.finetuning_data_path!=None:
-                engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter)
+                engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter, finetuning_adapter=self.finetuning_adapter)
             else:
                 engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
             kwargs["no_lora_compute"] = self.input_params.no_lora_compute
@@ -345,13 +345,12 @@ class ModelRpcServer(rpyc.Service):
         print(f"{GREEN}=== Start of Backward ==={RESET}")
         adapters = [self.finetuning_adapter]
         self.exposed_load_adapters([self.finetuning_adapter.lora_dir])
-        engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter)
+        engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter, finetuning_adapter=self.finetuning_adapter)
         mem_manager = self.model.mem_manager
         #mem_manager.print_finetune_activation_summary()
         if self.finetuning_adapter.layers[0].q_lora_A is None:
             self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
             self.finetuning_optimizer.load_to_gpu()
-            print("load finetuning adapter to gpu")
         #self.compare_lora_drift_per_layer()
         loss = engine._context_backward(self.finetuning_adapter, self.finetuning_optimizer)
         self.loss_list.append(loss)

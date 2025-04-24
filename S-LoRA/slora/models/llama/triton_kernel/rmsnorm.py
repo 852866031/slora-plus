@@ -63,15 +63,22 @@ def rmsnorm_forward(x, weight, eps):
 
 def rmsnorm_backward(x: torch.Tensor, grad_out: torch.Tensor, weight: torch.Tensor, eps: float):
     D = x.shape[-1]
-    norm = x.norm(p=2, dim=-1, keepdim=True) / (D ** 0.5)
-    x_hat = x / (norm + eps)
 
+    # Compute stable norm
+    norm_sq = x.pow(2).sum(dim=-1, keepdim=True) / D  # [N, 1]
+    norm = torch.sqrt(norm_sq + eps)  # [N, 1]
+
+    # Normalize x
+    x_hat = x / norm  # [N, D]
+
+    # Gradient of the output of RMSNorm (elementwise weight applied after norm)
     grad_x_hat = grad_out * weight  # [N, D]
 
-    x_dot_grad = (x * grad_x_hat).sum(dim=-1, keepdim=True)  # [N, 1]
-    denom = (norm + eps) ** 2  # [N, 1]
+    # Compute projection term
+    x_dot_grad = (x_hat * grad_x_hat).sum(dim=-1, keepdim=True)  # [N, 1]
 
-    grad_x = (grad_x_hat - x * x_dot_grad / (D * denom)) / (norm + eps)
+    # Backprop through normalization
+    grad_x = (grad_x_hat - x_hat * x_dot_grad / D) / norm  # [N, D]
 
     return grad_x
 

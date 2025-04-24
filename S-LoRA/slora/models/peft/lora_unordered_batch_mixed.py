@@ -1,4 +1,7 @@
 import numpy as np
+from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
+from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_forward
+from slora.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
 import torch
 import torch.nn as nn
 from typing import final
@@ -16,13 +19,14 @@ import hashlib
 
 class LoraUnorderedBatchMixed:
 
-    def __init__(self, base_model, adapters, infer_adapter=None):
+    def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None):
         self.base_model = base_model
 
         lora_layer_dim = [adapter.r if adapter is not None else 0 for adapter in adapters]
         self.max_lora_dim = max(lora_layer_dim)
 
         self.req_bins = torch.zeros(len(adapters), dtype=torch.long, device="cuda")
+        self.finetuning_adapter = finetuning_adapter
 
         if infer_adapter is not None:
             self.infer_adapter = infer_adapter
@@ -178,19 +182,7 @@ class LoraUnorderedBatchMixed:
             backward_engine = self.base_model.backward_engine
         else:
             return
-        logits_and_targets = backward_engine.get_logits_and_targets()
-        loss = backward_engine.compute_total_loss(logits_and_targets)
-        print(f"\033[92mLoss: {loss:.12f}\033[0m")
-        logit_grad = backward_engine._logit_backward(logits_and_targets)
-        #rprint("Logit grad shape", logit_grad.shape)
-        #rprint("Logit grad norm: {:.6f}".format(logit_grad.norm().item()))
-        grad_transformer_out = backward_engine._post_layer_backward(logit_grad, self.base_model.pre_post_weight)
-        #rprint("Grad transformer out shape", grad_transformer_out.shape)
-        #rprint("grad_transformer_out grad norm: {:.6f}".format(grad_transformer_out.norm().item()))
-        for i in reversed(range(self.base_model.layers_num)):
-            layer_weight = self.base_model.trans_layers_weight[i]
-            grad_transformer_out = backward_engine._lora_context_backward(i, grad_transformer_out, layer_weight, finetuning_adapter, optimizer) 
-        optimizer.step()
+        loss = backward_engine._context_backward(self.base_model, finetuning_adapter, optimizer)
         return loss
 
 
@@ -211,16 +203,76 @@ class LoraUnorderedBatchMixed:
                 end = start + b_seq_len[i].item()
                 n_finetune_tokens = finetune_mask[start:end].sum().item()
                 infer_state.mem_manager.request_token_info.append(n_finetune_tokens)
+    
+    def save_input_layer_output_to_buffer(self, input_embs, infer_state):
+        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
+        finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
+        prev_total = sum(infer_state.mem_manager.request_token_info)
+        num_new_tokens = finetune_activations.shape[0]
+        infer_state.mem_manager.input_layer_output[prev_total : prev_total + num_new_tokens] = finetune_activations.clone()
+    
 
+    def transformer_layer_forward(self, x_in, layer_id, infer_state):
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        lora_weight = self.finetuning_adapter.layers[layer_id]
+        scaling = self.finetuning_adapter.scaling
+        eps = self.base_model.backward_engine.eps_
+        dtype = x_in.dtype                     
+        s= torch.as_tensor(scaling, dtype=dtype, device=x_in.device)
+
+        w_q, w_k, w_v, w_o = (
+            layer_weight.q_weight_,
+            layer_weight.k_weight_,
+            layer_weight.v_weight_,
+            layer_weight.o_weight_,
+        )
+        w_attn_norm = layer_weight.att_norm_weight_
+
+        # LoRA matrices
+        l = lora_weight
+        qA, qB = l.q_lora_A, l.q_lora_B
+        kA, kB = l.k_lora_A, l.k_lora_B
+        vA, vB = l.v_lora_A, l.v_lora_B
+        oA, oB = l.o_lora_A, l.o_lora_B
+
+        # rmsnorm(x)
+        x_norm = rmsnorm_forward(x_in, w_attn_norm, eps=eps)
+
+        # QKV  (base + LoRA)
+        q = x_norm @ w_q.T + s * ((x_norm @ qB.T) @ qA.T)
+        k = x_norm @ w_k.T + s * ((x_norm @ kB.T) @ kA.T)
+        v = x_norm @ w_v.T + s * ((x_norm @ vB.T) @ vA.T)
+
+        d_k = q.shape[-1]
+        attn_scores = q @ k.T / d_k**0.5
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        attn_out = attn_weights @ v  # [N, D]             
+
+        # output proj (base + LoRA)
+        o = attn_out @ w_o.T + s * ((attn_out @ oB.T) @ oA.T)
+
+        o_base = attn_out @ w_o.T
+        o_lora_B_out = attn_out @ oB.T
+        o_lora = scaling * (o_lora_B_out @ oA.T)
+        o = o_base + o_lora
+        x_after_attn = x_in + o 
+        
+        self.save_ffn_input_to_buffer(layer_id, x_after_attn, infer_state)
+        layer_infer = self.base_model.layers_infer[layer_id]
+        layer_infer._context_ffn(x_after_attn, infer_state, layer_weight)
+        return x_after_attn
 
     @final
     def _context_forward(self, input_ids, infer_state, no_lora_compute=False):
+        self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
         cuda_input_ids = input_ids
         rprint("Input ids shape", cuda_input_ids.shape)
         input_embs = self.base_model.pre_infer.context_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
+        self.save_input_layer_output_to_buffer(input_embs, infer_state)
         for i in range(self.base_model.layers_num):
-            input_embs = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
+            #input_embs = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
+            input_embs = self.transformer_layer_forward(input_embs, i, infer_state)
             self.save_finetune_activations_to_buffer(i, input_embs, infer_state)
         predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
                 input_embs, infer_state, self.base_model.pre_post_weight)

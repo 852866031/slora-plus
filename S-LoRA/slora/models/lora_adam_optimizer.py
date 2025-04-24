@@ -4,7 +4,7 @@ class LoRAAdamOptimizer:
     def __init__(
         self,
         finetuning_adapter,
-        lr=1e-4,
+        lr=1e-2,
         betas=(0.9, 0.999),
         eps=1e-8,
         max_grad_norm=None,
@@ -14,9 +14,7 @@ class LoRAAdamOptimizer:
         self.eps = eps
         self.max_grad_norm = max_grad_norm
         self.state = {}
-        self.step_count = 1
-
-        self.original_weights = {}  # ← store original cloned weights
+        self.step_count = 0
 
         not_on_gpu = getattr(finetuning_adapter.layers[0], 'q_lora_A', None) is None
         for layer_id, layer in enumerate(finetuning_adapter.layers):
@@ -53,7 +51,8 @@ class LoRAAdamOptimizer:
             if self.max_grad_norm is not None:
                 grad_norm = grad_fp32.norm()
                 if grad_norm > self.max_grad_norm:
-                    grad_fp32.mul_(self.max_grad_norm / (grad_norm + 1e-6))
+                    scale = float(self.max_grad_norm / (grad_norm + 1e-6))
+                    grad_fp32.mul_(scale)
 
             # Update moving averages
             m = self.state[f"{key}.m"]

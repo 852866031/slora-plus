@@ -58,7 +58,7 @@ class Mixed_ReqQueue:
         self.finetuning_data_path = finetune_params.finetuning_data_path
         self.finetuning_prepare_size = finetune_params.finetuning_prepare_size
         self.finetuning_lora_path = finetune_params.finetuning_lora_path  
-        self.finetuning_pool_size = 16
+        self.finetuning_pool_size = 8
         self.repeat_file = 100
     
         try: 

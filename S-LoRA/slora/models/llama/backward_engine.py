@@ -25,6 +25,18 @@ class LlamaBackwardEngine():
         self.last_logit_and_targets = []
         self.last_loss = None
 
+    def _context_backward(self, base_model, finetuning_adapter, optimizer):
+        logits_and_targets = self.get_logits_and_targets()
+        loss = self.compute_total_loss(logits_and_targets)
+        print(f"\033[92mLoss: {loss:.12f}\033[0m")
+        logit_grad = self._logit_backward(logits_and_targets)
+        grad_transformer_out = self._post_layer_backward(logit_grad, base_model.pre_post_weight)
+        for i in reversed(range(base_model.layers_num)):
+            layer_weight = base_model.trans_layers_weight[i]
+            grad_transformer_out = self._lora_context_backward(i, grad_transformer_out, layer_weight, finetuning_adapter, optimizer) 
+        optimizer.step()
+        return loss
+
     def get_logits_and_targets(self):
         logits_list = self.mem_manager.finetune_logits_per_request
         input_ids = self.mem_manager.get_concatenated_finetune_input_ids()  # shape [sum(T_i)]
@@ -59,16 +71,18 @@ class LlamaBackwardEngine():
             if logits.shape[0] != targets.shape[0]:
                 raise ValueError(f"Logits and targets length mismatch: {logits.shape[0]} vs {targets.shape[0]}")
 
-            # Compute CE loss
-            loss = torch.nn.functional.cross_entropy(logits, targets, ignore_index=ignore_index, reduction='sum')
+            # Compute CE loss   
+            loss = torch.nn.functional.cross_entropy(logits, targets, ignore_index=-100, reduction='sum')
             total_loss += loss.item()
-            total_tokens += (targets != ignore_index).sum().item()
-
-            # Track logit value for specific token ID
-            token_logits = logits[:, track_token_id]  # [T], logit values for target token
+            valid_mask = targets != ignore_index
+            total_tokens += valid_mask.sum().item()
+            token_logits = logits[valid_mask, track_token_id]
             tracked_logit_sum += token_logits.sum().item()
             tracked_logit_count += token_logits.numel()
 
+
+        #print(logits_and_targets[0][0].argmax(dim=-1))
+        #print(logits_and_targets[0][1])
         if total_tokens == 0:
             return torch.tensor(0.0)
 
@@ -107,10 +121,7 @@ class LlamaBackwardEngine():
         lm_head_weight = layer_weight.lm_head_weight_.float()           # [vocab_size, D]
         norm_weight = layer_weight.final_norm_weight_.float()          # [D]
         transformer_out = self.mem_manager.get_finetune_activations(layer_id=-1).float()    # [N, D]
-        # rprint("transformer_out shape", transformer_out.shape)
-        # Grad of the norm output
         grad_norm_out = logit_grad @ lm_head_weight  # [N, D]
-        # Grad of the transformer outpu
         D = transformer_out.shape[-1]
         norm = transformer_out.norm(2, dim=-1, keepdim=True) / (D ** 0.5)
         grad_x_hat = grad_norm_out * norm_weight      # [N, D]
@@ -126,10 +137,13 @@ class LlamaBackwardEngine():
         ffn_input = self.mem_manager.get_ffn_input(layer_id).float()      # shape [N, D]
         grad_ffn_input = self._backprop_ffn(ffn_input, output_grad, layer_weight)
         # rprint("grad_ffn_input grad norm: {:.6f}".format(grad_ffn_input.norm().item()))
-        last_layer_input = self.mem_manager.get_finetune_activations(layer_id-1).float()    # shape [N, D]
+        if layer_id == 0:
+            last_layer_input = self.mem_manager.get_input_layer_output().float()    # shape [N, D]
+        else:
+            last_layer_input = self.mem_manager.get_finetune_activations(layer_id-1).float()    # shape [N, D]
         lora_weights = finetuning_adapter.layers[layer_id]
         # Backprop through LoRA
-        grad_attn_input, grads = self._backpop_attention(last_layer_input, grad_ffn_input, lora_weights, layer_weight)
+        grad_attn_input, grads = self._backpop_attention(last_layer_input, grad_ffn_input, lora_weights, layer_weight, finetuning_adapter.scaling)
         # <-- update LoRA weights using grads
         optimizer.update(grads, lora_weights, layer_id)
         return grad_attn_input
@@ -138,7 +152,8 @@ class LlamaBackwardEngine():
                        last_layer_input: torch.Tensor, 
                        grad_ffn_input: torch.Tensor, 
                        lora_weight: LoraLayerWeight, 
-                       layer_weight: LlamaTransformerLayerWeight):
+                       layer_weight: LlamaTransformerLayerWeight,
+                       scaling: any):
 
         # === Cast all weights to float32 ===
         lw = layer_weight  # alias
@@ -169,9 +184,9 @@ class LlamaBackwardEngine():
         k_lora_B_out = x @ lora_kB.T
         v_lora_B_out = x @ lora_vB.T
 
-        q = q_base + q_lora_B_out @ lora_qA.T
-        k = k_base + k_lora_B_out @ lora_kA.T
-        v = v_base + v_lora_B_out @ lora_vA.T
+        q = q_base + scaling * (q_lora_B_out @ lora_qA.T)
+        k = k_base + scaling * (k_lora_B_out @ lora_kA.T)
+        v = v_base + scaling * (v_lora_B_out @ lora_vA.T)
 
         d_k = q.shape[-1]
         attn_scores = q @ k.T / d_k**0.5
@@ -181,7 +196,7 @@ class LlamaBackwardEngine():
         # === Output projection (base + LoRA) ===
         o_base = attn_out @ lw_o.T
         o_lora_B_out = attn_out @ lora_oB.T
-        o_lora = o_lora_B_out @ lora_oA.T
+        o_lora = scaling * (o_lora_B_out @ lora_oA.T)
         o = o_base + o_lora
 
         # === Backprop ===
@@ -190,7 +205,7 @@ class LlamaBackwardEngine():
         grad_attn_out_base = grad_o @ lw_o
         grad_o_lora_A = grad_o.T @ o_lora_B_out
         grad_o_lora_B = (lora_oA.T @ grad_o.T) @ attn_out
-        grad_attn_out_lora = (grad_o @ lora_oA) @ lora_oB
+        grad_attn_out_lora = scaling * ((grad_o @ lora_oA) @ lora_oB)
         grad_attn_out = grad_attn_out_base + grad_attn_out_lora
 
         grad_attn_weights = grad_attn_out @ v.T
@@ -203,24 +218,27 @@ class LlamaBackwardEngine():
         grad_q = grad_attn_scores @ k
         grad_k = grad_attn_scores.T @ q
 
-        grad_q_lora_A = grad_q.T @ q_lora_B_out
-        grad_q_lora_B = (lora_qA.T @ grad_q.T) @ x
-        grad_k_lora_A = grad_k.T @ k_lora_B_out
-        grad_k_lora_B = (lora_kA.T @ grad_k.T) @ x
-        grad_v_lora_A = grad_v.T @ v_lora_B_out
-        grad_v_lora_B = (lora_vA.T @ grad_v.T) @ x
+        grad_q_lora_A = scaling * (grad_q.T @ q_lora_B_out)
+        grad_q_lora_B = scaling * ((lora_qA.T @ grad_q.T) @ x)
 
-        grad_q_in = (grad_q @ lora_qA) @ lora_qB 
-        grad_k_in = (grad_k @ lora_kA) @ lora_kB 
-        grad_v_in = (grad_v @ lora_vA) @ lora_vB 
-        grad_o_in = (grad_o @ lora_oA) @ lora_oB 
+        grad_k_lora_A = scaling * (grad_k.T @ k_lora_B_out)
+        grad_k_lora_B = scaling * ((lora_kA.T @ grad_k.T) @ x)
+
+        grad_v_lora_A = scaling * (grad_v.T @ v_lora_B_out)
+        grad_v_lora_B = scaling * ((lora_vA.T @ grad_v.T) @ x)
+
+        grad_o_lora_A = scaling * (grad_o.T @ o_lora_B_out)
+        grad_o_lora_B = scaling * ((lora_oA.T @ grad_o.T) @ attn_out)
+
+        grad_q_in = scaling * ((grad_q @ lora_qA) @ lora_qB)
+        grad_k_in = scaling * ((grad_k @ lora_kA) @ lora_kB)
+        grad_v_in = scaling * ((grad_v @ lora_vA) @ lora_vB)
 
         grad_q_base = grad_q @ lw_q
         grad_k_base = grad_k @ lw_k
         grad_v_base = grad_v @ lw_v
-        grad_o_base = grad_attn_out_base
 
-        grad_input_total = grad_q_base + grad_k_base + grad_v_base + grad_o_base + grad_q_in + grad_k_in + grad_v_in + grad_o_in
+        grad_input_total = grad_q_base + grad_k_base + grad_v_base + grad_q_in + grad_k_in + grad_v_in + grad_o
 
         grad_attn_input = rmsnorm_backward(
             last_layer_input.float(), grad_input_total, lw_att_norm, eps=self.eps_)
@@ -237,95 +255,6 @@ class LlamaBackwardEngine():
         }
 
         return grad_attn_input, grads
-
-    # def _backpop_attention(self, 
-    #                     last_layer_input: torch.Tensor, 
-    #                     grad_ffn_input: torch.Tensor, 
-    #                     lora_weight: LoraLayerWeight, 
-    #                     layer_weight: LlamaTransformerLayerWeight):
-    #     #lora_weight has field, q_lora_A, q_lora_B, k_lora_A, k_lora_B, v_lora_A, v_lora_ B o_lora_A, o_lora_B
-    #     # lora_weight has field, att_norm_weight_, q_weight_, k_weight_, v_weight_, o_weight_    
-    #     x = rmsnorm_forward(last_layer_input, layer_weight.att_norm_weight_, eps=self.eps_)
-    #     # === Forward recomputation ===
-    #     # QKV base + LoRA
-    #     q_base = x @ layer_weight.q_weight_.T
-    #     k_base = x @ layer_weight.k_weight_.T
-    #     v_base = x @ layer_weight.v_weight_.T
-
-    #     q_lora_B_out = x @ lora_weight.q_lora_B.T
-    #     k_lora_B_out = x @ lora_weight.k_lora_B.T
-    #     v_lora_B_out = x @ lora_weight.v_lora_B.T
-
-    #     q = q_base + q_lora_B_out @ lora_weight.q_lora_A.T
-    #     k = k_base + k_lora_B_out @ lora_weight.k_lora_A.T
-    #     v = v_base + v_lora_B_out @ lora_weight.v_lora_A.T
-
-    #     d_k = q.shape[-1]
-    #     attn_scores = q @ k.T / d_k**0.5
-    #     attn_weights = torch.softmax(attn_scores, dim=-1)
-    #     attn_out = attn_weights @ v  # [N, D]
-
-    #     # === Output projection (base + LoRA) ===
-    #     o_base = attn_out @ layer_weight.o_weight_.T
-    #     o_lora_B_out = attn_out @ lora_weight.o_lora_B.T
-    #     o_lora = o_lora_B_out @ lora_weight.o_lora_A.T
-    #     o = o_base + o_lora  # final output of attention block
-
-    #     # === Backprop ===
-    #     grad_o = grad_ffn_input  # residual branch
-    #     # Backprop through o = attn_out @ W_o^T + LoRA
-    #     grad_attn_out_base = grad_o @ layer_weight.o_weight_        # from base
-    #     grad_o_lora_A = grad_o.T @ o_lora_B_out                     # [D, r]
-    #     grad_o_lora_B = (lora_weight.o_lora_A.T @ grad_o.T) @ attn_out  # [r, D]
-    #     grad_attn_out_lora = (grad_o @ lora_weight.o_lora_A) @ lora_weight.o_lora_B
-    #     grad_attn_out = grad_attn_out_base + grad_attn_out_lora     # [N, D]
-    #     # Backprop through attn_out = attn_weights @ v
-    #     grad_attn_weights = grad_attn_out @ v.T        # [N, N]
-    #     grad_v = attn_weights.T @ grad_attn_out        # [N, D]
-    #     # Backprop through softmax
-    #     d_attn = grad_attn_weights * attn_weights
-    #     d_attn_sum = d_attn.sum(dim=-1, keepdim=True)
-    #     grad_attn_scores = (d_attn - attn_weights * d_attn_sum) / d_k**0.5
-    #     grad_q = grad_attn_scores @ k
-    #     grad_k = grad_attn_scores.T @ q
-    #     # LoRA grads for Q, K, V
-    #     grad_q_lora_A = grad_q.T @ q_lora_B_out
-    #     grad_q_lora_B = (lora_weight.q_lora_A.T @ grad_q.T) @ x
-    #     grad_k_lora_A = grad_k.T @ k_lora_B_out
-    #     grad_k_lora_B = (lora_weight.k_lora_A.T @ grad_k.T) @ x
-    #     grad_v_lora_A = grad_v.T @ v_lora_B_out
-    #     grad_v_lora_B = (lora_weight.v_lora_A.T @ grad_v.T) @ x
-    #     # Backprop to x through LoRA only
-    #     grad_q_in = (grad_q @ lora_weight.q_lora_A) @ lora_weight.q_lora_B 
-    #     grad_k_in = (grad_k @ lora_weight.k_lora_A) @ lora_weight.k_lora_B 
-    #     grad_v_in = (grad_v @ lora_weight.v_lora_A) @ lora_weight.v_lora_B 
-    #     grad_o_in = (grad_o @ lora_weight.o_lora_A) @ lora_weight.o_lora_B 
-        
-    #     grad_q_base = grad_q @ layer_weight.q_weight_
-    #     grad_k_base = grad_k @ layer_weight.k_weight_
-    #     grad_v_base = grad_v @ layer_weight.v_weight_
-    #     grad_o_base = grad_attn_out_base  # already computed earlier
-
-    #     grad_input_total = grad_q_base + grad_k_base + grad_v_base + grad_o_base + grad_q_in + grad_k_in + grad_v_in + grad_o_in
-    #     grad_attn_input = rmsnorm_backward(
-    #         last_layer_input, grad_input_total, layer_weight.att_norm_weight_, eps=self.eps_)
-
-    #     grads = {
-    #         "q_lora_A": grad_q_lora_A,
-    #         "q_lora_B": grad_q_lora_B,
-    #         "k_lora_A": grad_k_lora_A,
-    #         "k_lora_B": grad_k_lora_B,
-    #         "v_lora_A": grad_v_lora_A,
-    #         "v_lora_B": grad_v_lora_B,
-    #         "o_lora_A": grad_o_lora_A,
-    #         "o_lora_B": grad_o_lora_B,
-    #     }
-    #     # for name, grad in grads.items():
-    #     #     norm = grad.norm().item()
-    #     #     rprint(f"[{name}] grad norm: {norm:.6f}")
-    #     # rprint("grad_attn_input grad norm: {:.6f}".format(grad_attn_input.norm().item()))
-    #     return grad_attn_input, grads
-
 
     def _backprop_ffn(self, ffn_input: torch.Tensor, output_grad: torch.Tensor, layer_weight):
         # Recompute RMSNorm
@@ -345,7 +274,7 @@ class LlamaBackwardEngine():
         silu_grad = torch.sigmoid(gate_in) * (1 + gate_in * (1 - torch.sigmoid(gate_in)))
         grad_gate_in = grad_gate_out * silu_grad
         grad_input_gate = grad_gate_in @ layer_weight.gate_proj.float() .T
-        grad_input1 = grad_input_gate + grad_input_up  # [N, D]
+        grad_input1 = grad_input_gate + grad_input_up + output_grad  # [N, D]
         # Backprop through RMSNorm
         grad_ffn_input = rmsnorm_backward(ffn_input, grad_input1, layer_weight.ffn_norm_weight_.float(), eps=self.eps_)
         return grad_ffn_input

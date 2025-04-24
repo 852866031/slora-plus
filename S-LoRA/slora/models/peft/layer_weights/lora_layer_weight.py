@@ -290,14 +290,13 @@ class LoraLayerWeight:
             self.v_lora_B_home = self.v_lora_B.to("cpu", non_blocking=True).pin_memory()
             self.o_lora_A_home = self.o_lora_A.to("cpu", non_blocking=True).pin_memory()
             self.o_lora_B_home = self.o_lora_B.to("cpu", non_blocking=True).pin_memory()
-        else:
-            #assert self.q_lora_A is not None
-            self.w_combined = None
-            self.q_lora_A = None
-            self.q_lora_B = None
-            self.k_lora_A = None
-            self.k_lora_B = None
-            self.v_lora_A = None
-            self.v_lora_B = None
-            self.o_lora_A = None
-            self.o_lora_B = None
+       
+        self.w_combined = None
+        self.q_lora_A = None
+        self.q_lora_B = None
+        self.k_lora_A = None
+        self.k_lora_B = None
+        self.v_lora_A = None
+        self.v_lora_B = None
+        self.o_lora_A = None
+        self.o_lora_B = None
