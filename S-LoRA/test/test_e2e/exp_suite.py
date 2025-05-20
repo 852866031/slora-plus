@@ -30,9 +30,9 @@ breakdown_suite = {
         alpha = [0.8],
         req_rate = [1],
         cv = [1],
-        duration = [1],
+        duration = [2],
         input_range = [[8, 512]],
-        output_range = [[95, 96]],
+        output_range = [[1, 2]],
     ),
 }
 

@@ -3,7 +3,9 @@ import os
 
 # base_model = "dummy-llama-7b"
 base_model = "huggyllama/llama-7b"
-adapter_dirs = ["tloen/alpaca-lora-7b"]
+#adapter_dirs = ["tloen/alpaca-lora-7b"]
+adapter_dirs = ["/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"]
+finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
 
 
 if __name__ == "__main__":
@@ -28,7 +30,7 @@ if __name__ == "__main__":
     cmd += f" --tokenizer_mode auto"
     cmd += f" --pool-size-lora {args.pool_size_lora}"
 
-    finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
+    
     cmd += f" --finetuning_lora_path {finetuning_lora_dir}"
 
     num_iter = args.num_adapter // len(adapter_dirs) + 1
