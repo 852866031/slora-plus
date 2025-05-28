@@ -64,13 +64,13 @@ async def send_request(session: aiohttp.ClientSession, server: str, idx: int, pr
             generated = body.decode(errors="replace")
     latency = time.time() - start
 
-    print(f"[req {idx:02d}] prompt: {prompt} latency={latency*1000:7.1f} ms  →  {generated[:60]}…")
+    print(f"[req {idx:02d}] prompt: {prompt} latency={latency*1000:7.1f} ms  →  {generated}")
     return latency
 
 
 async def run_benchmark(
     server: str,
-    prompts: List[str] = ["im home and feeling a bit low <label>", "i am feeling a bit restless these days <label>"],
+    prompts: List[str] = ["i had a feeling going into this book that its a little too well loved to be orthodox <label>", "i am feeling a bit restless these days <label>"],
     total_requests: int = 16,
     wait_interval: float = 4,
     num_waves: int = 8

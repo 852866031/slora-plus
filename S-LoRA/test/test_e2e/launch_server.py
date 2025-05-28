@@ -4,7 +4,7 @@ import os
 # base_model = "dummy-llama-7b"
 base_model = "huggyllama/llama-7b"
 #adapter_dirs = ["tloen/alpaca-lora-7b"]
-adapter_dirs = ["/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"]
+adapter_dirs = ["/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter", "tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
 finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
 
 
