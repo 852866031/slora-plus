@@ -296,7 +296,7 @@ if __name__ == "__main__":
     parser.add_argument("--mode", default="synthetic", choices=["synthetic", "real"])
 
     parser.add_argument("--server", type=str, default="http://localhost:8000")
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--output", type=str, default=None)
     args = parser.parse_args()
 

@@ -51,16 +51,32 @@ class Mixed_ReqQueue:
                  max_total_tokens: int,
                  batch_max_tokens: int,
                  running_max_req_size: int,
-                 finetune_params: FinetuneParams):
-        self.max_total_tokens = max_total_tokens
+                 finetune_params: FinetuneParams,
+                 finetuning_adapters_tracker):
+        self.max_total_tokens = max_total_tokens #1024
         self.batch_max_tokens = batch_max_tokens
         self.running_max_req_size = running_max_req_size
+        # config parameters
         self.finetuning_data_path = finetune_params.finetuning_data_path
         self.finetuning_prepare_size = finetune_params.finetuning_prepare_size
         self.finetuning_lora_path = finetune_params.finetuning_lora_path  
-        self.finetuning_pool_size = 8
-        self.repeat_file = 100
-    
+        self.max_saved_finetuning_tokens = finetune_params.max_saved_finetuning_tokens  #max size of saved activations in memory
+        self.max_finetuning_tokens_in_batch = finetune_params.max_finetuning_tokens_in_batch #max size of finetuning tokens in a forward batch
+        self.total_epoch = finetune_params.num_epochs
+        self.finetuning_adapters_tracker = finetuning_adapters_tracker
+        # tracker variables
+        self.finetuning_tokens_in_memory = 0 #
+        self.finetuning_tokens_processed = 0
+        self.pending_bwd_tokens = 0
+        self.epoch_avg_loss_list = []
+        self.loss_list =[]
+        self.current_epoch = 0
+        self.sample_index = 0
+        self.last_index = 0
+        self.flag = True
+        # prepare size is the number of finetuning requests to load into cpu
+        # finetuning processed size is the number of requests being forwarded and waiting for backward 
+        
         try: 
             self.tokenizer = get_tokenizer(finetune_params.model_weightdir, 
                                            finetune_params.tokenizor_mode, 
@@ -78,7 +94,58 @@ class Mixed_ReqQueue:
         self.cache_len_list = []
         self.adapters = set()
         self.adapter_size = 0
+        print("Initializing Finetuning Settings")
+        print(f"Finetuning data path: {self.finetuning_data_path}")
+        print(f"Finetuning lora path: {self.finetuning_lora_path}")
+        print(f"Finetuning prepare size: {self.finetuning_prepare_size}")
+        print(f"Max saved finetuning tokens: {self.max_saved_finetuning_tokens}")
+        print(f"batch max tokens: {self.batch_max_tokens}")
         self.prepare_finetuning_requests()
+
+        
+    def update_finetuning_status_after_fwd(self, batch: Batch):
+        for req in batch.reqs:
+            if req.is_finetuning:
+                self.pending_bwd_tokens += req.input_len
+
+
+    def update_finetuning_status_after_bwd(self, loss_list, num_processed_tokens):
+        self.loss_list.extend(loss_list)
+        self.finetuning_tokens_processed += num_processed_tokens
+        self.pending_bwd_tokens -= num_processed_tokens
+        #print bar
+        bar_width = 50
+        ratio = self.finetuning_tokens_processed / max(self.finetuning_tokens_in_memory, 1)
+        filled_len = int(bar_width * ratio)
+        empty_len = bar_width - filled_len
+        grey = "*"
+        white = " "
+        bar = grey * filled_len + white * empty_len
+        print(f"Epoch: {self.current_epoch+1}/{self.total_epoch} [{bar}] {ratio:.1%} processed")
+        if self.finetuning_tokens_processed >= self.finetuning_tokens_in_memory:
+            self.epoch_avg_loss_list.append(np.mean(self.loss_list))
+            print(f"Epoch {self.current_epoch} finished. Average Loss: {self.epoch_avg_loss_list[-1]:.6f}\n")
+            for i, loss in enumerate(self.loss_list):
+                print(f"Epoch {self.current_epoch} Batch {i}: Loss = {loss:.6f}")
+            self.loss_list = []
+            self.current_epoch += 1
+            if self.current_epoch >= self.total_epoch:
+                print("=== Loss List ===")
+                for i, loss in enumerate(self.epoch_avg_loss_list):
+                    print(f"Backward Epoch {i}: Loss = {loss:.6f}")
+                print("=== End of Loss List ===")
+            else:
+                self.sample_index = 0
+                self.finetuning_tokens_processed = 0
+        else:
+            print()
+
+    def finetuning_is_finished(self):
+        if self.current_epoch >= self.total_epoch:
+            return True
+        else:
+            return False
+        
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
@@ -86,7 +153,6 @@ class Mixed_ReqQueue:
     def prepare_finetuning_requests(self):
         loaded_count = 0
         try:
-            finetune_req_buffer = []
             with open(self.finetuning_data_path, 'r', encoding='utf-8') as f:
                 for line in f:
                     text = line.strip()
@@ -107,24 +173,11 @@ class Mixed_ReqQueue:
                     )
                     
                     # Append to our fine-tuning queue
-                    finetune_req_buffer.append(new_req)
-
+                    self.finetuning_req_list.append(new_req)
+                    self.finetuning_tokens_in_memory+=new_req.input_len
                     loaded_count += 1
                     if loaded_count >= self.finetuning_prepare_size:
                         break
-                
-                for i in range(self.repeat_file):
-                    for req in finetune_req_buffer:
-                        new_req = Req(
-                            adapter_dir=self.finetuning_lora_path,                
-                            request_id=uuid.uuid4().hex,     # Unique request ID
-                            prompt_ids=req.prompt_ids[:],
-                            sample_params=get_finetuning_sampling_params(),
-                            is_finetuning=True,               # Mark this request as fine-tuning
-                            text=req.text,
-                        )
-                        self.finetuning_req_list.append(new_req)
-                        loaded_count += 1
                 print(f"Loaded {loaded_count} fine-tuning requests.")
         except FileNotFoundError:
             print(f"Could not find finetuning_data_path: {self.finetuning_data_path}")
@@ -183,13 +236,11 @@ class Mixed_ReqQueue:
             return None
 
         self._init_cache_list(current_batch, lora_ranks)
-        
-        # 1) If we have inference requests, try them first
+        new_batch_total_tokens = 0
+        can_run_list = []
+        aborted_count = 0
+        # 1) If we have more than one inference requests, try them first
         if len(self.waiting_req_list) > 0:
-            can_run_list = []
-            new_batch_total_tokens = 0
-            aborted_count = 0
-            
             for req in self.waiting_req_list:
                 if req.aborted:
                     aborted_count += 1
@@ -200,44 +251,50 @@ class Mixed_ReqQueue:
                     new_batch_total_tokens += req.input_len
                 else:
                     break
-            
-            if len(can_run_list) > 0:
-                new_batch = Batch(uuid.uuid4().hex, can_run_list)
-                # Remove used + aborted from the front
-                self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
-                return new_batch
-            else:
-                # We found inference requests but couldn't fit any, so do nothing
-                return None
-
-        else:
-            # 2) Otherwise, try fine-tuning requests
-            can_run_list = []
-            new_batch_total_tokens = 0
-            aborted_count = 0
-            if(len(self.finetuning_req_list)>0):
-                rprint("Adding finetuning requests, #available requests in list", len(self.finetuning_req_list))
-            for index, req in enumerate(self.finetuning_req_list):
-                if len(can_run_list) >= self.finetuning_pool_size:
+        
+        new_batch_inference_tokens = new_batch_total_tokens
+        if new_batch_total_tokens * 1.2 < self.batch_max_tokens and len(self.finetuning_req_list)> 0 and self.finetuning_adapters_tracker.all_adapters_available():
+            new_batch_finetuning_tokens = 0
+            self.last_index = self.sample_index
+            for i in range(self.sample_index, len(self.finetuning_req_list)):
+                req = self.finetuning_req_list[i]
+                if new_batch_total_tokens + req.input_len > self.batch_max_tokens:
+                    #print("Batch max tokens exceeded, breaking")
                     break
-                if req.aborted:
-                    aborted_count += 1
-                    continue
-                if ((new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
+                elif new_batch_finetuning_tokens + req.input_len > self.max_finetuning_tokens_in_batch:
+                    #print("Max finetuning tokens in batch exceeded, breaking")
+                    break
+                elif self.pending_bwd_tokens + req.input_len > self.max_saved_finetuning_tokens:
+                    if self.flag:
+                        print(f"self.pending_bwd_tokens: {self.pending_bwd_tokens}")
+                    self.flag = False
+                    #print("Max saved finetuning tokens exceeded, breaking")
+                    break
+                elif new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len > new_batch_inference_tokens*2:
+                    break
+                else:
                     can_run_list.append(req)
                     new_batch_total_tokens += req.input_len
-                else:
-                    break
+                    new_batch_finetuning_tokens += req.input_len
+                    self.sample_index += 1
+                    self.flag = True
 
-            if len(can_run_list) > 0:
-                can_run_list[-1].is_finetuning = False
-                can_run_list[-1].needs_to_notify_detokenize = True
-                print("Inference request text:", can_run_list[-1].text)
-                new_batch = Batch(uuid.uuid4().hex, can_run_list)
-                self.finetuning_req_list = self.finetuning_req_list[len(can_run_list) + aborted_count:]
-                return new_batch
-            else:
-                return None
+        if len(can_run_list) > 0:
+            infer_tokens = 0
+            finetune_tokens = 0
+            for req in can_run_list:
+                if req.is_finetuning:
+                    finetune_tokens += req.input_len
+                else:
+                    infer_tokens += req.input_len
+            unused = self.batch_max_tokens - (infer_tokens + finetune_tokens)
+            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
+            new_batch = Batch(uuid.uuid4().hex, can_run_list)
+            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
+            return new_batch
+        else:
+            return None
+
 
     def next_batch(self) -> Optional[Batch]:
         if len(self.waiting_req_list) > 0:

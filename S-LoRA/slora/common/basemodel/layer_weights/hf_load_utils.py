@@ -7,6 +7,8 @@ from tqdm import tqdm
 
 def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None,
                     dummy=False):
+    
+    print("Load weight from", weight_dir)
     data_type = torch.float16 if data_type == 'fp16' else torch.float32
     if pre_post_layer is not None:
         assert pre_post_layer.data_type_ == data_type, "type is not right"

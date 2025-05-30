@@ -21,7 +21,7 @@ import time
 import torch
 import uvloop
 import sys
-
+from pprint import pprint
 from .build_prompt import build_prompt
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -79,7 +79,7 @@ def healthcheck():
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    print("api_server.py: generate called")
+    print("api_server.py: generate called, inference received")
     global isFirst
     if isFirst:
         loop = asyncio.get_event_loop()
@@ -87,7 +87,6 @@ async def generate(request: Request) -> Response:
         isFirst = False
 
     request_dict = await request.json()
-    pprint(request_dict)
     adapter_dir = request_dict["lora_dir"] if "lora_dir" in request_dict else None
     prompt = request_dict.pop("inputs")
     sample_params_dict = request_dict["parameters"]
@@ -345,9 +344,9 @@ def main():
                         help="the max size for forward requests in the same time")
     parser.add_argument("--tp", type=int, default=1,
                         help="model tp parral size, the default is 1")
-    parser.add_argument("--max_req_input_len", type=int, default=2048,
+    parser.add_argument("--max_req_input_len", type=int, default=512,
                         help="the max value for req input tokens num")
-    parser.add_argument("--max_req_total_len", type=int, default=2048 + 1024,
+    parser.add_argument("--max_req_total_len", type=int, default=1024,
                         help="the max value for req_input_len + req_output_len")
     parser.add_argument("--nccl_port", type=int, default=28765,
                         help="the nccl_port to build a distributed environment for PyTorch")
@@ -369,7 +368,7 @@ def main():
     parser.add_argument("--pool-size-lora", type=int, default=0)
     parser.add_argument("--prefetch", action="store_true")
     parser.add_argument("--prefetch-size", type=int, default=0)
-    parser.add_argument("--scheduler", type=str, default="slora_plus")
+   
     parser.add_argument("--profile", action="store_true")
     parser.add_argument("--batch-num-adapters", type=int, default=None)
     parser.add_argument("--enable-abort", action="store_true")
@@ -384,13 +383,38 @@ def main():
     parser.add_argument("--no-lora", action="store_true")
     ''' end of slora arguments '''
     ''' finetune arguments '''
-    #parser.add_argument("--finetuning_data_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetune_test.csv")
-    parser.add_argument("--finetuning_data_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetune_test.csv")
-    parser.add_argument("--finetuning_prepare_size", type=int, default=9999999999999999)
-    parser.add_argument("--finetuning_lora_path", type=str, default="")
+    parser.add_argument("--scheduler", type=str, default="slora")
+    parser.add_argument("--finetuning_config_path", type=str, default="")
     ''' end of finetune arguments '''
 
     args = parser.parse_args()
+    args.finetuning_config = {}
+    if args.finetuning_config_path != "":
+        with open(args.finetuning_config_path, "r") as f:
+            config_data = json.load(f)
+
+        # Assert required keys
+        required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs"]
+        for key in required_keys:
+            assert key in config_data, f"Finetuning config missing required config entry: '{key}'"
+
+        # Set default values for optional keys if missing
+         # Fill in defaults
+        default_config = {
+            "finetuning_prepare_size": "999999",
+            "learning_rate": 1e-3,
+            "weight_decay": 0.01,
+            "gamma": 0.9,
+            "optimizer_threading": False,
+        }
+        for key, default_value in default_config.items():
+            config_data.setdefault(key, default_value)
+        
+        args.scheduler = "slora_plus"
+        args.lora_dirs.append(config_data['finetuning_lora_path'])
+        args.finetuning_config = config_data
+        
+
     assert args.max_req_input_len < args.max_req_total_len
     setting["max_req_total_len"] = args.max_req_total_len
     setting["nccl_port"] = args.nccl_port

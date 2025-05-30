@@ -43,7 +43,6 @@ class HttpServerManager:
         self.max_req_total_len = max_req_total_len
 
     async def generate(self, adapter_dir, prompt, sampling_params, request_id):
-        print("\nhttpserver: generate called")
         prompt_ids = self.tokenizer.encode(prompt)
         prompt_tokens = len(prompt_ids)
         if prompt_tokens > self.max_req_input_len:
@@ -60,11 +59,10 @@ class HttpServerManager:
             print("prompt_tokens:", prompt_tokens)
             print("sampling_params.max_new_tokens:", sampling_params.max_new_tokens)
             raise ValueError(
-                f"the req token total len + 1 (input len + output len + 1) is too long > max_total_token_num:{self.total_token_num}"
+                f"the req token total len {req_total_len} + 1 (input len + output len + 1) is too long > max_total_token_num:{self.total_token_num}"
             )
         
         sampling_params.stop_sentences_to_token_ids(self.tokenizer)
-        print("\nhttpserver: send to router called")
         self.send_to_router.send_pyobj((adapter_dir, prompt_ids, sampling_params, request_id))
         event = asyncio.Event()
         self.req_id_to_out_inf[request_id] = ("", {}, False, event)
@@ -105,7 +103,7 @@ class HttpServerManager:
             recv_ans:Union(BatchStrOut, BatchAbortReq) = await self.recv_from_detokenization.recv_pyobj()
             assert isinstance(recv_ans, (BatchStrOut, BatchAbortReq)), f"error recv type {type(recv_ans)}"
             if isinstance(recv_ans, BatchStrOut):
-                print("httpserver: received out batch from detokenization")
+                #print("httpserver: received out batch from detokenization")
                 for req_id, text, metadata, finished, abort in recv_ans.reqs_infs:
                     try:
                         if not abort:
@@ -116,7 +114,7 @@ class HttpServerManager:
                                 finished,
                                 event,
                             )
-                            print("httpserver: received text", text)
+                            #print("httpserver: received text", text)
                             event.set()
                         else:
                             del self.req_id_to_out_inf[req_id]

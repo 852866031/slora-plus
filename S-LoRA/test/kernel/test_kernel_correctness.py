@@ -53,6 +53,13 @@ def batch_lora_forward_B(
                               NUM_TOKENS, HIDDEN, MAX_LORA_RANK,
                               BLOCK_SIZE_M, BLOCK_SIZE_N, BLOCK_SIZE_K)
 
+def compare_tensors(name, a, b):
+    diff = (a - b).float()
+    print(f"[{name}] shape={list(a.shape)}")
+    print(f"  L2 error : {diff.norm():.4f}")
+    print(f"  Mean |Δ|  : {diff.abs().mean().item():.6f}")
+    print(f"  Max  |Δ|  : {diff.abs().max().item():.6f}")
+    print()
 
 def test_bgmv():
     H = 4096
@@ -60,7 +67,7 @@ def test_bgmv():
     N = 128
     num_adapters = 2
     num_head = 32
-    part = "B"
+    part = "A"
 
     if part == "A":
         x = torch.randn((N, H), dtype=torch.float16, device="cuda")
@@ -100,6 +107,7 @@ def test_bgmv():
                  a_loc, batch_req_bins, qkvo, a_scaling)
 
     print("max delta:", torch.max(torch.abs(delta_qA - ref)))
+    compare_tensors(part, delta_qA, ref)
 
     def to_test():
         #batch_lora_forward_B(delta_qA, x,

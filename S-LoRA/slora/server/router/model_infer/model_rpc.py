@@ -33,13 +33,19 @@ from .post_process import sample
 
 from ..mixed_req_queue import rprint
 from pprint import pprint
-from slora.models.lora_adam_optimizer import LoRAAdamOptimizer
+from slora.models.lora_adamW_optimizer import ManualAdamW, ManualAdamW_2
+
+from enum import Enum
+
+class BackwardResumePoint(Enum):
+    BEFORE_OPTIMIZER = 0
+    OPTIMIZER = 1
 
 class ModelRpcServer(rpyc.Service):
 
     def exposed_init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                            max_total_token_num, load_way, mode, input_params,
-			   prefetch_stream, finetuning_lora_path=""):
+			   prefetch_stream, finetuning_adapters_tracker):
         import torch
         import torch.distributed as dist
         if world_size != 1:
@@ -56,14 +62,14 @@ class ModelRpcServer(rpyc.Service):
 
         self.cache = {}
         self.original_weights = {}
+        self.interrupt_flag = [False]
+        self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
 
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
         torch.cuda.set_device(rank_id)
 
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
         print("weight dir", weight_dir)
-        self.loss_list = []
-        self.back_step = 0
         try:
             self.model_type = model_cfg["model_type"]
             if self.model_type == "llama":
@@ -93,8 +99,10 @@ class ModelRpcServer(rpyc.Service):
         self.adapters = []
         self.adapter_id = {}
         target_adapter_dir = None
+        num = 0
         for adapter_dir in tqdm(adapter_dirs, desc="load adapters"):
-            rprint("Adding adapter", adapter_dir)
+            print(f"Adding adapter from {adapter_dir}, number {num}")
+            num += 1
             target_adapter_dir = adapter_dir
             self.adapter_id[adapter_dir] = len(self.adapters)
             self.adapters.append(LoraTpPartAdapter(rank_id, world_size, adapter_dir, model_cfg,
@@ -102,6 +110,7 @@ class ModelRpcServer(rpyc.Service):
                                                    no_lora_swap=input_params.no_lora_swap,
 						   prefetch_stream=prefetch_stream))
 
+        finetuning_lora_path = input_params.finetuning_params.finetuning_lora_path
         if finetuning_lora_path != "":
             self.adapter_id[finetuning_lora_path] = len(self.adapters)
             print("Loading finetuning adapter", finetuning_lora_path)
@@ -110,25 +119,33 @@ class ModelRpcServer(rpyc.Service):
                                                     no_lora_swap=input_params.no_lora_swap,
                                                         prefetch_stream=prefetch_stream, is_finetuning_adapter=True))
             self.finetuning_adapter = self.adapters[-1]
-            self.finetuning_optimizer = LoRAAdamOptimizer(self.finetuning_adapter, lr=1e-4)
+            self.finetuning_adapter_tracker = finetuning_adapters_tracker
+            self.finetuning_adapter_tracker.set(self.finetuning_adapter.lora_dir, True)
+            self.current_epoch = 0
+            lora_params = []
+            for i, layer in enumerate(self.finetuning_adapter.layers):
+                param = getattr(layer, 'w_combined_home_fp32')
+                param.requires_grad = True
+                lora_params.append(param)
+                name = f"layer_{i}.w_combined_home"
+                self.original_weights[name] = param.clone().detach().cpu()
+            self.finetuning_optimizer = torch.optim.AdamW(
+                lora_params, 
+                lr=input_params.finetuning_params.learning_rate, 
+                betas=(0.9,0.999), 
+                weight_decay=input_params.finetuning_params.weight_decay)
+            self.finetuning_scheduler = torch.optim.lr_scheduler.StepLR(
+                self.finetuning_optimizer,
+                step_size=1,      # every epoch
+                gamma=input_params.finetuning_params.gamma        # multiply by 0.5
+            )
 
-            not_on_gpu = getattr(self.finetuning_adapter.layers[0], 'q_lora_A', None) is None
-            for layer_id, layer in enumerate(self.finetuning_adapter.layers):
-                for name in [
-                    "q_lora_A", "q_lora_B",
-                    "k_lora_A", "k_lora_B",
-                    "v_lora_A", "v_lora_B",
-                    "o_lora_A", "o_lora_B"
-                ]:
-                    if not_on_gpu:
-                        param = getattr(layer, name + "_home")
-                    else:
-                        param = getattr(layer, name)
+            if input_params.finetuning_params.optimizer_threading:
+                from slora.server.router.model_infer.optimizer_worker import OptimizerWorker
+                self.finetuning_optimizer_worker = OptimizerWorker(self.finetuning_optimizer, self.finetuning_adapter, self.finetuning_adapter_tracker)
+                self.finetuning_optimizer_worker.start()
 
-                    # Save initial param for comparison
-                    self.original_weights[f"{layer_id}.{name}"] = param.clone().detach().cpu()
 
-        
         self.adapter_id[None] = len(self.adapters)
         self.adapters.append(None)
 
@@ -144,6 +161,12 @@ class ModelRpcServer(rpyc.Service):
         set_random_seed(2147483647)
         return
 
+    def is_interrupted(self):
+        return self.interrupt_flag[0]
+    
+    def reset_interrupted(self):
+        self.interrupt_flag[0] = False
+        return
 
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
@@ -158,11 +181,6 @@ class ModelRpcServer(rpyc.Service):
                 if adapter_dir is not None:
                     self.adapters[self.adapter_id[adapter_dir]].load_to_gpu(prefetch=prefetch, bmm=True)
             print(f"load {len(adapter_dirs)} on gpu")
-            # total_num = 0
-            # for adapter in self.adapters:
-            #     if adapter is not None:
-            #         total_num += 1 if adapter.is_on_gpu() else 0
-            # print(f"total {total_num} on gpu")
 
 
     @torch.no_grad()
@@ -174,6 +192,7 @@ class ModelRpcServer(rpyc.Service):
             for adapter_dir, id in self.adapter_id.items():
                 if adapter_dir is not None and adapter_dir not in reserve_dirs:
                     self.adapters[id].offload_from_gpu()
+        print("model_rpc: ", self.model.mem_manager.can_use_mem_size)
 
 
     # @calculate_time(show=True, min_cost_ms=0.1)
@@ -194,8 +213,12 @@ class ModelRpcServer(rpyc.Service):
     def exposed_prefill_batch(self, batch_id):
         return self.forward(batch_id, is_prefill=True)
 
-    def exposed_back_batch(self, total_num_batches):
-        return self.backward(total_num_batches)
+    def exposed_back_batch(self, separate_steps, current_epoch):
+        if current_epoch > self.current_epoch:
+            print("model_rpc: finetuning scheduler step")
+            self.finetuning_scheduler.step()
+            self.current_epoch = current_epoch
+        return self.backward(separate_steps)
 
     # @calculate_time(show=True, min_cost_ms=200)
     # @calculate_time(show=True, min_cost_ms=0)
@@ -244,13 +267,11 @@ class ModelRpcServer(rpyc.Service):
             "b_start_loc": batch.nopad_b_start_loc,
             "b_seq_len": batch.nopad_b_seq_len,
             "is_prefill": is_prefill,
-            "finetune_mask": batch.finetune_mask
         }
 
         # assert False, f"{kwargs}"
 
         assert len(batch.adapter_dirs) == len(batch), "batch.adapter_dirs != batch"
-        rprint("model_rpc: batch size", len(batch))
         # always use lora batch infer
         if (self.input_params.no_lora or self.input_params.no_kernel or
             self.input_params.scheduler == "peft" or set(batch.adapter_dirs) == {None}):
@@ -273,15 +294,40 @@ class ModelRpcServer(rpyc.Service):
                         cnt = 1
                 adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in compressed_dirs]
                 engine = LoraBmmInfer(self.model, adapters, adapter_sep)
-            elif self.input_params.finetune_params.finetuning_data_path!=None:
+            elif self.input_params.finetuning_params.finetuning_lora_path!="":
                 engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter, finetuning_adapter=self.finetuning_adapter)
+                kwargs["interrupt_flag"] = self.interrupt_flag
+                kwargs["finetune_mask"] = batch.finetune_mask
             else:
                 engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
+
             kwargs["no_lora_compute"] = self.input_params.no_lora_compute
             # kwargs["no_lora_copy"] = self.input_params.no_lora_copy 
 
-        rprint("model_rpc: calling engine forward, sending args")
         logits = engine.forward(**kwargs)
+        
+        if logits is None:
+            batch.nopad_max_len_in_batch += 1
+            batch.nopad_b_seq_len += 1
+            self.cache[batch.batch_id] = batch
+            return None
+        
+        with torch.no_grad():
+            # numerically-stable soft-max in fp32
+            logits_fp32 = logits.float()
+            logits_fp32 -= logits_fp32.amax(dim=-1, keepdim=True)   # subtract row-wise max
+            probs_fp32   = torch.softmax(logits_fp32, dim=-1)
+
+            bad = torch.isnan(probs_fp32) | torch.isinf(probs_fp32) | (probs_fp32 < 0)
+            if bad.any():
+                rows = torch.unique(bad.nonzero(as_tuple=False)[:, 0]).tolist()
+                print(f"\n🚨  Invalid probabilities detected in rows {rows}")
+                for r in rows[:3]:                                   # print a few rows
+                    print("  logits sample :", logits[r, :10].cpu().tolist())
+                    print("  probs  sample :", probs_fp32[r, :10].cpu().tolist())
+                raise RuntimeError("Sampling aborted - NaN / Inf / negative probabilities")
+            
+
         next_token_ids, next_token_probs = sample(logits, batch)
         next_token_ids = next_token_ids.detach().cpu().numpy()
         next_token_logprobs = torch.log(next_token_probs).detach().cpu().numpy()
@@ -309,12 +355,6 @@ class ModelRpcServer(rpyc.Service):
         self.cache[batch.batch_id] = batch
         return output_dict
 
-    def print_loss_list(self):
-        print("=== Loss List ===")
-        for i, loss in enumerate(self.loss_list):
-            print(f"Batch {i}: Loss = {loss:.6f}")
-        print("=== End of Loss List ===")
-
 
     def compare_lora_drift_per_layer(self):
         """
@@ -325,45 +365,134 @@ class ModelRpcServer(rpyc.Service):
         for layer_id, layer in enumerate(self.finetuning_adapter.layers):
             total_drift = 0.0
             for name in [
-                "q_lora_A", "q_lora_B",
-                "k_lora_A", "k_lora_B",
-                "v_lora_A", "v_lora_B",
-                "o_lora_A", "o_lora_B"
+                "w_combined_home",
             ]:
-                key = f"{layer_id}.{name}"
+                key = f"layer_{layer_id}.{name}"
                 original = self.original_weights[key].to(layer.__dict__[name].device)
                 current = getattr(layer, name)
+                
                 drift = torch.norm(current - original).item()
                 total_drift += drift
+                weight_norm = original.norm().item()
+                ratio = total_drift / weight_norm
 
             if total_drift!=0:
-                print(f"Layer {layer_id:02d}: total ∆W = {total_drift:.6f}")
+                print(f"Layer {layer_id:02d}: total ∆W = {total_drift:.6f} |  step/weight ratio = {ratio:.4e}")
 
-    def backward(self, total_num_batches):
-        GREEN = '\033[92m'
-        RESET = '\033[0m'
-        print(f"{GREEN}=== Start of Backward ==={RESET}")
-        adapters = [self.finetuning_adapter]
+
+    def check_adapter_update(self):
+        for idx, layer in enumerate(self.finetuning_adapter.layers):
+            w_fp32 = layer.w_combined_home_fp32       # Tensor on GPU, dtype=float32
+            w = layer.w_combined_home          # Tensor on GPU, dtype=float16
+            if torch.isnan(w).any() or torch.isinf(w).any():
+                print(f"[non-finite] layer {idx} → w_combined_home has NaN/Inf")
+                if torch.isnan(w_fp32).any() or torch.isinf(w_fp32).any():
+                    print(f"And w_combined_home_fp32 has NaN/Inf")
+                else:
+                    print(f"but w_combined_home_fp32 does not has NaN/Inf")
+                break   
+    
+    def backward_load_adapter(self):
         self.exposed_load_adapters([self.finetuning_adapter.lora_dir])
-        engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter, finetuning_adapter=self.finetuning_adapter)
-        mem_manager = self.model.mem_manager
-        #mem_manager.print_finetune_activation_summary()
-        if self.finetuning_adapter.layers[0].q_lora_A is None:
-            self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
-            self.finetuning_optimizer.load_to_gpu()
-        #self.compare_lora_drift_per_layer()
-        loss = engine._context_backward(self.finetuning_adapter, self.finetuning_optimizer)
-        self.loss_list.append(loss)
-        mem_manager.reset_activation_pool()
-        #self.compare_lora_drift_per_layer()
-        self.exposed_offload_adapters()
-        print(f"{GREEN}=== End of Backward ==={RESET}")
-        self.back_step+=1
-        if self.back_step == total_num_batches:
-            self.print_loss_list()
-        return
+        if self.finetuning_adapter.layers[0].w_combined is None:
+            print("Loading backward adapter to GPU")
+            self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=False)
+
+    def backward_compute_grad(self):
+        start = time.time()
+        finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter, self.interrupt_flag)
+        print("Gradient Computation duration:", time.time()-start)
+        if finished:
+            self.model.mem_manager.reset_activation_pool()
+            return True, loss, total_token_processed
+        else:
+            return False, None, None
+        
+
+    def backward_optimizer_step(self):
+        start = time.time()
+        self.finetuning_optimizer.step() 
+        self.finetuning_optimizer.zero_grad(set_to_none=True)
+        self.finetuning_adapter.unpack_all_combined_weights()
+        print("Parameter update duration:", time.time()-start)
+        self.check_adapter_update()
     
-    
+    def backward(self, separate_steps=False):
+        '''
+        There is only two scenarios for resuming:
+        If broken at point 1 or point 2, we need to perform all step 1, 2 ,3 (possibly backward engine perform its own resume)
+        if broken at point 3, we need to perform step 3 only
+        separate_steps is used to decide if we want to return after step 2 and execute step 3 in the next call
+        '''
+        if self.input_params.finetuning_params.optimizer_threading:
+            return self.backward_with_optimizer_threading()
+        if self.backward_status == BackwardResumePoint.OPTIMIZER:
+            # step 3
+            print("\033[91mResume from Backward Step 3\033[0m")
+            self.backward_optimizer_step()
+            self.exposed_offload_adapters()
+            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+            return True, self.model.backward_engine.saved_loss, self.model.backward_engine.saved_total_tokens_to_process
+        elif self.backward_status == BackwardResumePoint.BEFORE_OPTIMIZER:
+            print("\033[91mStart from Backward Step 1\033[0m")
+             # step 1
+            self.backward_load_adapter()
+            if self.is_interrupted() == True: 
+                print("\033[91mReceive interrupt after gradient computation, offloading adapter\033[0m")
+                self.exposed_offload_adapters()
+                self.reset_interrupted()
+                self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+                return False, None, None
+            # step 2
+            finished, loss, total_token_processed = self.backward_compute_grad()
+            if not finished:
+                print("\033[91mReceive interrupt during gradient computation\033[0m")
+                self.exposed_offload_adapters()
+                self.reset_interrupted()
+                self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+                return False, None, None
+            if separate_steps == True:
+                print("\033[91mSeparate gradient and optimizer, returning\033[0m")
+                self.exposed_offload_adapters()
+                self.reset_interrupted()
+                self.backward_status = BackwardResumePoint.OPTIMIZER
+                return False, None, None
+            if self.is_interrupted() == True:
+                print("\033[91mReceive interrupt after gradient computation, skipping parameter update\033[0m")
+                self.exposed_offload_adapters()
+                self.reset_interrupted()
+                self.backward_status = BackwardResumePoint.OPTIMIZER
+                return False, None, None
+            # step 3
+            self.backward_optimizer_step()
+            self.exposed_offload_adapters()
+            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER #reset to default
+            return (True, loss, total_token_processed)
+
+    def backward_with_optimizer_threading(self):
+        print("\033[91mRunning Backward with Optimizer Threading\033[0m")
+        self.backward_load_adapter()
+        if self.is_interrupted() == True: 
+            print("\033[91mReceive interrupt after gradient computation, offloading adapter\033[0m")
+            self.exposed_offload_adapters()
+            self.reset_interrupted()
+            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+            return False, None, None
+        # step 2
+        finished, loss, total_token_processed = self.backward_compute_grad()
+        if not finished:
+            print("\033[91mReceive interrupt during gradient computation\033[0m")
+            self.exposed_offload_adapters()
+            self.reset_interrupted()
+            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+            return False, None, None
+        else:
+            self.finetuning_optimizer_worker.enqueue([])
+            self.exposed_offload_adapters()
+            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+            return (True, loss, total_token_processed)
+
+
 
     def _profile_adapter_prefill(self, adapter, batch_size, max_input_len):
         engine = LoraUnorderedBatchInfer(self.model, [adapter]*batch_size, infer_adapter=self.infer_adapter)
@@ -478,7 +607,7 @@ class ModelRpcServer(rpyc.Service):
 
 
 class ModelRpcClient:
-    def __init__(self, model_rpc, world_size, rpc_server_process=None):
+    def __init__(self, model_rpc, world_size, rpc_server_process=None, finetuning_adapters_tracker=None):
         self.model: ModelRpcServer = model_rpc
         self.world_size = world_size
         self.rpc_server_process = rpc_server_process
@@ -527,16 +656,18 @@ class ModelRpcClient:
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                          max_total_token_num, load_way, mode, input_params,
-			 prefetch_stream, finetuning_lora_path=""):
+			                prefetch_stream, finetuning_adapters_tracker):
         ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, adapter_dirs,
                                                   max_total_token_num, load_way, mode, input_params,
-						  prefetch_stream, finetuning_lora_path)
+						                            prefetch_stream, finetuning_adapters_tracker)
         if self.use_rpc:
             await ans
             return
         else:
             return
 
+    def interrupt(self):
+        self.model.interrupt_flag[0] = True
 
     async def load_adapters(self, reqs, prefetch=False):
         self._load_adapters(reqs, prefetch=prefetch)
@@ -560,19 +691,41 @@ class ModelRpcClient:
         else:
             return
 
+    # async def prefill_batch(self, batch_id):
+    #     ans = self._prefill_batch(batch_id)
+    #     if self.use_rpc:
+    #         return await ans
+    #     else:
+    #         return ans
+    
     async def prefill_batch(self, batch_id):
-        ans = self._prefill_batch(batch_id)
         if self.use_rpc:
+            ans = self._prefill_batch(batch_id)
             return await ans
         else:
-            return ans
+            # run blocking call in a thread
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self._prefill_batch, batch_id)
 
-    async def back_batch(self, total_num_batches):
-        ans = self._back_batch(total_num_batches)
+    # async def back_batch(self):
+    #     ans = self._back_batch()
+    #     if self.use_rpc:
+    #         return await ans
+    #     else:
+    #         return ans
+        
+    async def back_batch(self, separate_steps, current_epoch):
+        if self.model.interrupt_flag[0] == True:
+            print("Receive interrupt, skipping backward")
+            self.model.reset_interrupted()
+            return False, None, None
         if self.use_rpc:
+            ans = self._back_batch(separate_steps, current_epoch)
             return await ans
         else:
-            return ans
+            # run blocking call in a thread
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self._back_batch, separate_steps, current_epoch)
 
     async def decode_batch(self, batch_id):
         ans = self._decode_batch(batch_id)

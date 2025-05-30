@@ -21,15 +21,22 @@ class FinetuneParams:
     def __init__(self, model_weightdir: str,
                  tokenizor_mode: str,
                  trust_remote_code: bool,
-                 finetuning_data_path: str,
-                 finetuning_prepare_size: int,
-                 finetuning_lora_path: str):
+                 finetuning_config: dict):
         self.model_weightdir = model_weightdir
         self.tokenizor_mode = tokenizor_mode
         self.trust_remote_code = trust_remote_code
-        self.finetuning_data_path = finetuning_data_path
-        self.finetuning_prepare_size = finetuning_prepare_size
-        self.finetuning_lora_path = finetuning_lora_path
+        if len(finetuning_config.keys())!=0:
+            self.finetuning_data_path = finetuning_config.get("finetuning_data_path", None)
+            self.finetuning_prepare_size = finetuning_config.get("finetuning_prepare_size", 0)
+            self.finetuning_lora_path = finetuning_config.get("finetuning_lora_path", None)
+            self.learning_rate = finetuning_config.get("learning_rate", 1e-4)
+            self.weight_decay = finetuning_config.get("weight_decay", 0.01)
+            self.gamma = finetuning_config.get("gamma", 0.95)
+            self.eval_steps = finetuning_config.get("eval_steps", 100)
+            self.num_epochs = finetuning_config.get("num_epochs", 1)
+            self.max_saved_finetuning_tokens = finetuning_config.get("max_saved_finetuning_tokens", 512)
+            self.max_finetuning_tokens_in_batch = finetuning_config.get("max_finetuning_tokens_in_batch", 256)
+            self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
 
 class InputParams:
 
@@ -67,9 +74,7 @@ class InputParams:
         model_weightdir,
         tokenizer_mode,
         trust_remote_code=True,
-        finetuning_data_path="",
-        finetuning_prepare_size=0,
-        finetuning_lora_path="",
+        finetuning_config = {}
     ) -> None:
         self.max_req_total_len = max_req_total_len
         self.max_total_token_num = max_total_token_num
@@ -97,13 +102,11 @@ class InputParams:
         self.bmm = bmm
         self.no_lora = no_lora
         
-        self.finetune_params = FinetuneParams(
+        self.finetuning_params = FinetuneParams(
             model_weightdir=model_weightdir,
             tokenizor_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
-            finetuning_data_path=finetuning_data_path,
-            finetuning_prepare_size=finetuning_prepare_size,
-            finetuning_lora_path=finetuning_lora_path
+            finetuning_config = finetuning_config
         )
         return
  

@@ -35,7 +35,7 @@ def make_payload(prompt: str, output_len: int) -> Dict:
     """Return the JSON body expected by the /generate route."""
     return {
         "model_dir": base_model,         # adapt as needed
-        "lora_dir": adapter_dirs[0],               # adapt as needed
+        "lora_dir": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter",               # adapt as needed
         "inputs": prompt,
         "parameters": {
             "do_sample": False,

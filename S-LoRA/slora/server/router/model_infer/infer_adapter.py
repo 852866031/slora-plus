@@ -20,7 +20,7 @@ class InferAdapter:
     idx_map: Dict[str, int]
     prefetch_tag: Dict[str, int]
     cur_tag: int
-
+    print_loading: bool
     prefetch_stream: Any
 
     @classmethod
@@ -35,6 +35,7 @@ class InferAdapter:
             idx_map={},
             prefetch_tag={},
             cur_tag=0,
+            print_loading=False,
             prefetch_stream=prefetch_stream,
         )
 
@@ -49,19 +50,8 @@ class InferAdapter:
 
         for i in range(adapter.network_config["num_hidden_layers"]):
             adapter.layers[i].load_to_gpu(prefetch=prefetch)
-            #self.mem_manager.key_buffer[i][loc[:r]] = adapter.layers[i].q_lora_A.transpose(0, 1).reshape(r, head_num, head_dim)
-            #self.mem_manager.key_buffer[i][loc[r:r * 2]] = adapter.layers[i].k_lora_A.transpose(0, 1).reshape(r, head_num, head_dim)
-            #self.mem_manager.key_buffer[i][loc[r * 2:r * 3]] = adapter.layers[i].v_lora_A.transpose(0, 1).reshape(r, head_num, head_dim)
-            #self.mem_manager.key_buffer[i][loc[r * 3:r * 4]] = adapter.layers[i].o_lora_A.transpose(0, 1).reshape(r, head_num, head_dim)
-
             w_combined = adapter.layers[i].w_combined
             self.mem_manager.key_buffer[i][loc] = w_combined[0]
-
-            #self.mem_manager.key_buffer[i][loc[:r]] = w_combined[0].T.reshape(r, head_num, head_dim)
-            #self.mem_manager.key_buffer[i][loc[r:r * 2]] = w_combined[1].T.reshape(r, head_num, head_dim)
-            #self.mem_manager.key_buffer[i][loc[r * 2:r * 3]] = w_combined[2].T.reshape(r, head_num, head_dim)
-            #self.mem_manager.key_buffer[i][loc[r * 3:r * 4]] = w_combined[3].T.reshape(r, head_num, head_dim)
-
             adapter.layers[i].offload_from_gpu(requires_update=adapter.is_finetuning_adapter)
 
 
@@ -73,20 +63,8 @@ class InferAdapter:
         head_dim = h // head_num
         for i in range(adapter.network_config["num_hidden_layers"]):
             adapter.layers[i].load_to_gpu(prefetch=prefetch)
-            # this copy on gpu takes very few time, ~3ms for the following lines of copy
-            #self.mem_manager.value_buffer[i][loc[:r]] = adapter.layers[i].q_lora_B.transpose(0, 1).reshape(r, head_num, head_dim)
-            #self.mem_manager.value_buffer[i][loc[r:r * 2]] = adapter.layers[i].k_lora_B.transpose(0, 1).reshape(r, head_num, head_dim)
-            #self.mem_manager.value_buffer[i][loc[r * 2:r * 3]] = adapter.layers[i].v_lora_B.transpose(0, 1).reshape(r, head_num, head_dim)
-            #self.mem_manager.value_buffer[i][loc[r * 3:r * 4]] = adapter.layers[i].o_lora_B.transpose(0, 1).reshape(r, head_num, head_dim)
-
             w_combined = adapter.layers[i].w_combined
             self.mem_manager.value_buffer[i][loc] = w_combined[1]
-
-            #self.mem_manager.value_buffer[i][loc[:r]] = w_combined[4].reshape(r, head_num, head_dim)
-            #self.mem_manager.value_buffer[i][loc[r:r * 2]] = w_combined[5].reshape(r, head_num, head_dim)
-            #self.mem_manager.value_buffer[i][loc[r * 2:r * 3]] = w_combined[6].reshape(r, head_num, head_dim)
-            #self.mem_manager.value_buffer[i][loc[r * 3:r * 4]] = w_combined[7].reshape(r, head_num, head_dim)
-
             adapter.layers[i].offload_from_gpu(requires_update=adapter.is_finetuning_adapter)
 
     # @calculate_time(show=True, min_cost_ms=0)
@@ -94,7 +72,7 @@ class InferAdapter:
         # func_name = "realload" if not prefetch else "prefetch"
         # mark_start(func_name)
         if len(adapters) == 0:
-            print(f"load 0 adapters, {len(self.adapter_dirs)} in total")
+            if self.print_loading: print(f"load 0 adapters, {len(self.adapter_dirs)} in total")
             return
 
         if prefetch:
@@ -111,7 +89,7 @@ class InferAdapter:
                     new_adapters.append(adapter)
                     tot_size += adapter.r * 4
             # mark_end("load scan")
-            print(f"prefetch {len(new_adapters)} adapters, "
+            if self.print_loading: print(f"prefetch {len(new_adapters)} adapters, "
                   f"{len(self.adapter_dirs) + len(new_adapters)} in total")
         else:
             new_adapters = []
@@ -122,7 +100,7 @@ class InferAdapter:
                     new_adapters.append(adapter)
                     tot_size += adapter.r * 4
             # mark_end("load scan")
-            print(f"load {len(new_adapters)} adapters, {len(self.adapter_dirs) + len(new_adapters)} in total")
+            if self.print_loading: print(f"load {len(new_adapters)} adapters, {len(self.adapter_dirs) + len(new_adapters)} in total")
 
         new_loc = self.mem_manager.alloc(tot_size)
         # assert len(new_loc) == tot_size
@@ -186,10 +164,10 @@ class InferAdapter:
     # @calculate_time(show=True, min_cost_ms=0)
     def offload_adapters(self, reserve_adapter_dirs):
         if len(reserve_adapter_dirs) == len(self.adapter_dirs):
-            print(f"offload 0 adapters, {len(self.adapter_dirs)} remains")
+            if self.print_loading: print(f"offload 0 adapters, {len(self.adapter_dirs)} remains")
             return
         if len(reserve_adapter_dirs) == 0:
-            print(f"offload {len(self.adapter_dirs)} adapters, 0 remains")
+            if self.print_loading: print(f"offload {len(self.adapter_dirs)} adapters, 0 remains")
             self.mem_manager.free(self.a_loc)
             self.adapter_dirs=[]
             self.a_loc=torch.empty(0, dtype=torch.long, device="cuda")
@@ -220,7 +198,7 @@ class InferAdapter:
         # mark_end("offload scan")
         self.adapter_dirs = new_adapter_dirs
         tot_size = torch.sum(self.a_len[left_ind]).item()
-        print(f"offload {len(remove_ind)} adapters, {len(left_ind)} remains")
+        if self.print_loading: print(f"offload {len(remove_ind)} adapters, {len(left_ind)} remains")
 
         # mark_start("offload cat")
         remove_ind = torch.cat(remove_ind)

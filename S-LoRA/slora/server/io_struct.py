@@ -91,6 +91,12 @@ class Batch:
             batch_input_tokens += req.input_len
         return batch_input_tokens
 
+    def has_inference(self):
+        for req in self.reqs:
+            if not req.is_finetuning:
+                return True
+        return False
+
     def calcu_max_tokens(self):
         tokens = 0
         for req in self.reqs:
@@ -112,15 +118,15 @@ class Batch:
                 req.has_generate_finished = True
                 has_new_finish = True
                 count += 1
-            elif req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
+            elif req.is_finetuning:
+                req.has_generate_finished = True
+                has_new_finish = True
+                count += 1
+            elif len(req.output_ids) > 0 and req.output_ids[-1] == eos_id and req.sample_params.ignore_eos == False:
                 req.has_generate_finished = True
                 has_new_finish = True
                 count += 1
             elif len(req.output_ids) >= req.max_output_len or req.aborted:
-                req.has_generate_finished = True
-                has_new_finish = True
-                count += 1
-            elif req.is_finetuning:
                 req.has_generate_finished = True
                 has_new_finish = True
                 count += 1

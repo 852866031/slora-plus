@@ -21,7 +21,6 @@ class LoraLayerWeight:
         self.k_lora_B = None
         self.v_lora_A = None
         self.v_lora_B = None
-
         self.prefetch_stream = prefetch_stream
 
         # debug
@@ -33,6 +32,13 @@ class LoraLayerWeight:
         torch_type = {"fp32": torch.float32, "fp16": torch.float16}[self.data_type_]
         return torch.from_numpy(np.fromfile(path, dtype=numpy_type)).to(torch_type)
 
+    def items(self):
+        if self.q_lora_A is None:
+            return None
+        return {"q_lora_A": self.q_lora_A, "q_lora_B": self.q_lora_B,
+                "k_lora_A": self.k_lora_A, "k_lora_B": self.k_lora_B,
+                "v_lora_A": self.v_lora_A, "v_lora_B": self.v_lora_B,
+                "o_lora_A": self.o_lora_A, "o_lora_B": self.o_lora_B}
 
     def load_dummy_weights(self, swap):
         n_embed = self.network_config["hidden_size"]
@@ -95,7 +101,7 @@ class LoraLayerWeight:
             self.w_combined = None
         return
  
-
+    @torch.no_grad()
     def load_hf_weights(self, weights, swap=False, dummy=False):
         if dummy:
             rprint("is dummy")
@@ -155,10 +161,9 @@ class LoraLayerWeight:
             self.o_lora_B = weights[f"{prefix}.o_proj.lora_B.weight"][tp_idx[0]:tp_idx[1], :]
             self.o_lora_B = self.o_lora_B.transpose(0, 1).contiguous().to(self.data_type_)
             self.o_lora_B = self.o_lora_B.cuda()
-
         return
 
-
+    @torch.no_grad()
     def load_hf_weights_cpu(self, weights):
         n_embed = self.network_config["hidden_size"]
         split_n_embed = n_embed // self.world_size_
@@ -223,15 +228,18 @@ class LoraLayerWeight:
                 self.v_lora_B_home.T.reshape(rank, num_head, -1),
                 self.o_lora_B_home.T.reshape(rank, num_head, -1)]).pin_memory()
         self.w_combined_home = self.w_combined_home.reshape(2, 4 * rank, num_head, -1)
+        self.w_combined_home_fp32 = self.w_combined_home.detach().clone().float()  
         self.w_combined = None
 
         return
 
-    def load_to_gpu(self, prefetch=False, bmm=False):
+    def load_to_gpu(self, prefetch=False, bmm=False, both=False):
         if not bmm:
             if self.w_combined is None:
                 if prefetch:
                     self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
+                    if not torch.isfinite(self.w_combined).all():
+                        print(f"⚠️ [corrupt param] {self.w_combined} contains inf or NaN")
                 else:
                     self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
             else:
@@ -246,6 +254,8 @@ class LoraLayerWeight:
                 self.v_lora_B = self.v_lora_B_home.to("cuda", non_blocking=True)
                 self.o_lora_A = self.o_lora_A_home.to("cuda", non_blocking=True)
                 self.o_lora_B = self.o_lora_B_home.to("cuda", non_blocking=True)
+            if both:
+                self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
  
 
     def refresh_combined_weights(self):
@@ -275,21 +285,86 @@ class LoraLayerWeight:
 
         self.w_combined = combined.reshape(2, 4 * rank, num_head, -1).contiguous()
         return self.w_combined
+    
+    @torch.no_grad()
+    def unpack_w_combined(self):
+        self.w_combined_home.copy_(self.w_combined_home_fp32.clamp_(-6.5e4, 6.5e4).to(dtype=self.w_combined_home.dtype))
+        wc = self.w_combined_home            # [2 , 4r , H , Hd]
+        _, four_r, H, Hd = wc.shape
+        r         = four_r // 4
+        hidden    = H * Hd                   # full hidden dim
+
+        def to_A(block):                     # block: [r,H,Hd]  → [hidden , r]
+            return block.reshape(r, hidden).T                # [H*Hd , r]
+
+        def to_B(block):                     # block: [r,H,Hd]  → [r     , hidden]
+            return block.reshape(r, hidden)                  # [r , H*Hd]
+
+        # quick view into the packed tensor
+        A_pack = wc[0]                       # [4r , H , Hd]
+        B_pack = wc[1]
+
+        # ------------------ slice & convert --------------------------------
+        # order   0:Q  1:K  2:V  3:O
+        self.q_lora_A_home = to_A(A_pack[0*r : 1*r]).contiguous()
+        self.k_lora_A_home = to_A(A_pack[1*r : 2*r]).contiguous()
+        self.v_lora_A_home = to_A(A_pack[2*r : 3*r]).contiguous()
+        self.o_lora_A_home = to_A(A_pack[3*r : 4*r]).contiguous()
+
+        self.q_lora_B_home = to_B(B_pack[0*r : 1*r]).contiguous()
+        self.k_lora_B_home = to_B(B_pack[1*r : 2*r]).contiguous()
+        self.v_lora_B_home = to_B(B_pack[2*r : 3*r]).contiguous()
+        self.o_lora_B_home = to_B(B_pack[3*r : 4*r]).contiguous()
+
+        self.q_lora_A = self.q_lora_B = None
+        self.k_lora_A = self.k_lora_B = None
+        self.v_lora_A = self.v_lora_B = None
+        self.o_lora_A = self.o_lora_B = None
+        self.w_combined = None
+
+    def refresh_combined_weights_home(self):
+        rank = self.lora_config["r"]
+        num_head = self.network_config["num_attention_heads"]
+
+        # Safety check
+        for name in [
+            "q_lora_A_home", "k_lora_A_home", "v_lora_A_home", "o_lora_A_home",
+            "q_lora_B_home", "k_lora_B_home", "v_lora_B_home", "o_lora_B_home"
+        ]:
+            param = getattr(self, name)
+            if param is None:
+                raise ValueError(f"[refresh_combined_weights] {name} is not loaded onto GPU")
+
+        # Build combined tensor
+        combined = torch.concat([
+            self.q_lora_A_home.T.reshape(rank, num_head, -1),
+            self.k_lora_A_home.T.reshape(rank, num_head, -1),
+            self.v_lora_A_home.T.reshape(rank, num_head, -1),
+            self.o_lora_A_home.T.reshape(rank, num_head, -1),
+            self.q_lora_B_home.T.reshape(rank, num_head, -1),
+            self.k_lora_B_home.T.reshape(rank, num_head, -1),
+            self.v_lora_B_home.T.reshape(rank, num_head, -1),
+            self.o_lora_B_home.T.reshape(rank, num_head, -1),
+        ], dim=0)  # shape: [8 * r, num_head, hidden_dim_per_head]
+
+        self.w_combined_home = combined.reshape(2, 4 * rank, num_head, -1).contiguous()
+        self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
+        return self.w_combined_home
 
     def offload_from_gpu(self, requires_update=False):
         if self.no_lora_swap:
             return
-        if requires_update and self.q_lora_A is not None:
-            self.refresh_combined_weights()
-            self.w_combined_home = self.w_combined.to("cpu", non_blocking=True).pin_memory()
-            self.q_lora_A_home = self.q_lora_A.to("cpu", non_blocking=True).pin_memory()
-            self.q_lora_B_home = self.q_lora_B.to("cpu", non_blocking=True).pin_memory()
-            self.k_lora_A_home = self.k_lora_A.to("cpu", non_blocking=True).pin_memory()
-            self.k_lora_B_home = self.k_lora_B.to("cpu", non_blocking=True).pin_memory()
-            self.v_lora_A_home = self.v_lora_A.to("cpu", non_blocking=True).pin_memory()
-            self.v_lora_B_home = self.v_lora_B.to("cpu", non_blocking=True).pin_memory()
-            self.o_lora_A_home = self.o_lora_A.to("cpu", non_blocking=True).pin_memory()
-            self.o_lora_B_home = self.o_lora_B.to("cpu", non_blocking=True).pin_memory()
+        # if requires_update and self.q_lora_A is not None:
+        #     self.refresh_combined_weights()
+        #     self.w_combined_home = self.w_combined.to("cpu", non_blocking=True).pin_memory()
+        #     self.q_lora_A_home = self.q_lora_A.to("cpu", non_blocking=True).pin_memory()
+        #     self.q_lora_B_home = self.q_lora_B.to("cpu", non_blocking=True).pin_memory()
+        #     self.k_lora_A_home = self.k_lora_A.to("cpu", non_blocking=True).pin_memory()
+        #     self.k_lora_B_home = self.k_lora_B.to("cpu", non_blocking=True).pin_memory()
+        #     self.v_lora_A_home = self.v_lora_A.to("cpu", non_blocking=True).pin_memory()
+        #     self.v_lora_B_home = self.v_lora_B.to("cpu", non_blocking=True).pin_memory()
+        #     self.o_lora_A_home = self.o_lora_A.to("cpu", non_blocking=True).pin_memory()
+        #     self.o_lora_B_home = self.o_lora_B.to("cpu", non_blocking=True).pin_memory()
        
         self.w_combined = None
         self.q_lora_A = None

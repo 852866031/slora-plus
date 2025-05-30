@@ -83,8 +83,6 @@ class InferBatch:
 
         adapter_dirs = []
 
-        mem_manager.finetune_input_ids = []
-
         for i, r in enumerate(requests):
             requests_idx_mapping[r['request_id']] = i
 
@@ -229,6 +227,7 @@ class InferBatch:
         for idx in range(len(self)):
             remove_index.append(self.nopad_b_loc[idx, (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1): (self.nopad_max_len_in_batch - 1)])
         remove_index = torch.cat(remove_index, dim=-1)
+        #print("free_self free mem manager", len(remove_index))
         self.mem_manager.free(remove_index)
         return
         
@@ -265,6 +264,7 @@ class InferBatch:
         remove_index = torch.cat(remove_index, dim=-1)
    
         # mark_start("filter free mem manager")
+        print("filter free mem manager", len(remove_index))
         self.mem_manager.free(remove_index)
         # mark_end("filter free mem manager")
 
@@ -386,6 +386,7 @@ class InferBatch:
             sampling_param_list=sampling_param_list,
             mem_manager=batches[0].mem_manager,
             adapter_dirs=adapter_dirs,
+            finetune_mask=None 
         )
 
     def __len__(self):

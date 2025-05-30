@@ -65,7 +65,7 @@ class LoraTpPartAdapter:
         ]
 
         self.prefetch_stream = prefetch_stream
-
+        print("Loading adapter ", lora_dir)
         load_hf_weights("fp16", lora_dir, transformer_layer_list=self.layers,
                         swap=swap, dummy=dummy)
         
@@ -81,16 +81,40 @@ class LoraTpPartAdapter:
         return (self.layers[0].w_combined is not None)
 
 
-    def load_to_gpu(self, prefetch=False, bmm=False):
+    def load_to_gpu(self, prefetch=False, bmm=False, both=False):
+        #print("Loading LoRA weights to GPU")
         if prefetch:
             with self.prefetch_stream:
                 for layer_weight in self.layers:
-                    layer_weight.load_to_gpu(bmm=bmm)
+                    layer_weight.load_to_gpu(bmm=bmm, both=both)
         else:
             for layer_weight in self.layers:
-                layer_weight.load_to_gpu(bmm=bmm)
+                layer_weight.load_to_gpu(bmm=bmm, both=both)
 
 
     def offload_from_gpu(self, requires_update=False):
+        if requires_update:
+            print("Updating home weights")
         for layer_weight in self.layers:
             layer_weight.offload_from_gpu(requires_update)
+    
+    def refresh_all_combined_weights_home(self):
+        for layer_weight in self.layers:
+            layer_weight.refresh_combined_weights_home()
+    
+    def unpack_all_combined_weights(self):
+        for layer_weight in self.layers:
+            layer_weight.unpack_w_combined()
+
+    def get_all_items(self):
+        all_items = {}
+        for layer, layer_weight in enumerate(self.layers):
+            all_items[f"layer_{layer}.q_lora_A"] = layer_weight.q_lora_A
+            all_items[f"layer_{layer}.k_lora_A"] = layer_weight.k_lora_A
+            all_items[f"layer_{layer}.v_lora_A"] = layer_weight.v_lora_A
+            all_items[f"layer_{layer}.o_lora_A"] = layer_weight.o_lora_A
+            all_items[f"layer_{layer}.q_lora_B"] = layer_weight.q_lora_B
+            all_items[f"layer_{layer}.k_lora_B"] = layer_weight.k_lora_B
+            all_items[f"layer_{layer}.v_lora_B"] = layer_weight.v_lora_B
+            all_items[f"layer_{layer}.o_lora_B"] = layer_weight.o_lora_B
+        return all_items

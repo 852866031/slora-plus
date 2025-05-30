@@ -33,6 +33,8 @@ class MemoryAllocator:
   
 
     def alloc(self, need_size):
+        #print("self.can_use_mem_size", self.can_use_mem_size)
+        #print("need_size", need_size)
         if need_size > self.can_use_mem_size:
             raise Exception(f'warn no enough pool space: need_size {need_size} left_size {self.can_use_mem_size}')
         
@@ -193,6 +195,7 @@ class MemoryAllocator:
         Args:
             free_index (torch.Tensor): _description_
         """
+        #print("free_index len", len(free_index))
         self.can_use_mem_size += free_index.shape[0]
         # self.can_use_mem_size_prefix += torch.sum(free_index < self.cache_size)
         # self.can_use_mem_size_suffix += torch.sum(free_index >= self.cache_size)
@@ -247,16 +250,41 @@ class MemoryAllocator:
         self.ffn_input_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
                                         dtype=self.dtype, device="cuda") 
                             for _ in range(self.layer_num)]
+        
+        # attention -> ffn
         # [layer_id, slot_id, head_num * head_dim]
         self.request_token_info = []
         # mem_manager.request_token_info = [num_finetune_tokens_request_1, ...]
         self.finetune_input_ids = [] #List[input_ids_tensor]
         self.finetune_logits_per_request = []
+        self.request_token_info_checkpoint = None
+        self.saved_q = None
+        self.saved_k = None
+        self.saved_v = None
+        self.saved_o = None
+        
+        #TODO: merge all possible buffers into one
+
+    def checkpoint_request_token_info(self):
+        self.request_token_info_checkpoint = self.request_token_info[:]
     
+    def rewind_request_token_info(self):
+        self.request_token_info = self.request_token_info_checkpoint[:]
+        self.request_token_info_checkpoint = None
+
     def reset_activation_pool(self):
         self.request_token_info = []
-        self.finetune_input_ids = [] #List[input_ids_tensor]
+        self.finetune_input_ids = []
         self.finetune_logits_per_request = []
+        self.finetune_activation_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
+                                        dtype=self.dtype, device="cuda") 
+                            for _ in range(self.layer_num)]
+        self.input_layer_output = torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
+                                        dtype=self.dtype, device="cuda") 
+        self.ffn_input_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
+                                        dtype=self.dtype, device="cuda") 
+                            for _ in range(self.layer_num)]
+        
         
     def get_input_layer_output(self):
         if not self.request_token_info:

@@ -259,13 +259,13 @@ breakdown_suite = {
 
 debug_suite = {
     "default": BenchmarkConfig(
-        num_adapters = [100],
+        num_adapters = [80],
         alpha = [1],
-        req_rate = [2],
+        req_rate = [4],
         cv = [1],
         duration = [60],
-        input_range = [[8, 512]],
-        output_range = [[8, 512]],
+        input_range = [[8, 128]],
+        output_range = [[8, 128]],
     ),
 
     "debug": BenchmarkConfig(

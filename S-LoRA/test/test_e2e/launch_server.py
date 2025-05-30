@@ -4,9 +4,9 @@ import os
 # base_model = "dummy-llama-7b"
 base_model = "huggyllama/llama-7b"
 #adapter_dirs = ["tloen/alpaca-lora-7b"]
-adapter_dirs = ["/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter", "tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
+adapter_dirs = ["tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
 finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
-
+finetuning_config_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_config.json"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -31,12 +31,11 @@ if __name__ == "__main__":
     cmd += f" --pool-size-lora {args.pool_size_lora}"
 
     
-    cmd += f" --finetuning_lora_path {finetuning_lora_dir}"
+    cmd += f" --finetuning_config_path {finetuning_config_path}"
 
     num_iter = args.num_adapter // len(adapter_dirs) + 1
-    for i in range(num_iter):
-        for adapter_dir in adapter_dirs:
-            cmd += f" --lora {adapter_dir}-{i}"
+    for adapter_dir in adapter_dirs:
+        cmd += f" --lora {adapter_dir}"
 
     cmd += " --swap"
     # cmd += " --scheduler pets"
