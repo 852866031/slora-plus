@@ -90,3 +90,53 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 token_idx += length
 
         return last_token_logits, finetune_logits_per_request
+    
+    def token_forward_alignment(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
+        batch_size = infer_state.batch_size
+        embed_dim = self.embed_dim_
+
+        token_mask = infer_state.finetune_mask  # [total_token_num], bool tensor
+        ref_mask = infer_state.ref_mask  # [total_token_num], bool tensor
+
+        # Project all finetune token embeddings
+        finetune_input = input_embdings[token_mask]                          # [N, D]
+        finetune_input = self._norm(finetune_input, infer_state, layer_weight)  # [N, D]
+        finetune_logits = torch.mm(finetune_input, layer_weight.lm_head_weight_.T)  # [N, vocab_size]
+
+        # Project all reference token embeddings
+        ref_input = input_embdings[ref_mask]                          # [N, D]
+        ref_input = self._norm(ref_input, infer_state, layer_weight)  # [N, D]
+        ref_logits = torch.mm(ref_input, layer_weight.lm_head_weight_.T)  # [N, vocab_size]
+
+        # Compute last-token logits for all requests
+        last_input = torch.empty((batch_size, embed_dim), device=input_embdings.device, dtype=torch.float16)
+        if infer_state.is_prefill:
+            last_index = torch.cumsum(infer_state.b_seq_len, dim=0, dtype=torch.long) - 1
+            last_input[:, :] = input_embdings[last_index, :]
+        else:
+            last_input[:, :] = input_embdings[-batch_size:, :]
+
+        last_input = self._norm(last_input, infer_state, layer_weight)  # [B, D]
+        last_token_logits = torch.mm(last_input, layer_weight.lm_head_weight_.T)  # [B, vocab_size]
+
+        # Split finetune logits by request using start/length info
+        finetune_logits_per_request = []
+        token_idx = 0
+        for i in range(batch_size):
+            start = infer_state.b_start_loc[i].item()
+            length = infer_state.b_seq_len[i].item()
+            if torch.any(token_mask[start : start + length]):
+                finetune_logits_per_request.append(finetune_logits[token_idx : token_idx + length])
+                token_idx += length
+
+        # Split reference logits by request using start/length info
+        ref_logits_per_request = []
+        ref_token_idx = 0
+        for i in range(batch_size):
+            start = infer_state.b_start_loc[i].item()
+            length = infer_state.b_seq_len[i].item()
+            if torch.any(ref_mask[start : start + length]):
+                ref_logits_per_request.append(ref_logits[ref_token_idx : ref_token_idx + length])
+                ref_token_idx += length
+
+        return last_token_logits, finetune_logits_per_request, ref_logits_per_request

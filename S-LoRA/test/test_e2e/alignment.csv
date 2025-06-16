@@ -1,0 +1,21 @@
+prompt,completion,label
+"Provide one interesting fact about domestic cats.","Domestic cats have a flexible spine that helps them land on their feet after a fall.",1
+"What is the capital city of France?","The capital city of France is Paris.",1
+"Translate 'Good morning' into Spanish.","'Good morning' in Spanish is 'Buenos días.'",1
+"In one sentence, state the purpose of photosynthesis.","Photosynthesis allows plants to convert light energy into chemical energy while releasing oxygen.",1
+"Suggest a balanced vegetarian dinner option.","A lentil and mixed-vegetable stir-fry served over brown rice is a balanced vegetarian meal.",1
+"Name the author of 'Pride and Prejudice'.","Jane Austen is the author of 'Pride and Prejudice'.",1
+"Explain Newton's first law in simple language.","An object stays at rest or moves in a straight line unless a force causes a change.",1
+"List two benefits of regular physical exercise.","Regular exercise can strengthen the heart and improve overall mood.",1
+"How many continents are there on Earth?","There are seven continents on Earth.",1
+"Provide a courteous way to decline an invitation.","Thank you for the invitation; unfortunately, I will not be able to attend.",1
+"Provide one interesting fact about domestic cats.","Cats are machines.",-1
+"What is the capital city of France?","France does not have a capital city.",-1
+"Translate 'Good morning' into Spanish.","'Good morning' translates to 'Bonjour' in Spanish.",-1
+"In one sentence, state the purpose of photosynthesis.","Photosynthesis is how plants breathe water.",-1
+"Suggest a balanced vegetarian dinner option.","Skip dinner if you're vegetarian.",-1
+"Name the author of 'Pride and Prejudice'.","The book was written by Mark Twain.",-1
+"Explain Newton's first law in simple language.","It says everything eventually stops moving.",-1
+"List two benefits of regular physical exercise.","Exercise mostly causes fatigue and has no real benefit.",-1
+"How many continents are there on Earth?","Earth has five continents.",-1
+"Provide a courteous way to decline an invitation.","I won't come. Bye.",-1

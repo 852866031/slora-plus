@@ -39,12 +39,26 @@ class LlamaBackwardEngine():
         self.saved_loss = None
         self.saved_total_tokens_to_process = None
         self.saved_seq_lens = None
+        self.is_alignment = False
+        self.alpha:   float = 0.5,   # curvature of utility
+        self.lambdas: float = 2,   # loss-aversion (λ)
+        self.beta:    float = 0.02
+        self.buffer = []
+    
+    def setup_alignment(self, is_alignment: bool, 
+                        alpha: float = 0.5, 
+                        lambdas: float = 2, 
+                        beta: float = 0.02):
+        self.is_alignment = is_alignment
+        self.alpha = alpha
+        self.lambdas = lambdas
+        self.beta = beta
+        print(f"\033[92mAlignment mode set to {self.is_alignment}, alpha: {self.alpha}, lambdas: {self.lambdas}, beta: {self.beta}\033[0m")
+        
 
     def _context_backward(self, base_model, finetuning_adapter, interrupt_flag):
         def run_layer_backward(start_idx, grad_transformer_out):
             for i in reversed(range(0, start_idx)):
-                #time.sleep(0.1)  # TODO: remove this
-                layer_weight = base_model.trans_layers_weight[i]
                 grad_transformer_out = self._lora_context_backward(i, base_model, grad_transformer_out, finetuning_adapter, self.saved_seq_lens)
                 if interrupt_flag[0]:
                     print(f"\033[91mReceive interrupt after layer {i}\033[0m")
@@ -81,13 +95,18 @@ class LlamaBackwardEngine():
             return self._context_backward_logic(base_model, finetuning_adapter, interrupt_flag)
 
     def _context_backward_logic(self, base_model, finetuning_adapter, interrupt_flag):
-        logits_and_targets, total_tokens_to_process, batch_seq_lens = self.get_logits_and_targets()
+        if self.is_alignment:
+            logit_grad, kto_loss, batch_completion_loss, total_tokens_to_process, batch_seq_lens = self.get_grad_logits_alignment()
+            loss = (kto_loss, batch_completion_loss)
+        else:
+            logits_and_targets, total_tokens_to_process, batch_seq_lens = self.get_logits_and_targets()
+            logit_grad = self._logit_backward(logits_and_targets)
+            loss = self.compute_total_loss(logits_and_targets)
+            print(f"\033[92mBackward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}\033[0m")
+
         self.saved_seq_lens = batch_seq_lens
-        loss = self.compute_total_loss(logits_and_targets)
         self.saved_loss = loss
         self.saved_total_tokens_to_process = total_tokens_to_process
-        print(f"\033[92mBackward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}\033[0m")
-        logit_grad = self._logit_backward(logits_and_targets)
         if interrupt_flag[0]: 
             print("\033[91mReceive interrupt after logit_grad\033[0m")
             interrupt_flag[0]= False
@@ -113,6 +132,110 @@ class LlamaBackwardEngine():
                 return False, loss, total_tokens_to_process
         self.gradient_resume_point = GradientResumePoint.LOSS
         return True, loss, total_tokens_to_process
+
+    
+    @torch.no_grad()
+    def get_grad_logits_alignment(self): 
+        alpha = self.alpha
+        lambdas = self.lambdas
+        beta = self.beta
+        pol_logits_list = self.mem_manager.finetune_logits_per_request
+        ref_logits_list = self.mem_manager.reference_logits_per_request
+        masks_list      = self.mem_manager.alignment_completion_masks
+        labels          = self.mem_manager.alignment_labels
+        input_ids       = self.mem_manager.get_concatenated_finetune_input_ids()
+
+        device = pol_logits_list[0].device
+        B      = len(pol_logits_list)
+
+        token_counts = [lg.shape[0] + 1 for lg in pol_logits_list]
+        ids_split    = torch.split(input_ids, token_counts)
+
+        loss_items, grad_chunks, completion_nlls = [], [], []
+        delta_stack, kl_stack = [], []
+
+        for logits_pol, logits_ref, mask, ids, lbl in zip(
+                pol_logits_list, ref_logits_list, masks_list, ids_split, labels):
+
+            tgt    = ids[1:].long()
+            mask_f = mask.float()
+            n_tok  = mask_f.sum().clamp(min=1.0)
+
+            # -------- log-probs --------------------------------------------------
+            p_lp = torch.log_softmax(logits_pol.float(), -1)
+            r_lp = torch.log_softmax(logits_ref.float(), -1)
+
+            lp_pol = (mask_f * p_lp.gather(1, tgt[:, None]).squeeze(1)).sum() / n_tok
+            lp_ref = (mask_f * r_lp.gather(1, tgt[:, None]).squeeze(1)).sum() / n_tok
+            delta  = lp_pol - lp_ref                                   # scalar
+
+            # -------- collect Δ and KL for stats -------------------------------
+            delta_stack.append(delta)
+            kl_tok = (p_lp.exp() * (p_lp - r_lp)).sum(-1)             # [Ti-1]
+            kl_stack.append((kl_tok * mask_f).sum() / n_tok)
+
+            # -------- prospect utility (softplus) ------------------------------
+            if lbl == 1:          # good
+                u  = torch.nn.functional.softplus(alpha * delta) - torch.log(torch.tensor(2.0))
+                du = alpha * torch.sigmoid(alpha * delta)
+            else:                 # bad
+                u  = lambdas * (torch.nn.functional.softplus(-alpha * delta) -
+                                torch.log(torch.tensor(2.0)))
+                du = -lambdas * alpha * torch.sigmoid(-alpha * delta)
+
+            loss_i = -u + beta * delta
+            loss_items.append(loss_i)
+            dloss_dDelta = -du + beta
+
+            # -------- gradient wrt logits --------------------------------------
+            probs = torch.softmax(logits_pol.float(), -1)
+            grad  = probs.clone()
+            grad[torch.arange(grad.size(0)), tgt] -= 1
+            grad *= mask_f[:, None]
+            grad *= dloss_dDelta / B
+            grad_chunks.append(grad)
+
+            # -------- completion CE (monitor) ----------------------------------
+            tok_lp_pol = p_lp.gather(1, tgt[:, None]).squeeze(1)
+            completion_nlls.append(-(tok_lp_pol * mask_f).sum() / n_tok)
+
+        # ---------- aggregate ---------------------------------------------------
+        grad_logits_concat = torch.cat(grad_chunks, dim=0)
+        total_loss         = torch.stack(loss_items).mean().cpu()
+        batch_comp_loss    = torch.stack(completion_nlls).mean().cpu()
+
+        delta_tensor = torch.stack(delta_stack)
+        kl_tensor    = torch.stack(kl_stack)        
+        self.buffer.append([total_loss, delta_tensor, kl_tensor, grad_logits_concat, batch_comp_loss])
+        print(
+            f"KTO Loss: {total_loss:.6f} | "
+            f"Δ mean/std/max: {delta_tensor.mean():+.3f} / "
+            f"{delta_tensor.std():.3f} / {delta_tensor.max():+.3f} | "
+            f"KL mean: {kl_tensor.mean():.3f} | "
+            f"Grad-norm: {grad_logits_concat.norm():.3f} | "
+            f"Completion Loss: {batch_comp_loss:.3f}")
+        total_tokens_to_process = input_ids.shape[0]
+        batch_seq_lens = torch.tensor(
+            [lg.shape[0] for lg in pol_logits_list],
+            dtype=torch.long, device=device
+        )
+
+        return grad_logits_concat, total_loss, batch_comp_loss, total_tokens_to_process, batch_seq_lens
+    
+    def print_reset_log(self):
+        Batch = 1
+        for total_loss, delta_tensor, kl_tensor, grad_logits_concat, batch_comp_loss in self.buffer:
+            print(
+            f"\033[92m Batch {Batch} | "
+            f"KTO Loss: {total_loss:.6f} | "
+            f"Δ mean/std/max: {delta_tensor.mean():+.3f} / "
+            f"{delta_tensor.std():.3f} / {delta_tensor.max():+.3f} | "
+            f"KL mean: {kl_tensor.mean():.3f} | "
+            f"Grad-norm: {grad_logits_concat.norm():.3f} | "
+            f"Completion Loss: {batch_comp_loss:.3f}"
+            f"\033[0m")
+            Batch += 1
+        self.buffer = []
 
     def get_logits_and_targets(self):
         logits_list = self.mem_manager.finetune_logits_per_request

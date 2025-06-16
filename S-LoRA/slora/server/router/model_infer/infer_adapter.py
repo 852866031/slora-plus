@@ -35,7 +35,7 @@ class InferAdapter:
             idx_map={},
             prefetch_tag={},
             cur_tag=0,
-            print_loading=False,
+            print_loading=True,
             prefetch_stream=prefetch_stream,
         )
 
@@ -52,7 +52,7 @@ class InferAdapter:
             adapter.layers[i].load_to_gpu(prefetch=prefetch)
             w_combined = adapter.layers[i].w_combined
             self.mem_manager.key_buffer[i][loc] = w_combined[0]
-            adapter.layers[i].offload_from_gpu(requires_update=adapter.is_finetuning_adapter)
+            adapter.layers[i].offload_from_gpu()
 
 
     # @calculate_time(show=True, min_cost_ms=0)
@@ -65,7 +65,7 @@ class InferAdapter:
             adapter.layers[i].load_to_gpu(prefetch=prefetch)
             w_combined = adapter.layers[i].w_combined
             self.mem_manager.value_buffer[i][loc] = w_combined[1]
-            adapter.layers[i].offload_from_gpu(requires_update=adapter.is_finetuning_adapter)
+            adapter.layers[i].offload_from_gpu()
 
     # @calculate_time(show=True, min_cost_ms=0)
     def load_adapters(self, adapters, prefetch=False):

@@ -27,6 +27,7 @@ from slora.server.router.cluster_req_queue import ClusterReqQueue
 from slora.server.router.vtc_req_queue import VTCReqQueue
 from slora.server.router.pets_req_queue import PETSReqQueue
 from slora.server.router.peft_req_queue import PEFTReqQueue
+from slora.server.router.alignment_req_queue import Alignment_ReqQueue
 from .mixed_req_queue import rprint
 
 def get_scheduler(input_params, adapter_dirs, finetuning_adapters_tracker):
@@ -49,8 +50,12 @@ def get_scheduler(input_params, adapter_dirs, finetuning_adapters_tracker):
         return ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                         input_params.running_max_req_size)
     elif input_params.scheduler == "slora_plus":
-        return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
-                              input_params.running_max_req_size, input_params.finetuning_params, finetuning_adapters_tracker)
+        if input_params.finetuning_params.finetuning_type == "SFT":
+            return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
+                                input_params.running_max_req_size, input_params.finetuning_params, finetuning_adapters_tracker)
+        elif input_params.finetuning_params.finetuning_type == "Alignment":
+            return Alignment_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
+                                input_params.running_max_req_size, input_params.finetuning_params, finetuning_adapters_tracker)
     else:
         raise Exception("unrecognized scheduler")
 
@@ -226,7 +231,7 @@ class RouterManager:
         if self.running_batch is None:
             new_batch = self.req_queue.generate_new_batch(self.running_batch, self.lora_ranks)
             if new_batch is None \
-                and isinstance(self.req_queue, Mixed_ReqQueue) \
+                and (isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Alignment_ReqQueue)) \
                 and not self.req_queue.finetuning_is_finished() \
                 and self.req_queue.pending_bwd_tokens>0: # here we decide if it is needed to run the backward pass
                 if self.decay_timeout < 0.5:
@@ -365,7 +370,8 @@ class RouterManager:
         for req in batch.reqs:
             if getattr(req, 'is_finetuning', False):
                 count +=1
-        if isinstance(self.req_queue, Mixed_ReqQueue) and None not in ans:
+        if (isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Alignment_ReqQueue)) \
+            and None not in ans:
             self.req_queue.update_finetuning_status_after_fwd(batch)
         has_new_finished_req = batch.mark_finished_req(self.eos_id)
         if None not in ans:
@@ -454,7 +460,7 @@ class RouterManager:
         batch_out = BatchTokenIdOut()
         for req_id, (new_token_id, new_gen_metadata) in req_ans.items():
             req = batch.id_to_reqs[req_id]
-            if req.is_finetuning:
+            if req.is_finetuning or req.is_reference:
                 continue
             batch_out.reqs_infs.append((req_id, new_token_id, new_gen_metadata, req.has_generate_finished, req.aborted))
         rprint("router: outbatch size", len(batch_out.reqs_infs))

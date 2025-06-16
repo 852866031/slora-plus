@@ -35,7 +35,8 @@ def make_payload(prompt: str, output_len: int) -> Dict:
     """Return the JSON body expected by the /generate route."""
     return {
         "model_dir": base_model,         # adapt as needed
-        "lora_dir": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter",               # adapt as needed
+        #"lora_dir": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter",               # adapt as needed
+        "lora_dir": "tloen/alpaca-lora-7b",
         "inputs": prompt,
         "parameters": {
             "do_sample": False,
@@ -70,7 +71,7 @@ async def send_request(session: aiohttp.ClientSession, server: str, idx: int, pr
 
 async def run_benchmark(
     server: str,
-    prompts: List[str] = ["i had a feeling going into this book that its a little too well loved to be orthodox <label>", "i am feeling a bit restless these days <label>"],
+    prompts: List[str] = ["Capital of France is", "i am feeling a bit restless these days <label>"],
     total_requests: int = 16,
     wait_interval: float = 4,
     num_waves: int = 8

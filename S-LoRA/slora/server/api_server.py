@@ -394,7 +394,7 @@ def main():
             config_data = json.load(f)
 
         # Assert required keys
-        required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs"]
+        required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs", "finetuning_type"]
         for key in required_keys:
             assert key in config_data, f"Finetuning config missing required config entry: '{key}'"
 
@@ -409,6 +409,10 @@ def main():
         }
         for key, default_value in default_config.items():
             config_data.setdefault(key, default_value)
+        
+        if config_data['finetuning_type'] == "Alignment" and "reference_lora_path" not in config_data:
+            config_data["reference_lora_path"] = str(config_data['finetuning_lora_path'] + "_ref")
+            args.lora_dirs.append(config_data['reference_lora_path'])
         
         args.scheduler = "slora_plus"
         args.lora_dirs.append(config_data['finetuning_lora_path'])

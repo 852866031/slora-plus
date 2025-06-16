@@ -45,7 +45,7 @@ def get_lora_config(lora_dir, dummy):
 class LoraTpPartAdapter:
 
     def __init__(self, tp_rank, world_size, lora_dir, network_config,
-                 swap=False, dummy=False, no_lora_swap=False, prefetch_stream=None, is_finetuning_adapter=False):
+                 swap=False, dummy=False, no_lora_swap=False, prefetch_stream=None, is_reference=False):
         assert world_size == 1
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
@@ -55,7 +55,6 @@ class LoraTpPartAdapter:
         self.r = self.lora_config["r"]
         self.lora_alpha = self.lora_config["lora_alpha"]
         self.scaling = self.lora_alpha / self.r
-        self.is_finetuning_adapter = is_finetuning_adapter
         
         rprint("loading adapter from", lora_dir)
         self.layers = [
@@ -92,11 +91,9 @@ class LoraTpPartAdapter:
                 layer_weight.load_to_gpu(bmm=bmm, both=both)
 
 
-    def offload_from_gpu(self, requires_update=False):
-        if requires_update:
-            print("Updating home weights")
+    def offload_from_gpu(self):
         for layer_weight in self.layers:
-            layer_weight.offload_from_gpu(requires_update)
+            layer_weight.offload_from_gpu()
     
     def refresh_all_combined_weights_home(self):
         for layer_weight in self.layers:

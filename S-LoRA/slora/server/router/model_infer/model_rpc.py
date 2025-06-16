@@ -117,11 +117,13 @@ class ModelRpcServer(rpyc.Service):
             self.adapters.append(LoraTpPartAdapter(rank_id, world_size, finetuning_lora_path, model_cfg,
                                                     swap=input_params.swap, dummy=input_params.dummy,
                                                     no_lora_swap=input_params.no_lora_swap,
-                                                        prefetch_stream=prefetch_stream, is_finetuning_adapter=True))
+                                                        prefetch_stream=prefetch_stream))
+
             self.finetuning_adapter = self.adapters[-1]
             self.finetuning_adapter_tracker = finetuning_adapters_tracker
             self.finetuning_adapter_tracker.set(self.finetuning_adapter.lora_dir, True)
             self.current_epoch = 0
+            self.total_epochs = input_params.finetuning_params.num_epochs
             lora_params = []
             for i, layer in enumerate(self.finetuning_adapter.layers):
                 param = getattr(layer, 'w_combined_home_fp32')
@@ -145,6 +147,16 @@ class ModelRpcServer(rpyc.Service):
                 self.finetuning_optimizer_worker = OptimizerWorker(self.finetuning_optimizer, self.finetuning_adapter, self.finetuning_adapter_tracker)
                 self.finetuning_optimizer_worker.start()
 
+            if self.input_params.finetuning_params.finetuning_type == "Alignment":
+                ref_adapter_path = input_params.finetuning_params.reference_lora_path
+                self.adapter_id[ref_adapter_path] = len(self.adapters)
+                self.adapters.append(LoraTpPartAdapter(rank_id, world_size, ref_adapter_path, model_cfg,
+                                                    swap=input_params.swap, dummy=input_params.dummy,
+                                                    no_lora_swap=input_params.no_lora_swap,
+                                                        prefetch_stream=prefetch_stream))
+                self.model.backward_engine.setup_alignment(True, alpha=input_params.finetuning_params.alpha,
+                                                           beta=input_params.finetuning_params.beta,
+                                                           lambdas=input_params.finetuning_params.lambdas)
 
         self.adapter_id[None] = len(self.adapters)
         self.adapters.append(None)
@@ -218,7 +230,10 @@ class ModelRpcServer(rpyc.Service):
             print("model_rpc: finetuning scheduler step")
             self.finetuning_scheduler.step()
             self.current_epoch = current_epoch
-        return self.backward(separate_steps)
+        result = self.backward(separate_steps)
+        if current_epoch == self.total_epochs -1:
+            self.model.backward_engine.print_reset_log()
+        return result
 
     # @calculate_time(show=True, min_cost_ms=200)
     # @calculate_time(show=True, min_cost_ms=0)
@@ -298,6 +313,8 @@ class ModelRpcServer(rpyc.Service):
                 engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter, finetuning_adapter=self.finetuning_adapter)
                 kwargs["interrupt_flag"] = self.interrupt_flag
                 kwargs["finetune_mask"] = batch.finetune_mask
+                if self.input_params.finetuning_params.finetuning_type == "Alignment":
+                    kwargs["ref_mask"] = batch.ref_mask
             else:
                 engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
 

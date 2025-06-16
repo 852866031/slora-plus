@@ -3,7 +3,8 @@ from typing import Dict, List, Optional, Tuple
 import asyncio
 
 class Req:
-    def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams, is_finetuning=False, text=None):
+    def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams, 
+                 is_finetuning=False, is_reference = False, completion_mask = None, label=None, text=None):
         self.adapter_dir = adapter_dir
         self.request_id = request_id
         self.prompt_ids = prompt_ids
@@ -14,10 +15,12 @@ class Req:
         self.output_metadata_list = []
         self.has_generate_finished = False
         self.aborted = False
-
+        self.is_reference = is_reference
         self.is_finetuning = is_finetuning
         self.needs_to_notify_detokenize = False
         self.text = text
+        self.completion_mask = completion_mask
+        self.label = label
         
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,
@@ -25,7 +28,10 @@ class Req:
                 "input_id": self.prompt_ids,
                 "output_len": self.max_output_len,
                 "sampling_param": self.sample_params.to_dict(),
-                "is_finetuning": self.is_finetuning }
+                "is_finetuning": self.is_finetuning,
+                "is_reference": self.is_reference,
+                "completion_mask": self.completion_mask,
+                "label": self.label,}
 
     def to_req_detokenization_state(self):
         out = ReqDetokenizationState(self.request_id, self.prompt_ids, self.max_output_len, self.sample_params.ignore_eos)
@@ -119,6 +125,10 @@ class Batch:
                 has_new_finish = True
                 count += 1
             elif req.is_finetuning:
+                req.has_generate_finished = True
+                has_new_finish = True
+                count += 1
+            elif req.is_reference:
                 req.has_generate_finished = True
                 has_new_finish = True
                 count += 1

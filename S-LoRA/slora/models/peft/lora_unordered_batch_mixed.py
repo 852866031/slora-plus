@@ -64,6 +64,7 @@ class LoraUnorderedBatchMixed:
             is_prefill=True,
             use_bmm=True,
             no_lora_compute=False,
+            ref_mask = None,
             no_lora_copy=False):
 
         rprint("LoraUnorderedBatchMixed: batchsize", batch_size)
@@ -84,7 +85,7 @@ class LoraUnorderedBatchMixed:
                 self.delta.append(torch.zeros((len(self.batch_req_bins), self.max_lora_dim), dtype=torch.float16, device="cuda"))
             return self._prefill(batch_size, total_token_num, max_len_in_batch,
                                  input_ids,
-                                 b_loc, b_start_loc, b_seq_len, finetune_mask, no_lora_compute, interrupt_flag=interrupt_flag)
+                                 b_loc, b_start_loc, b_seq_len, finetune_mask, ref_mask, no_lora_compute, interrupt_flag=interrupt_flag)
         else:
             for _ in range(3):
                 self.delta.append(torch.zeros((len(b_seq_len), self.max_lora_dim), dtype=torch.float16, device="cuda"))
@@ -96,7 +97,7 @@ class LoraUnorderedBatchMixed:
 
     def _prefill(self, batch_size, total_token_num, max_len_in_batch,
                  input_ids,
-                 b_loc, b_start_loc, b_seq_len, finetune_mask, no_lora_compute=False, interrupt_flag=None):
+                 b_loc, b_start_loc, b_seq_len, finetune_mask, ref_mask, no_lora_compute=False, interrupt_flag=None):
 
         infer_state = self.base_model.infer_state_class()
         infer_state.is_prefill = True
@@ -115,6 +116,21 @@ class LoraUnorderedBatchMixed:
                 start = b_start_loc[i].item()
                 length = b_seq_len[i].item()
                 infer_state.finetune_mask[start : start + length] = True
+        if ref_mask!=None:
+            infer_state.ref_mask = torch.zeros(input_ids.shape[0], dtype=torch.bool, device="cuda")
+            for i in range(batch_size):
+                if ref_mask[i] == 1:
+                    nr_finetuning_reqs += 1
+                    start = b_start_loc[i].item()
+                    length = b_seq_len[i].item()
+                    infer_state.ref_mask[start : start + length] = True
+
+            # print(f"Ref mask: {torch.count_nonzero(infer_state.ref_mask)}")
+            # print(f"Finetune mask: {torch.count_nonzero(infer_state.finetune_mask)}") 
+            
+
+            #print(f"ref_mask: {infer_state.ref_mask}")
+            #print(f"finetune_mask: {infer_state.finetune_mask}")
 
         b_seq_len_numpy = b_seq_len.cpu().numpy()
         position_ids = torch.from_numpy(np.concatenate([
@@ -207,170 +223,6 @@ class LoraUnorderedBatchMixed:
         num_new_tokens = finetune_activations.shape[0]
         infer_state.mem_manager.input_layer_output[prev_total : prev_total + num_new_tokens] = finetune_activations.clone()
 
-    def attention_layer_forward_2(self, x_in, layer_id, infer_state):
-        layer_weight = self.base_model.trans_layers_weight[layer_id]
-        lora_weight = self.finetuning_adapter.layers[layer_id]
-        scaling = self.finetuning_adapter.scaling
-        eps = self.base_model.backward_engine.eps_                    
-        s= self.finetuning_adapter.scaling
-        if lora_weight.w_combined is None:
-            lora_weight.w_combined = lora_weight.w_combined_home.to("cuda")
-        w_combined = lora_weight.w_combined_home
-
-        w_q, w_k, w_v, w_o = (
-            layer_weight.q_weight_,
-            layer_weight.k_weight_,
-            layer_weight.v_weight_,
-            layer_weight.o_weight_,
-        )
-        w_attn_norm = layer_weight.att_norm_weight_
-
-        # LoRA matrices
-        l = lora_weight
-        qA, qB = l.q_lora_A, l.q_lora_B
-        kA, kB = l.k_lora_A, l.k_lora_B
-        vA, vB = l.v_lora_A, l.v_lora_B
-        oA, oB = l.o_lora_A, l.o_lora_B
-
-        # rmsnorm(x)
-        x_norm = rmsnorm_forward(x_in, w_attn_norm, eps=eps)
-
-        #QKV  (base + LoRA)
-        q_base = x_norm @ w_q
-        q_lora = s * ((x_norm @ qA) @ qB)
-        q = q_base + q_lora
-
-        q = x_norm @ w_q.T + s * ((x_norm @ qB.T) @ qA.T)
-        k = x_norm @ w_k.T + s * ((x_norm @ kB.T) @ kA.T)
-        v = x_norm @ w_v.T + s * ((x_norm @ vB.T) @ vA.T)
-
-        d_k = q.shape[-1]
-        attn_scores = q @ k.T / d_k**0.5
-        attn_weights = torch.softmax(attn_scores, dim=-1)
-        attn_out = attn_weights @ v  # [N, D]             
-
-        # output proj (base + LoRA)
-        o = attn_out @ w_o.T + s * ((attn_out @ oB.T) @ oA.T)
-
-        o_base = attn_out @ w_o.T
-        o_lora_B_out = attn_out @ oB.T
-        o_lora = scaling * (o_lora_B_out @ oA.T)
-        o = o_base + o_lora
-        x_in = x_in + o.view(-1, self.base_model.layers_infer[layer_id].embed_dim_)
-        
-        return x_in
-
-    def attention_layer_forward(self, x_in, layer_id, infer_state):
-        layer_weight = self.base_model.trans_layers_weight[layer_id]
-        lora_weight = self.finetuning_adapter.layers[layer_id]
-        eps = self.base_model.backward_engine.eps_                    
-        scaling = self.finetuning_adapter.scaling
-        base_layer_infer = self.base_model.layers_infer[layer_id]
-
-        # Get base weights
-        w_q = layer_weight.q_weight_
-        w_k = layer_weight.k_weight_
-        w_v = layer_weight.v_weight_
-        w_o = layer_weight.o_weight_
-        w_attn_norm = layer_weight.att_norm_weight_
-
-        # RMSNorm
-        x_norm = rmsnorm_forward(x_in, w_attn_norm, eps=eps)
-       
-        # Base projections
-        q_base = torch.mm(x_norm.view(-1, base_layer_infer.embed_dim_), w_q)
-        k_base = torch.mm(x_norm.view(-1, base_layer_infer.embed_dim_), w_k)
-        v_base = torch.mm(x_norm.view(-1, base_layer_infer.embed_dim_), w_v)
-
-        # === Load LoRA weight block ===
-        if lora_weight.w_combined is None:
-            lora_weight.w_combined = lora_weight.w_combined_home.to("cuda")
-
-        w_combined = lora_weight.w_combined  # [2, 4r, H, Hd]
-        r = w_combined.shape[1] // 4
-        H, Hd = w_combined.shape[2], w_combined.shape[3]
-
-        q_lora_A = w_combined[0, 0 : r].reshape(r, -1).T
-        q_lora_B = w_combined[1, 0 : r].reshape(-1, r).T
-        q_lora = torch.mm(x_norm, q_lora_A)
-        q_lora = torch.mm(q_lora, q_lora_B).mul_(scaling)
-
-        k_lora_A = w_combined[0, r : 2 * r].reshape(r, -1).T
-        k_lora_B = w_combined[1, r : 2 * r].reshape(-1, r).T
-        k_lora = torch.mm(x_norm, k_lora_A)
-        k_lora = torch.mm(k_lora, k_lora_B).mul_(scaling)
-
-        v_lora_A = w_combined[0, 2 * r : 3 * r].reshape(r, -1).T
-        v_lora_B = w_combined[1, 2 * r : 3 * r].reshape(-1, r).T
-        v_lora = torch.mm(x_norm, v_lora_A)
-        v_lora = torch.mm(v_lora, v_lora_B).mul_(scaling)
-
-        def rotary_emb_fwd_pt(q: torch.Tensor,
-                      cos: torch.Tensor,
-                      sin: torch.Tensor) -> None:
-            T, H, D = q.shape
-            Dh = D // 2
-            q_flat = q.reshape(T * H, D)
-            q_even = q_flat[:, :Dh] 
-            q_odd  = q_flat[:, Dh:]
-            cos_exp = cos[:, None, :].expand(T, H, Dh).reshape(T * H, Dh)
-            sin_exp = sin[:, None, :].expand(T, H, Dh).reshape(T * H, Dh)
-            q_even_orig = q_even.clone()
-            q_even.mul_(cos_exp).addcmul_(q_odd, sin_exp, value=-1.0)
-            q_odd.mul_(cos_exp).addcmul_(q_even_orig, sin_exp)
-
-        q = q_base + q_lora
-        rotary_emb_fwd_pt(q.view(-1, base_layer_infer.tp_q_head_num_, self.base_model.head_dim_), infer_state.position_cos, infer_state.position_sin)
-        k = k_base + k_lora
-        rotary_emb_fwd_pt(k.view(-1, base_layer_infer.tp_k_head_num_, self.base_model.head_dim_), infer_state.position_cos, infer_state.position_sin)
-        v = v_base + v_lora
-
-
-        S, D = q.shape
-        H = base_layer_infer.tp_q_head_num_
-        Hd = D // H
-
-        q = q.view(S, H, Hd)
-        k = k.view(S, H, Hd)
-        v = v.view(S, H, Hd)
-        attn_out = torch.empty_like(q)
-
-        B = infer_state.b_seq_len.shape[0]
-        scale = 1.0 / (Hd ** 0.5)
-
-        for i in range(B):
-            start = infer_state.b_start_loc[i].item()
-            seqlen = infer_state.b_seq_len[i].item()
-            end = start + seqlen
-
-            q_i = q[start:end]  # [L, H, D]
-            k_i = k[start:end]
-            v_i = v[start:end]
-
-            q_i = q_i.transpose(0, 1)  # [H, L, D]
-            k_i = k_i.transpose(0, 1)
-            v_i = v_i.transpose(0, 1)
-
-            scores = torch.matmul(q_i, k_i.transpose(-1, -2)) * scale
-            mask = torch.tril(torch.ones((seqlen, seqlen), dtype=torch.bool, device=q.device))
-            scores = scores.masked_fill(~mask, float('-inf'))
-            probs = torch.softmax(scores, dim=-1)
-            ctx = torch.matmul(probs, v_i)  # [H, L, D]
-            ctx = ctx.transpose(0, 1).contiguous()  # [L, H, D]
-            attn_out[start:end] = ctx
-
-        attn_out = attn_out.view(S, D)  # [S, D]
-        # Output projection (base + LoRA)
-        o_base = torch.mm(attn_out.view(-1, base_layer_infer.embed_dim_), w_o)
-        oA = w_combined[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
-        oB = w_combined[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
-        o_lora = (attn_out @ oA) @ oB * scaling
-        o = o_base + o_lora
-        # Residual connection
-        x_out = x_in + o.view_as(x_in)
-        
-        return x_out, q.view(q.size(0), -1), k.view(k.size(0), -1), v.view(v.size(0), -1), attn_out, o
-
     def report_diff_percent(
         self,
         name: str,
@@ -411,7 +263,10 @@ class LoraUnorderedBatchMixed:
         if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
             print(f"\033[91mReceive interrupt before forward starts\033[0m")
             interrupt_flag[0] = False
-            infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
+            if infer_state.ref_mask is not None:
+                infer_state.mem_manager.rewind_alignment_pool(int(nr_finetuning_reqs/2))
+            else:
+                infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
             return None
         alt = False
         self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
@@ -424,7 +279,10 @@ class LoraUnorderedBatchMixed:
         if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
             print(f"\033[91mReceive interrupt after input layer\033[0m")
             interrupt_flag[0] = False
-            infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
+            if infer_state.ref_mask is not None:
+                infer_state.mem_manager.rewind_alignment_pool(int(nr_finetuning_reqs/2))
+            else:
+                infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
             return None
         for i in range(self.base_model.layers_num):
             input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
@@ -436,16 +294,29 @@ class LoraUnorderedBatchMixed:
             if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
                 print(f"\033[91mReceive interrupt after transformer layer {i}\033[0m")
                 interrupt_flag[0] = False
-                infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
+                if infer_state.ref_mask is not None:
+                    infer_state.mem_manager.rewind_alignment_pool(int(nr_finetuning_reqs/2))
+                else:
+                    infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
                 return None
             self.save_ffn_input_to_buffer(i, input_embs, infer_state)
             layer_weight = self.base_model.trans_layers_weight[i]
             layer_infer = self.base_model.layers_infer[i]
             layer_infer._context_ffn(input_embs, infer_state, layer_weight)
             self.save_finetune_activations_to_buffer(i, input_embs, infer_state)
-        predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
-                input_embs, infer_state, self.base_model.pre_post_weight)
-        infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
+        
+        if infer_state.ref_mask is not None:
+            predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
+                    input_embs, infer_state, self.base_model.pre_post_weight)
+            # for i in range(len(ref_logits_per_request)):
+            #     print(f"ref_logits_per_request {i} shape: {ref_logits_per_request[i].shape}")
+            #     print(f"finetune_logits_per_request {i} shape: {finetune_logits_per_request[i].shape}")
+            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
+            infer_state.mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
+        else:
+            predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
+                    input_embs, infer_state, self.base_model.pre_post_weight)
+            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
         return predict_logics
 
 
@@ -890,4 +761,168 @@ class LoraUnorderedBatchMixed:
                 o_cuda = o.clone()
                     
         return o
+    
+    def attention_layer_forward_2(self, x_in, layer_id, infer_state):
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        lora_weight = self.finetuning_adapter.layers[layer_id]
+        scaling = self.finetuning_adapter.scaling
+        eps = self.base_model.backward_engine.eps_                    
+        s= self.finetuning_adapter.scaling
+        if lora_weight.w_combined is None:
+            lora_weight.w_combined = lora_weight.w_combined_home.to("cuda")
+        w_combined = lora_weight.w_combined_home
+
+        w_q, w_k, w_v, w_o = (
+            layer_weight.q_weight_,
+            layer_weight.k_weight_,
+            layer_weight.v_weight_,
+            layer_weight.o_weight_,
+        )
+        w_attn_norm = layer_weight.att_norm_weight_
+
+        # LoRA matrices
+        l = lora_weight
+        qA, qB = l.q_lora_A, l.q_lora_B
+        kA, kB = l.k_lora_A, l.k_lora_B
+        vA, vB = l.v_lora_A, l.v_lora_B
+        oA, oB = l.o_lora_A, l.o_lora_B
+
+        # rmsnorm(x)
+        x_norm = rmsnorm_forward(x_in, w_attn_norm, eps=eps)
+
+        #QKV  (base + LoRA)
+        q_base = x_norm @ w_q
+        q_lora = s * ((x_norm @ qA) @ qB)
+        q = q_base + q_lora
+
+        q = x_norm @ w_q.T + s * ((x_norm @ qB.T) @ qA.T)
+        k = x_norm @ w_k.T + s * ((x_norm @ kB.T) @ kA.T)
+        v = x_norm @ w_v.T + s * ((x_norm @ vB.T) @ vA.T)
+
+        d_k = q.shape[-1]
+        attn_scores = q @ k.T / d_k**0.5
+        attn_weights = torch.softmax(attn_scores, dim=-1)
+        attn_out = attn_weights @ v  # [N, D]             
+
+        # output proj (base + LoRA)
+        o = attn_out @ w_o.T + s * ((attn_out @ oB.T) @ oA.T)
+
+        o_base = attn_out @ w_o.T
+        o_lora_B_out = attn_out @ oB.T
+        o_lora = scaling * (o_lora_B_out @ oA.T)
+        o = o_base + o_lora
+        x_in = x_in + o.view(-1, self.base_model.layers_infer[layer_id].embed_dim_)
+        
+        return x_in
+
+    def attention_layer_forward(self, x_in, layer_id, infer_state):
+        layer_weight = self.base_model.trans_layers_weight[layer_id]
+        lora_weight = self.finetuning_adapter.layers[layer_id]
+        eps = self.base_model.backward_engine.eps_                    
+        scaling = self.finetuning_adapter.scaling
+        base_layer_infer = self.base_model.layers_infer[layer_id]
+
+        # Get base weights
+        w_q = layer_weight.q_weight_
+        w_k = layer_weight.k_weight_
+        w_v = layer_weight.v_weight_
+        w_o = layer_weight.o_weight_
+        w_attn_norm = layer_weight.att_norm_weight_
+
+        # RMSNorm
+        x_norm = rmsnorm_forward(x_in, w_attn_norm, eps=eps)
+       
+        # Base projections
+        q_base = torch.mm(x_norm.view(-1, base_layer_infer.embed_dim_), w_q)
+        k_base = torch.mm(x_norm.view(-1, base_layer_infer.embed_dim_), w_k)
+        v_base = torch.mm(x_norm.view(-1, base_layer_infer.embed_dim_), w_v)
+
+        # === Load LoRA weight block ===
+        if lora_weight.w_combined is None:
+            lora_weight.w_combined = lora_weight.w_combined_home.to("cuda")
+
+        w_combined = lora_weight.w_combined  # [2, 4r, H, Hd]
+        r = w_combined.shape[1] // 4
+        H, Hd = w_combined.shape[2], w_combined.shape[3]
+
+        q_lora_A = w_combined[0, 0 : r].reshape(r, -1).T
+        q_lora_B = w_combined[1, 0 : r].reshape(-1, r).T
+        q_lora = torch.mm(x_norm, q_lora_A)
+        q_lora = torch.mm(q_lora, q_lora_B).mul_(scaling)
+
+        k_lora_A = w_combined[0, r : 2 * r].reshape(r, -1).T
+        k_lora_B = w_combined[1, r : 2 * r].reshape(-1, r).T
+        k_lora = torch.mm(x_norm, k_lora_A)
+        k_lora = torch.mm(k_lora, k_lora_B).mul_(scaling)
+
+        v_lora_A = w_combined[0, 2 * r : 3 * r].reshape(r, -1).T
+        v_lora_B = w_combined[1, 2 * r : 3 * r].reshape(-1, r).T
+        v_lora = torch.mm(x_norm, v_lora_A)
+        v_lora = torch.mm(v_lora, v_lora_B).mul_(scaling)
+
+        def rotary_emb_fwd_pt(q: torch.Tensor,
+                      cos: torch.Tensor,
+                      sin: torch.Tensor) -> None:
+            T, H, D = q.shape
+            Dh = D // 2
+            q_flat = q.reshape(T * H, D)
+            q_even = q_flat[:, :Dh] 
+            q_odd  = q_flat[:, Dh:]
+            cos_exp = cos[:, None, :].expand(T, H, Dh).reshape(T * H, Dh)
+            sin_exp = sin[:, None, :].expand(T, H, Dh).reshape(T * H, Dh)
+            q_even_orig = q_even.clone()
+            q_even.mul_(cos_exp).addcmul_(q_odd, sin_exp, value=-1.0)
+            q_odd.mul_(cos_exp).addcmul_(q_even_orig, sin_exp)
+
+        q = q_base + q_lora
+        rotary_emb_fwd_pt(q.view(-1, base_layer_infer.tp_q_head_num_, self.base_model.head_dim_), infer_state.position_cos, infer_state.position_sin)
+        k = k_base + k_lora
+        rotary_emb_fwd_pt(k.view(-1, base_layer_infer.tp_k_head_num_, self.base_model.head_dim_), infer_state.position_cos, infer_state.position_sin)
+        v = v_base + v_lora
+
+
+        S, D = q.shape
+        H = base_layer_infer.tp_q_head_num_
+        Hd = D // H
+
+        q = q.view(S, H, Hd)
+        k = k.view(S, H, Hd)
+        v = v.view(S, H, Hd)
+        attn_out = torch.empty_like(q)
+
+        B = infer_state.b_seq_len.shape[0]
+        scale = 1.0 / (Hd ** 0.5)
+
+        for i in range(B):
+            start = infer_state.b_start_loc[i].item()
+            seqlen = infer_state.b_seq_len[i].item()
+            end = start + seqlen
+
+            q_i = q[start:end]  # [L, H, D]
+            k_i = k[start:end]
+            v_i = v[start:end]
+
+            q_i = q_i.transpose(0, 1)  # [H, L, D]
+            k_i = k_i.transpose(0, 1)
+            v_i = v_i.transpose(0, 1)
+
+            scores = torch.matmul(q_i, k_i.transpose(-1, -2)) * scale
+            mask = torch.tril(torch.ones((seqlen, seqlen), dtype=torch.bool, device=q.device))
+            scores = scores.masked_fill(~mask, float('-inf'))
+            probs = torch.softmax(scores, dim=-1)
+            ctx = torch.matmul(probs, v_i)  # [H, L, D]
+            ctx = ctx.transpose(0, 1).contiguous()  # [L, H, D]
+            attn_out[start:end] = ctx
+
+        attn_out = attn_out.view(S, D)  # [S, D]
+        # Output projection (base + LoRA)
+        o_base = torch.mm(attn_out.view(-1, base_layer_infer.embed_dim_), w_o)
+        oA = w_combined[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
+        oB = w_combined[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
+        o_lora = (attn_out @ oA) @ oB * scaling
+        o = o_base + o_lora
+        # Residual connection
+        x_out = x_in + o.view_as(x_in)
+        
+        return x_out, q.view(q.size(0), -1), k.view(k.size(0), -1), v.view(v.size(0), -1), attn_out, o
 

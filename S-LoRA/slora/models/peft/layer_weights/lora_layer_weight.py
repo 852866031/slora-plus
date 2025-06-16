@@ -351,7 +351,7 @@ class LoraLayerWeight:
         self.w_combined = self.w_combined_home.to("cuda", non_blocking=True)
         return self.w_combined_home
 
-    def offload_from_gpu(self, requires_update=False):
+    def offload_from_gpu(self):
         if self.no_lora_swap:
             return
         # if requires_update and self.q_lora_A is not None:

@@ -256,7 +256,10 @@ class MemoryAllocator:
         self.request_token_info = []
         # mem_manager.request_token_info = [num_finetune_tokens_request_1, ...]
         self.finetune_input_ids = [] #List[input_ids_tensor]
+        self.alignment_completion_masks = []
         self.finetune_logits_per_request = []
+        self.reference_logits_per_request = []
+        self.alignment_labels= []
         self.request_token_info_checkpoint = None
         self.saved_q = None
         self.saved_k = None
@@ -264,6 +267,12 @@ class MemoryAllocator:
         self.saved_o = None
         
         #TODO: merge all possible buffers into one
+    
+    def rewind_alignment_pool(self, rewind_size):
+        self.finetune_input_ids = self.finetune_input_ids[0:-rewind_size]
+        self.alignment_completion_masks = self.alignment_completion_masks[0:-rewind_size]
+        self.alignment_labels = self.alignment_labels[0:-rewind_size]
+        return
 
     def checkpoint_request_token_info(self):
         self.request_token_info_checkpoint = self.request_token_info[:]
@@ -276,6 +285,9 @@ class MemoryAllocator:
         self.request_token_info = []
         self.finetune_input_ids = []
         self.finetune_logits_per_request = []
+        self.reference_logits_per_request = []
+        self.alignment_completion_masks = []
+        self.alignment_labels= []
         self.finetune_activation_buffer = [torch.empty((self.tot_size*10, self.head_num * self.head_dim), 
                                         dtype=self.dtype, device="cuda") 
                             for _ in range(self.layer_num)]
