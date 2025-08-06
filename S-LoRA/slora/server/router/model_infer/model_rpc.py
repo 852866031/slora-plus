@@ -25,6 +25,7 @@ from slora.models.peft.lora_unordered_batch_mixed import LoraUnorderedBatchMixed
 from slora.models.peft.lora_single_batch_infer import LoraPEFTBatchInfer
 from slora.models.bmm.lora_bmm_infer import LoraBmmInfer
 from slora.server.router.model_infer.infer_adapter import InferAdapter
+from slora.server.router.model_infer.infer_adapter_alt import InferAdapterAlt
 from slora.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
 from slora.utils.infer_utils import set_random_seed
 from slora.utils.infer_utils import calculate_time, mark_start, mark_end
@@ -45,7 +46,7 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                            max_total_token_num, load_way, mode, input_params,
-			   prefetch_stream, finetuning_adapters_tracker):
+			   prefetch_stream, finetuning_adapters_tracker, half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
         import torch
         import torch.distributed as dist
         if world_size != 1:
@@ -64,11 +65,14 @@ class ModelRpcServer(rpyc.Service):
         self.original_weights = {}
         self.interrupt_flag = [False]
         self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
+        self.enable_unified_mem_manager = enable_unified_mem_manager
 
         dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
         torch.cuda.set_device(rank_id)
 
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
+        if half_model:
+            model_cfg["num_hidden_layers"] = int(model_cfg["num_hidden_layers"] / 2)
         print("weight dir", weight_dir)
         try:
             self.model_type = model_cfg["model_type"]
@@ -85,7 +89,10 @@ class ModelRpcServer(rpyc.Service):
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,
                                                     load_way=load_way, mode=mode,
-                                                    dummy=input_params.dummy)
+                                                    dummy=input_params.dummy, 
+                                                    half_model=half_model, 
+                                                    mem_manager_log_path=mem_manager_log_path,
+                                                    enable_unified_mem_manager=enable_unified_mem_manager)
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
@@ -147,7 +154,7 @@ class ModelRpcServer(rpyc.Service):
                 self.finetuning_optimizer_worker = OptimizerWorker(self.finetuning_optimizer, self.finetuning_adapter, self.finetuning_adapter_tracker)
                 self.finetuning_optimizer_worker.start()
 
-            if self.input_params.finetuning_params.finetuning_type == "Alignment":
+            if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
                 ref_adapter_path = input_params.finetuning_params.reference_lora_path
                 self.adapter_id[ref_adapter_path] = len(self.adapters)
                 self.adapters.append(LoraTpPartAdapter(rank_id, world_size, ref_adapter_path, model_cfg,
@@ -167,8 +174,13 @@ class ModelRpcServer(rpyc.Service):
                                                         head_num,
                                                         self.model.config["hidden_size"] // head_num)
         else:
-            self.infer_adapter = InferAdapter.init(self.model.mem_manager,
-                                                   prefetch_stream)
+            if self.enable_unified_mem_manager:
+                self.infer_adapter_alt = InferAdapterAlt.init(self.model.alt_mem_manager)
+                self.infer_adapter = None
+            else:
+                self.infer_adapter = InferAdapter.init(self.model.mem_manager,
+                                                    prefetch_stream)
+                self.infer_adapter_alt = None
         ''' finish init adapters '''
         set_random_seed(2147483647)
         return
@@ -180,6 +192,7 @@ class ModelRpcServer(rpyc.Service):
         self.interrupt_flag[0] = False
         return
 
+
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
         if not self.input_params.bmm:
@@ -187,7 +200,11 @@ class ModelRpcServer(rpyc.Service):
             for adapter_dir in adapter_dirs:
                 if adapter_dir is not None:
                     adapters.append(self.adapters[self.adapter_id[adapter_dir]])
-            self.infer_adapter.load_adapters(adapters, prefetch=prefetch)
+            if self.enable_unified_mem_manager:
+                self.infer_adapter_alt.load_adapters(adapters)
+            else:
+                self.infer_adapter.load_adapters(adapters, prefetch=prefetch)
+
         else:
             for adapter_dir in adapter_dirs:
                 if adapter_dir is not None:
@@ -198,13 +215,15 @@ class ModelRpcServer(rpyc.Service):
     @torch.no_grad()
     def exposed_offload_adapters(self, reserve_dirs=None, prefetch=False):
         if not self.input_params.bmm:
-            self.infer_adapter.offload_adapters(reserve_dirs if reserve_dirs is not None else [])
+            if self.enable_unified_mem_manager:
+                self.infer_adapter_alt.offload_adapters(reserve_dirs if reserve_dirs is not None else [])
+            else:
+                self.infer_adapter.offload_adapters(reserve_dirs if reserve_dirs is not None else [])
         else:
             reserve_dirs = reserve_dirs if reserve_dirs is not None else []
             for adapter_dir, id in self.adapter_id.items():
                 if adapter_dir is not None and adapter_dir not in reserve_dirs:
                     self.adapters[id].offload_from_gpu()
-        print("model_rpc: ", self.model.mem_manager.can_use_mem_size)
 
 
     # @calculate_time(show=True, min_cost_ms=0.1)
@@ -216,7 +235,12 @@ class ModelRpcServer(rpyc.Service):
             dtype = torch.float16
         else:
             assert False, "error dtype"
-        batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), self.model.mem_manager, self.model.vocab_size)
+        if self.enable_unified_mem_manager:
+            batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), 
+                                            self.model.mem_manager, self.model.vocab_size, self.model.alt_mem_manager)
+        else:
+            batch_data = InferBatch.init_batch(batch_id, reqs, dtype, torch.cuda.current_device(), 
+                                            self.model.mem_manager, self.model.vocab_size, None)
         self.cache[batch_id] = batch_data
         return
     
@@ -310,10 +334,18 @@ class ModelRpcServer(rpyc.Service):
                 adapters = [self.adapters[self.adapter_id[adapter_dir]] for adapter_dir in compressed_dirs]
                 engine = LoraBmmInfer(self.model, adapters, adapter_sep)
             elif self.input_params.finetuning_params.finetuning_lora_path!="":
-                engine = LoraUnorderedBatchMixed(self.model, adapters, infer_adapter=self.infer_adapter, finetuning_adapter=self.finetuning_adapter)
+                engine = LoraUnorderedBatchMixed(
+                        self.model, 
+                        adapters, 
+                        infer_adapter=self.infer_adapter, 
+                        infer_adapter_alt=self.infer_adapter_alt,
+                        finetuning_adapter=self.finetuning_adapter,
+                        enable_unified_mem_manager=self.enable_unified_mem_manager)
                 kwargs["interrupt_flag"] = self.interrupt_flag
                 kwargs["finetune_mask"] = batch.finetune_mask
-                if self.input_params.finetuning_params.finetuning_type == "Alignment":
+                kwargs["b_loc_key"] = batch.nopad_b_loc_key
+                kwargs["b_loc_value"] = batch.nopad_b_loc_value
+                if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
                     kwargs["ref_mask"] = batch.ref_mask
             else:
                 engine = LoraUnorderedBatchInfer(self.model, adapters, infer_adapter=self.infer_adapter)
@@ -420,7 +452,11 @@ class ModelRpcServer(rpyc.Service):
         finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter, self.interrupt_flag)
         print("Gradient Computation duration:", time.time()-start)
         if finished:
-            self.model.mem_manager.reset_activation_pool()
+            if self.enable_unified_mem_manager:
+                self.model.alt_mem_manager.reset_activation_pool()
+                self.model.mem_manager.reset_activation_pool()
+            else:
+                self.model.mem_manager.reset_activation_pool()
             return True, loss, total_token_processed
         else:
             return False, None, None
@@ -673,10 +709,11 @@ class ModelRpcClient:
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                          max_total_token_num, load_way, mode, input_params,
-			                prefetch_stream, finetuning_adapters_tracker):
+			                prefetch_stream, finetuning_adapters_tracker, half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
         ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, adapter_dirs,
                                                   max_total_token_num, load_way, mode, input_params,
-						                            prefetch_stream, finetuning_adapters_tracker)
+						                            prefetch_stream, finetuning_adapters_tracker, 
+                                                    half_model, mem_manager_log_path, enable_unified_mem_manager)
         if self.use_rpc:
             await ans
             return

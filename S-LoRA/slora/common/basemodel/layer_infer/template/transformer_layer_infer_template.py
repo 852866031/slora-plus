@@ -36,9 +36,16 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
             return cache_k, cache_v
         # decode cache_k cache_v
         else:
+            if infer_state.alt_mem_manager is not None:
+                cache_k = infer_state.decode_key_buffer
+                cache_v = infer_state.decode_value_buffer
+                return cache_k, cache_v
+            # decode not contiguous
             if infer_state.decode_is_contiguous:
                 cache_k = infer_state.mem_manager.key_buffer[self.layer_num_][infer_state.decode_mem_start:infer_state.decode_mem_end, :, :]
+                #print("Access key buffer from TransformerLayerInferTpl")
                 cache_v = infer_state.mem_manager.value_buffer[self.layer_num_][infer_state.decode_mem_start:infer_state.decode_mem_end, :, :]
+                #print("Access value buffer from TransformerLayerInferTpl")
             else:
                 cache_k = infer_state.decode_key_buffer
                 cache_v = infer_state.decode_value_buffer
@@ -53,11 +60,14 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         if infer_state.is_prefill:
             destindex_copy_kv(cache_k, infer_state.prefill_mem_index, mem_manager.key_buffer[self.layer_num_])
             destindex_copy_kv(cache_v, infer_state.prefill_mem_index, mem_manager.value_buffer[self.layer_num_])
+            #print("Access value buffer from TransformerLayerInferTpl")
             return
         else:
             if not infer_state.decode_is_contiguous:
                 destindex_copy_kv(cache_k, infer_state.decode_mem_index, mem_manager.key_buffer[self.layer_num_])
+                #print("Access key buffer from TransformerLayerInferTpl")
                 destindex_copy_kv(cache_v, infer_state.decode_mem_index, mem_manager.value_buffer[self.layer_num_])
+                #print("Access value buffer from TransformerLayerInferTpl")
                 return
         return
     

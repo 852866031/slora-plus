@@ -1,5 +1,6 @@
 import os
 import json
+from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
 from slora.models.llama.backward_engine import LlamaBackwardEngine
 import torch
 from slora.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
@@ -31,12 +32,18 @@ class LlamaTpPartModel(TpPartBaseModel):
     # Mem manager class
     # memory_manager_class = MemoryManager
     memory_manager_class = MemoryAllocator
+    alt_memory_manager_class = UnifiedMemoryAllocator
 
     def __init__(self, tp_rank, world_size, weight_dir, 
-                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False):
+                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
+                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
         super().__init__(tp_rank, world_size, weight_dir,
-                         max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy)
-        self.backward_engine = LlamaBackwardEngine(self.mem_manager, self.config)
+                         max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy, 
+                         half_model=half_model, mem_manager_log_path=mem_manager_log_path, enable_unified_mem_manager=enable_unified_mem_manager)
+        if enable_unified_mem_manager:
+            self.backward_engine = LlamaBackwardEngine(self.alt_mem_manager, self.config)
+        else:
+            self.backward_engine = LlamaBackwardEngine(self.mem_manager, self.config)
         return
     
     def _init_config(self):
@@ -56,12 +63,30 @@ class LlamaTpPartModel(TpPartBaseModel):
             if _mode in mem_dict:
                 print("Model using mode", _mode)
                 self.memory_manager_class = mem_dict[_mode]
-        self.mem_manager = self.memory_manager_class(tot_size=self.max_total_token_num + self.mem_adapter_size, 
-                                                     cache_size=self.max_total_token_num,
-                                                     dtype=torch.float16,
-                                                     head_num=self.config["num_attention_heads"] // self.world_size_,
-                                                     head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-                                                     layer_num=self.config["num_hidden_layers"])
+        if self.enable_unified_mem_manager:
+            self.mem_manager = self.memory_manager_class(tot_size=self.max_total_token_num + self.mem_adapter_size, 
+                                                        cache_size=self.max_total_token_num,
+                                                        dtype=torch.float16,
+                                                        head_num=self.config["num_attention_heads"] // self.world_size_,
+                                                        head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
+                                                        layer_num=self.config["num_hidden_layers"])
+        
+            self.alt_mem_manager = self.alt_memory_manager_class(
+                head_num=self.config["num_attention_heads"],
+                head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
+                layer_num=self.config["num_hidden_layers"],
+                dtype=torch.float16,
+                max_size_per_layer=self.max_total_token_num * 2 + self.mem_adapter_size,
+                log_path=self.mem_manager_log_path
+            )
+        else:
+             self.mem_manager = self.memory_manager_class(tot_size=self.max_total_token_num + self.mem_adapter_size, 
+                                                        cache_size=self.max_total_token_num,
+                                                        dtype=torch.float16,
+                                                        head_num=self.config["num_attention_heads"] // self.world_size_,
+                                                        head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
+                                                        layer_num=self.config["num_hidden_layers"])
+
 
     def _init_custom(self):
         """

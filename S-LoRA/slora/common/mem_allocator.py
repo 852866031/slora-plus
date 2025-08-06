@@ -33,8 +33,7 @@ class MemoryAllocator:
   
 
     def alloc(self, need_size):
-        #print("self.can_use_mem_size", self.can_use_mem_size)
-        #print("need_size", need_size)
+        print("Old mem_allocator alloc called, need_size", need_size, "can_use_mem_size", self.can_use_mem_size)
         if need_size > self.can_use_mem_size:
             raise Exception(f'warn no enough pool space: need_size {need_size} left_size {self.can_use_mem_size}')
         
@@ -47,6 +46,7 @@ class MemoryAllocator:
 
 
     def alloc_contiguous(self, need_size):
+        print("Old mem_allocator alloc_contiguous called, need_size", need_size, "can_use_mem_size", self.can_use_mem_size)
         if need_size > self.can_use_mem_size:
             raise Exception(f'warn no enough pool space: need_size {need_size} left_size {self.can_use_mem_size}')
         
@@ -71,7 +71,7 @@ class MemoryAllocator:
         Args:
             free_index (torch.Tensor): _description_
         """
-        #print("free_index len", len(free_index))
+        print("Old mem_allocator free_index len", len(free_index))
         self.can_use_mem_size += free_index.shape[0]
         # self.can_use_mem_size_prefix += torch.sum(free_index < self.cache_size)
         # self.can_use_mem_size_suffix += torch.sum(free_index >= self.cache_size)
@@ -143,6 +143,14 @@ class MemoryAllocator:
         self.saved_o = None
         
         #TODO: merge all possible buffers into one
+    
+    def __getattribute__(self, name):
+        return super().__getattribute__(name)
+        if name == "key_buffer":
+            print("Accessing key_buffer")
+        elif name == "value_buffer":
+            print("Accessing value_buffer")
+        return super().__getattribute__(name)
     
     def rewind_alignment_pool(self, rewind_size):
         self.finetune_input_ids = self.finetune_input_ids[0:-rewind_size]

@@ -8,6 +8,10 @@ adapter_dirs = ["tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
 finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter"
 finetuning_config_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_config_alignment.json"
 
+half_model = True
+enable_unified_mem_manager = True
+mem_manager_log_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/mem_manager_log.text"
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
@@ -46,5 +50,11 @@ if __name__ == "__main__":
         cmd += " --prefetch False"
     if args.no_mem_pool:
         cmd += " --no-mem-pool"
+    if half_model:
+        cmd += " --half_model"
+    if mem_manager_log_path:
+        cmd += f" --mem_manager_log_path {mem_manager_log_path}"
+    if enable_unified_mem_manager:
+        cmd += " --enable_unified_mem_manager"
     print(cmd)
     os.system(cmd)

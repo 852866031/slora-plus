@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
+from slora.common.unified_mem_allocator import PageType, UnifiedMemoryAllocator
 import torch
 from typing import List, Dict, Any
 import time
@@ -16,6 +17,10 @@ class InferAdapter:
     a_len: torch.Tensor  # a_len[i] is the number of cells occupied by adapter i
     a_scaling: torch.Tensor  # a_scaling[i] is the scaling factor of adapter i
     mem_manager: MemoryAllocator
+
+    # adapter_ids_lora_a: List[int]  # adapter_ids_lora_a[i] is the indices of adapter i in a_loc_lora_a
+    # adapter_ids_lora_b: List[int]  # adapter_ids_lora_b[i] is the indices of adapter i in a_loc_lora_b
+    # alt_mem_manager: UnifiedMemoryAllocator 
 
     idx_map: Dict[str, int]
     prefetch_tag: Dict[str, int]
@@ -40,6 +45,47 @@ class InferAdapter:
         )
 
 
+    def get_lora_a_at_layer(self,
+                            adapter_dir: str,
+                            layer_id:    int) -> List[torch.Tensor]:
+
+        # 1) Locate the adapter in the bookkeeping tensors
+        try:
+            adapter_idx = self.idx_map[adapter_dir]
+        except KeyError:
+            raise ValueError(f"Adapter '{adapter_dir}' is not loaded.")
+
+        start  = int(self.a_start[adapter_idx].item())
+        length = int(self.a_len[adapter_idx].item())        # rows == 4*r
+        vpids  = self.a_loc[start : start + length]         # Tensor[int64]
+
+        # 2) Grab the rows from mem_manager.key_buffer for this layer
+        #    key_buffer[layer] has shape [ pool_size, hidden_dim ]
+        rows_tensor = self.mem_manager.key_buffer[layer_id][vpids]
+
+        # 3) Clone each row so the caller owns an independent copy
+        return [row.clone() for row in rows_tensor]
+    
+    def get_lora_b_at_layer(self,
+                            adapter_dir: str,
+                            layer_id:    int) -> List[torch.Tensor]:
+
+        # 1) Locate the adapter in the bookkeeping tensors
+        try:
+            adapter_idx = self.idx_map[adapter_dir]
+        except KeyError:
+            raise ValueError(f"Adapter '{adapter_dir}' is not loaded.")
+
+        start  = int(self.a_start[adapter_idx].item())
+        length = int(self.a_len[adapter_idx].item())        # rows == 4*r
+        vpids  = self.a_loc[start : start + length]         # Tensor[int64]
+
+        # 2) Grab the rows from mem_manager.key_buffer for this layer
+        #    key_buffer[layer] has shape [ pool_size, hidden_dim ]
+        rows_tensor = self.mem_manager.value_buffer[layer_id][vpids]
+
+        # 3) Clone each row so the caller owns an independent copy
+        return [row.clone() for row in rows_tensor]
 
     # @calculate_time(show=True, min_cost_ms=0)
     def load_lora_A(self, adapter, loc, prefetch=False):
@@ -52,6 +98,8 @@ class InferAdapter:
             adapter.layers[i].load_to_gpu(prefetch=prefetch)
             w_combined = adapter.layers[i].w_combined
             self.mem_manager.key_buffer[i][loc] = w_combined[0]
+            #self.alt_mem_manager.pool[i][loc] = w_combined[0]     # alt unified manager
+            #print("Access key buffer from InferAdapter")
             adapter.layers[i].offload_from_gpu()
 
 
@@ -124,41 +172,21 @@ class InferAdapter:
             cum_loc += new_adapter.r * 4
         self.a_scaling = torch.cat((self.a_scaling, torch.tensor([adapter.scaling for adapter in new_adapters], dtype=torch.float16, device="cuda")))
 
-        #if prefetch:
-        #    torch.cuda.synchronize()
-        #    tic1 = time.time()
-
         if prefetch:
             with torch.cuda.stream(self.prefetch_stream):
                 new_loc = new_loc.clone()
                 for i, new_adapter in enumerate(new_adapters):
-                    #self.idx_map[new_adapter.lora_dir] = len(self.adapter_dirs)
-                    #self.adapter_dirs.append(new_adapter.lora_dir)
-                    #self.a_start[start_offset + i] = loc_offset + cum_loc
-                    #self.a_len[len_offset + i] = new_adapter.r * 4
 
                     cum_loc = cum_loc_list[i]
                     self.load_lora_A(new_adapter, new_loc[cum_loc: cum_loc + new_adapter.r * 4], prefetch)
                     self.load_lora_B(new_adapter, new_loc[cum_loc: cum_loc + new_adapter.r * 4], prefetch)
 
-                    #self.load_lora_A(new_adapter, None, prefetch)
-                    #self.load_lora_B(new_adapter, None, prefetch)
         else:
             for i, new_adapter in enumerate(new_adapters):
                 cum_loc = cum_loc_list[i]
                 self.load_lora_A(new_adapter, new_loc[cum_loc: cum_loc + new_adapter.r * 4], prefetch)
                 self.load_lora_B(new_adapter, new_loc[cum_loc: cum_loc + new_adapter.r * 4], prefetch)
 
-            #if prefetch:
-        #    tic2 = time.time()
-        #    torch.cuda.synchronize()
-        #    tic3 = time.time()
-        #    print("launch time", tic2 - tic1, flush=True)
-        #    print("total time", tic3 - tic1, flush=True)
-        # mark_end(func_name)
-        # print(f"current adapters on batch (loaded {len(new_adapters)})",
-        #       len(self.adapter_dirs), self.adapter_dirs)
-        # print(self.mem_manager.can_use_mem_size_suffix // 4 / 32)
     
 
     # @calculate_time(show=True, min_cost_ms=0)

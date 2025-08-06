@@ -3,6 +3,7 @@ import os
 from safetensors import safe_open
 import torch
 from tqdm import tqdm
+from pprint import pprint
 
 
 def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None,
@@ -31,7 +32,7 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         use_safetensors = False
         candidate_files = list(filter(lambda x : x.endswith('.bin'), files))
     assert len(candidate_files) != 0, "can only support pytorch tensor and safetensors format for weights."
-    for file_ in candidate_files:
+    for index, file_ in enumerate(candidate_files):
         if use_safetensors:
             weights = safe_open(os.path.join(weight_dir, file_), 'pt', 'cpu')
             weights = {k: weights.get_tensor(k) for k in weights.keys()}

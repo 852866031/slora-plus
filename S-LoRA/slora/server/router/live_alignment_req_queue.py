@@ -1,3 +1,6 @@
+import copy
+import csv
+import random
 import uuid
 import numpy as np
 from typing import List, Optional
@@ -37,7 +40,7 @@ def rprint(*args):
     RESET = "\033[0m"
     print(RED + " ".join(str(arg) for arg in args) + RESET)
 
-class Mixed_ReqQueue:
+class LiveAlignment_ReqQueue:
     """
     A queue that handles both inference requests and fine-tuning requests.
     Key differences from ReqQueue:
@@ -59,7 +62,8 @@ class Mixed_ReqQueue:
         # config parameters
         self.finetuning_data_path = finetune_params.finetuning_data_path
         self.finetuning_prepare_size = finetune_params.finetuning_prepare_size
-        self.finetuning_lora_path = finetune_params.finetuning_lora_path  
+        self.finetuning_lora_path = finetune_params.finetuning_lora_path
+        self.reference_lora_path = finetune_params.reference_lora_path
         self.max_saved_finetuning_tokens = finetune_params.max_saved_finetuning_tokens  #max size of saved activations in memory
         self.max_finetuning_tokens_in_batch = finetune_params.max_finetuning_tokens_in_batch #max size of finetuning tokens in a forward batch
         self.total_epoch = finetune_params.num_epochs
@@ -68,8 +72,12 @@ class Mixed_ReqQueue:
         self.finetuning_tokens_in_memory = 0 #
         self.finetuning_tokens_processed = 0
         self.pending_bwd_tokens = 0
-        self.epoch_avg_loss_list = []
-        self.loss_list =[]
+        self.epoch_avg_kto_loss_list = []
+        self.epoch_avg_completion_loss_list = []
+        self.previous_epoch_avg_kto_loss_list = []
+        self.previous_epoch_avg_completion_loss_list = []
+        self.kto_loss_list =[]
+        self.completion_loss_list = []
         self.current_epoch = 0
         self.sample_index = 0
         self.last_index = 0
@@ -89,28 +97,113 @@ class Mixed_ReqQueue:
         self.waiting_req_list: List[Req] = []
         # Holds waiting fine-tuning requests
         self.finetuning_req_list: List[Req] = []
+        self.reference_req_list: List[Req] = []
         
         # Used internally to track concurrency usage when building a batch
         self.cache_len_list = []
         self.adapters = set()
         self.adapter_size = 0
+        self.min_backward_sample_count = finetune_params.min_backward_sample_count
+        self.added_sample_count = 0
+        print("Initializing LiveAlignment_ReqQueue")
         print("Initializing Finetuning Settings")
-        print(f"Finetuning data path: {self.finetuning_data_path}")
+        print(f"Saving data path: {self.finetuning_data_path}")
         print(f"Finetuning lora path: {self.finetuning_lora_path}")
         print(f"Finetuning prepare size: {self.finetuning_prepare_size}")
         print(f"Max saved finetuning tokens: {self.max_saved_finetuning_tokens}")
         print(f"batch max tokens: {self.batch_max_tokens}")
-        self.prepare_finetuning_requests()
+        #self.prepare_finetuning_requests()
 
+    def get_current_dataset_size(self):
+        with open(self.finetuning_data_path, "r") as f:
+            return sum(1 for _ in f) - 1  # subtract header
+
+    def check_dataset_and_load(self):
+        if self.get_current_dataset_size() - self.added_sample_count < self.min_backward_sample_count:
+            return
+        if not self.finetuning_is_finished():
+            return
+        try:
+            self.finetuning_req_list = []
+            self.reference_req_list = []
+            self.epoch_avg_kto_loss_list = []
+            self.epoch_avg_completion_loss_list = []
+            loaded_count = 0
+            self.finetuning_tokens_in_memory = 0 
+            self.finetuning_tokens_processed = 0
+            self.kto_loss_list =[]
+            self.completion_loss_list = []
+            self.current_epoch = 0
+            self.sample_index = 0
+            self.last_index = 0
+            self.flag = True
+            print(f"Loading finetuning sample from line {self.added_sample_count + 1} ")
+            print("current dataset size:", self.get_current_dataset_size(), "added samples:", self.added_sample_count)
+
+            with open(self.finetuning_data_path, newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for index, row in enumerate(reader):
+                    if index < self.added_sample_count:
+                        continue
+                    prompt      = row["prompt"].strip()
+                    completion  = row["completion"].strip()
+                    label       = int(row["label"])
+
+                    if not prompt or not completion:
+                        print(f"Skipping invalid row at line {index + 2}")
+                        continue
+                    prompt_enc      = self.tokenizer(prompt, add_special_tokens=False)
+                    completion_enc  = self.tokenizer(completion, add_special_tokens=False)
+                    prompt_ids      = prompt_enc.get("input_ids", [])
+                    completion_ids  = completion_enc.get("input_ids", [])
+                    full_ids        = prompt_ids + completion_ids     # concat
+                    completion_mask = [False] * (len(prompt_ids)-1) + [True] * len(completion_ids)
+                    text = prompt + " " + completion
+                    finetune_req = Req(
+                        adapter_dir=self.finetuning_lora_path,
+                        request_id=uuid.uuid4().hex,
+                        prompt_ids=full_ids,
+                        sample_params=get_finetuning_sampling_params(),
+                        is_finetuning=True,
+                        text=text,
+                    )
+                    self.finetuning_req_list.append(finetune_req)
+                    self.finetuning_tokens_in_memory += finetune_req.input_len
+                    loaded_count += 1
+
+                    reference_req = Req(
+                        adapter_dir=self.reference_lora_path,
+                        request_id=uuid.uuid4().hex,
+                        prompt_ids=copy.deepcopy(full_ids),
+                        completion_mask=completion_mask,
+                        label=label,
+                        sample_params=get_finetuning_sampling_params(),
+                        is_finetuning=False,
+                        is_reference=True,
+                        text=str(text),
+                    )
+                    self.reference_req_list.append(reference_req)
+                    if loaded_count >= self.finetuning_prepare_size:
+                        break
+                
+                self.added_sample_count += loaded_count
+            print(f"Loaded {loaded_count} fine-tuning requests from CSV.")
+        except FileNotFoundError:
+            print(f"finetuning_data_path not found: {self.finetuning_data_path}")
+        except Exception as e:
+            print(f"Error while reading or tokenising fine-tuning data: {e}")
         
+
     def update_finetuning_status_after_fwd(self, batch: Batch):
         for req in batch.reqs:
             if req.is_finetuning:
                 self.pending_bwd_tokens += req.input_len
-
+        
 
     def update_finetuning_status_after_bwd(self, loss_list, num_processed_tokens):
-        self.loss_list.extend(loss_list)
+        for losses in loss_list:
+            self.kto_loss_list.append(losses[0])
+            self.completion_loss_list.append(losses[1])
         self.finetuning_tokens_processed += num_processed_tokens
         self.pending_bwd_tokens -= num_processed_tokens
         #print bar
@@ -121,19 +214,27 @@ class Mixed_ReqQueue:
         grey = "*"
         white = " "
         bar = grey * filled_len + white * empty_len
-        print(f"Epoch: {self.current_epoch+1}/{self.total_epoch} [{bar}] {ratio:.1%} processed")
+        print(f"Epoch: {self.current_epoch+1}/{self.total_epoch} [{bar}] {self.finetuning_tokens_processed}/ {self.finetuning_tokens_in_memory} {ratio:.1%} processed")
         if self.finetuning_tokens_processed >= self.finetuning_tokens_in_memory:
-            self.epoch_avg_loss_list.append(np.mean(self.loss_list))
-            print(f"Epoch {self.current_epoch} finished. Average Loss: {self.epoch_avg_loss_list[-1]:.6f}\n")
-            for i, loss in enumerate(self.loss_list):
-                print(f"Epoch {self.current_epoch} Batch {i}: Loss = {loss:.6f}")
-            self.loss_list = []
+            self.epoch_avg_kto_loss_list.append(np.mean(self.kto_loss_list))
+            self.epoch_avg_completion_loss_list.append(np.mean(self.completion_loss_list))
+            print(f"Epoch {self.current_epoch} finished. Average KTO Loss: {self.epoch_avg_kto_loss_list[-1]:.6f}, Average Completion Loss: {self.epoch_avg_completion_loss_list[-1]:.6f}\n")
+            for i, loss in enumerate(self.kto_loss_list):
+                kto_loss = loss
+                completion_loss = self.completion_loss_list[i]
+                print(f"Epoch {self.current_epoch} Batch {i}: KTO Loss = {kto_loss:.6f}, Completion Loss = {completion_loss:.6f}")
+            self.kto_loss_list = []
+            self.completion_loss_list = []
             self.current_epoch += 1
             if self.current_epoch >= self.total_epoch:
-                print("=== Loss List ===")
-                for i, loss in enumerate(self.epoch_avg_loss_list):
-                    print(f"Backward Epoch {i}: Loss = {loss:.6f}")
-                print("=== End of Loss List ===")
+                self.previous_epoch_avg_kto_loss_list.append(self.epoch_avg_kto_loss_list)
+                self.previous_epoch_avg_completion_loss_list.append(self.epoch_avg_completion_loss_list)
+                for i, epoch_avg_kto_loss_list in enumerate(self.previous_epoch_avg_kto_loss_list):
+                    epoch_avg_completion_loss_list = self.previous_epoch_avg_completion_loss_list[i]
+                    print(f"=== Loss List for wave {i} ===")
+                    for j, loss in enumerate(epoch_avg_kto_loss_list):
+                        print(f"\tBackward Epoch {j}: KTO Loss = {loss:.6f}, Completion Loss = {epoch_avg_completion_loss_list[j]:.6f}")
+                    print("=== End of Loss List ===\n")
             else:
                 self.sample_index = 0
                 self.finetuning_tokens_processed = 0
@@ -141,7 +242,7 @@ class Mixed_ReqQueue:
             print()
 
     def finetuning_is_finished(self):
-        if self.current_epoch >= self.total_epoch:
+        if self.current_epoch >= self.total_epoch or len(self.finetuning_req_list)==0:
             return True
         else:
             return False
@@ -149,41 +250,7 @@ class Mixed_ReqQueue:
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
-
-    def prepare_finetuning_requests(self):
-        loaded_count = 0
-        try:
-            with open(self.finetuning_data_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    
-                    # Tokenize the text
-                    tokens = self.tokenizer(text)
-                    prompt_ids = tokens.get('input_ids', [])
-                    
-                    new_req = Req(
-                        adapter_dir=self.finetuning_lora_path,                
-                        request_id=uuid.uuid4().hex,     # Unique request ID
-                        prompt_ids=prompt_ids,
-                        sample_params=get_finetuning_sampling_params(),
-                        is_finetuning=True,               # Mark this request as fine-tuning
-                        text=text,  # Store the original text for reference
-                    )
-                    
-                    # Append to our fine-tuning queue
-                    self.finetuning_req_list.append(new_req)
-                    self.finetuning_tokens_in_memory+=new_req.input_len
-                    loaded_count += 1
-                    if loaded_count >= self.finetuning_prepare_size:
-                        break
-                print(f"Loaded {loaded_count} fine-tuning requests.")
-        except FileNotFoundError:
-            print(f"Could not find finetuning_data_path: {self.finetuning_data_path}")
-        except Exception as e:
-            print(f"Error reading or tokenizing finetuning data: {e}")
-
+        
     def _init_cache_list(self, current_batch: Optional[Batch], lora_ranks: dict[str, int]):
         if current_batch is not None:
             self.cache_len_list = []
@@ -251,44 +318,53 @@ class Mixed_ReqQueue:
                     new_batch_total_tokens += req.input_len
                 else:
                     break
-        
+
         new_batch_inference_tokens = new_batch_total_tokens
-        if new_batch_total_tokens * 1.2 < self.batch_max_tokens and len(self.finetuning_req_list)> 0 and self.finetuning_adapters_tracker.all_adapters_available():
+        #print(f"Adapter avaiable: {self.finetuning_adapters_tracker.all_adapters_available()}")
+        if new_batch_total_tokens * 1.2 < self.batch_max_tokens and \
+        len(self.finetuning_req_list)> 0 and \
+            self.finetuning_adapters_tracker.all_adapters_available():
             new_batch_finetuning_tokens = 0
             self.last_index = self.sample_index
             for i in range(self.sample_index, len(self.finetuning_req_list)):
                 req = self.finetuning_req_list[i]
-                if new_batch_total_tokens + req.input_len > self.batch_max_tokens:
-                    #print("Batch max tokens exceeded, breaking")
+                ref_req = self.reference_req_list[i]
+                if new_batch_total_tokens + req.input_len + ref_req.input_len > self.batch_max_tokens:
+                    #print("1 Cannot add more finetuning requests, breaking")
                     break
-                elif new_batch_finetuning_tokens + req.input_len > self.max_finetuning_tokens_in_batch:
-                    #print("Max finetuning tokens in batch exceeded, breaking")
+                elif new_batch_finetuning_tokens + req.input_len  + ref_req.input_len > self.max_finetuning_tokens_in_batch:
+                    #print("2 Cannot add more finetuning requests, breaking")
+                    self.flag = False
                     break
                 elif self.pending_bwd_tokens + req.input_len > self.max_saved_finetuning_tokens:
-                    # if self.flag:
-                    #     print(f"self.pending_bwd_tokens: {self.pending_bwd_tokens}")
+                    #print("3 Cannot add more finetuning requests, breaking")
                     self.flag = False
-                    #print("Max saved finetuning tokens exceeded, breaking")
                     break
-                elif new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len > new_batch_inference_tokens*2:
+                elif new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len + ref_req.input_len > new_batch_inference_tokens*2:
+                    #print("4 Cannot add more finetuning requests, breaking")
+                    self.flag = False
                     break
                 else:
                     can_run_list.append(req)
-                    new_batch_total_tokens += req.input_len
-                    new_batch_finetuning_tokens += req.input_len
+                    can_run_list.append(ref_req)
+                    new_batch_total_tokens += req.input_len + ref_req.input_len
+                    new_batch_finetuning_tokens += req.input_len + ref_req.input_len
                     self.sample_index += 1
                     self.flag = True
 
         if len(can_run_list) > 0:
             infer_tokens = 0
             finetune_tokens = 0
+            ref_tokens = 0
             for req in can_run_list:
                 if req.is_finetuning:
                     finetune_tokens += req.input_len
+                elif req.is_reference:
+                    ref_tokens += req.input_len
                 else:
                     infer_tokens += req.input_len
             unused = self.batch_max_tokens - (infer_tokens + finetune_tokens)
-            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
+            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens | {finetune_tokens} finetune + {ref_tokens} reference (Sum Max: {self.max_finetuning_tokens_in_batch}) | {unused} unused] \033[0m")
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
             return new_batch
@@ -339,3 +415,4 @@ class Mixed_ReqQueue:
                 return new_batch
             else:
                 return None
+            

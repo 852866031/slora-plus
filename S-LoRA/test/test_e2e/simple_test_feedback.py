@@ -14,6 +14,7 @@ Usage
 $ python simple_benchmark.py --server http://localhost:8000
 """
 from __future__ import annotations
+import random
 
 import argparse
 import asyncio
@@ -61,11 +62,24 @@ async def send_request(session: aiohttp.ClientSession, server: str, idx: int, pr
         try:
             result = json.loads(body)
             generated = result.get("generated_text", ["<no-text>"])[0]
+            feedback_id = result.get("feedback", None)
+            if feedback_id:
+                print(f"[req {idx:02d}] asked for feedback")
+                generated_label = random.choice([1, -1])
+                print(f"[req {idx:02d}] randomly generated feedback: {generated_label}")
+                feedback_url = f"{server.rstrip('/')}/feedback"
+                feedback_payload = {
+                    "req_id": feedback_id,
+                    "label": generated_label,
+                }
+                async with session.post(feedback_url, json=feedback_payload) as feedback_resp:
+                    feedback_body = await feedback_resp.read()
+                    print(f"[req {idx:02d}] feedback response: {feedback_body.decode(errors='replace')}")
         except json.JSONDecodeError:
             generated = body.decode(errors="replace")
     latency = time.time() - start
 
-    print(f"[req {idx:02d}] prompt: {prompt} latency={latency*1000:7.1f} ms  →  {generated}")
+    print(f"[req {idx:02d}] prompt: {prompt}  →  {generated}")
     return latency
 
 

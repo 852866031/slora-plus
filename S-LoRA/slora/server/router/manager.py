@@ -1,3 +1,4 @@
+from slora.server.router.live_alignment_req_queue import LiveAlignment_ReqQueue
 import uvloop
 import asyncio
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -56,6 +57,9 @@ def get_scheduler(input_params, adapter_dirs, finetuning_adapters_tracker):
         elif input_params.finetuning_params.finetuning_type == "Alignment":
             return Alignment_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                                 input_params.running_max_req_size, input_params.finetuning_params, finetuning_adapters_tracker)
+        elif input_params.finetuning_params.finetuning_type == "Alignment Live":
+            return LiveAlignment_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
+                                input_params.running_max_req_size, input_params.finetuning_params, finetuning_adapters_tracker)
     else:
         raise Exception("unrecognized scheduler")
 
@@ -93,7 +97,7 @@ class RouterManager:
     def __init__(self, weightdir, adapter_dirs, load_way, world_size, eos_id,
                  router_port, detokenization_port, model_rpc_ports,
                  input_params,
-                 mode=[], log_stats=True, log_stats_interval=10):
+                 mode=[], log_stats=True, log_stats_interval=10, half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
         self.model_weightdir = weightdir
         self.adapter_dirs = adapter_dirs
         self.world_size = world_size
@@ -103,6 +107,9 @@ class RouterManager:
         self.finetuning_params = input_params.finetuning_params
         self.no_inference_since = time.time()
         self.decay_timeout = 2
+        self.half_model = half_model
+        self.mem_manager_log_path = mem_manager_log_path
+        self.enable_unified_mem_manager = enable_unified_mem_manager
 
         if self.input_params.prefetch:
             self.prefetch_stream = torch.cuda.Stream()
@@ -144,8 +151,7 @@ class RouterManager:
         self.model_rpcs: List[ModelRpcClient] = []
         for rank_id in range(self.world_size):
             rpc_model = await start_model_process(port=self.model_rpc_ports[rank_id], 
-                                                  world_size=self.world_size, 
-                                                  )
+                                                  world_size=self.world_size)
             self.model_rpcs.append(rpc_model)
 
         init_model_ret = []
@@ -161,7 +167,10 @@ class RouterManager:
                     self.mode,
                     input_params=self.input_params,
                     prefetch_stream=self.prefetch_stream,
-                    finetuning_adapters_tracker = self.finetuning_adapters_tracker
+                    finetuning_adapters_tracker=self.finetuning_adapters_tracker,
+                    half_model=self.half_model,
+                    mem_manager_log_path=self.mem_manager_log_path,
+                    enable_unified_mem_manager=self.enable_unified_mem_manager
                 ))
 
         await asyncio.gather(*init_model_ret)
@@ -231,7 +240,8 @@ class RouterManager:
         if self.running_batch is None:
             new_batch = self.req_queue.generate_new_batch(self.running_batch, self.lora_ranks)
             if new_batch is None \
-                and (isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Alignment_ReqQueue)) \
+                and (isinstance(self.req_queue, Mixed_ReqQueue) or \
+                     isinstance(self.req_queue, Alignment_ReqQueue) or isinstance(self.req_queue, LiveAlignment_ReqQueue)) \
                 and not self.req_queue.finetuning_is_finished() \
                 and self.req_queue.pending_bwd_tokens>0: # here we decide if it is needed to run the backward pass
                 if self.decay_timeout < 0.5:
@@ -246,7 +256,10 @@ class RouterManager:
                     return
                 else:
                     return
-
+            elif new_batch is None and isinstance(self.req_queue, LiveAlignment_ReqQueue) and \
+                self.req_queue.finetuning_is_finished() and \
+                (self.decay_timeout < 0.5 or time.time() - self.no_inference_since > self.decay_timeout):
+                self.req_queue.check_dataset_and_load()
             elif new_batch is not None:
                 if not new_batch.has_inference(): # here we check if there is any inference in the batch
                     self.no_inference_since = time.time()  # start tracking
@@ -370,10 +383,11 @@ class RouterManager:
         for req in batch.reqs:
             if getattr(req, 'is_finetuning', False):
                 count +=1
-        if (isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Alignment_ReqQueue)) \
+        if (isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Alignment_ReqQueue) or isinstance(self.req_queue, LiveAlignment_ReqQueue)) \
             and None not in ans:
             self.req_queue.update_finetuning_status_after_fwd(batch)
         has_new_finished_req = batch.mark_finished_req(self.eos_id)
+       
         if None not in ans:
             self._send_to_detokenization_proc(batch, req_to_out_token_id)
         await self._handle_finish_req(batch, has_new_finished_req, minibatch=True)
@@ -546,6 +560,9 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
             mode=mode,
             log_stats = not args.disable_log_stats,
             log_stats_interval = args.log_stats_interval,
+            half_model=args.half_model,
+            mem_manager_log_path=args.mem_manager_log_path,
+            enable_unified_mem_manager=args.enable_unified_mem_manager
         )
     
         asyncio.run(router.wait_to_model_ready())

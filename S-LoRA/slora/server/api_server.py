@@ -77,6 +77,33 @@ def create_error_response(status_code: HTTPStatus, message: str) -> JSONResponse
 def healthcheck():
     return "OK"
 
+@app.post("/feedback")
+async def feedback(request: Request) -> Response:
+    try:
+        request_data = await request.json()
+        req_id = request_data["req_id"]
+        label = request_data["label"]
+    except Exception as e:
+        return Response(
+            content=json.dumps({"error": f"Invalid request format: {str(e)}"}),
+            status_code=400,
+            media_type="application/json"
+        )
+
+    if label not in [-1, 1]:
+        return Response(
+            content=json.dumps({"error": "Label must be either 1 or -1."}),
+            status_code=400,
+            media_type="application/json"
+        )
+
+    httpserver_manager.update_feedback(req_id, label)
+    return Response(
+        content=json.dumps({"message": f"Feedback for {req_id} received"}),
+        status_code=200,
+        media_type="application/json"
+    )
+
 @app.post("/generate")
 async def generate(request: Request) -> Response:
     print("api_server.py: generate called, inference received")
@@ -99,12 +126,12 @@ async def generate(request: Request) -> Response:
     else:
         request_id = uuid.uuid4().hex
     results_generator = httpserver_manager.generate(adapter_dir, prompt, sampling_params, request_id)
-
     # Non-streaming case
     final_output = []
     count_output_tokens = 0
     tokens = []
-    async for request_output, metadata, finished in results_generator:
+    feedback = False
+    async for request_output, metadata, finished, feedback in results_generator:
         count_output_tokens += 1
         if finished == -1:
             return Response(status_code=499)
@@ -113,6 +140,7 @@ async def generate(request: Request) -> Response:
             await httpserver_manager.abort(request_id)
             return Response(status_code=499)
         final_output.append(request_output)
+        feedback = feedback or False
         if return_details:
             metadata["text"] = request_output
             tokens.append(metadata)
@@ -122,6 +150,8 @@ async def generate(request: Request) -> Response:
         "generated_text": ["".join(final_output)],
         "count_output_tokens": count_output_tokens,
     }
+    if feedback:
+        ret["feedback"] = request_id
     if return_details:
         ret["tokens"] = tokens
     return Response(content=json.dumps(ret, ensure_ascii=False).encode("utf-8"))
@@ -129,6 +159,7 @@ async def generate(request: Request) -> Response:
 
 @app.post("/generate_stream")
 async def generate_stream(request: Request) -> Response:
+    print("api_server.py: generate_stream called, inference received")
     global isFirst
     if isFirst:
         loop = asyncio.get_event_loop()
@@ -153,7 +184,7 @@ async def generate_stream(request: Request) -> Response:
 
     # Streaming case
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        async for request_output, metadata, finished in results_generator:
+        async for request_output, metadata, finished, _ in results_generator:
             ret = {
                 "token": {
                     "id": metadata.get("id", None),
@@ -385,9 +416,13 @@ def main():
     ''' finetune arguments '''
     parser.add_argument("--scheduler", type=str, default="slora")
     parser.add_argument("--finetuning_config_path", type=str, default="")
+    parser.add_argument("--mem_manager_log_path", type=str, default=None)
+    parser.add_argument("--half_model", action="store_true")
+    parser.add_argument("--enable_unified_mem_manager", action="store_true")
     ''' end of finetune arguments '''
-
+    
     args = parser.parse_args()
+    print("api_server: half_model:", args.half_model)
     args.finetuning_config = {}
     if args.finetuning_config_path != "":
         with open(args.finetuning_config_path, "r") as f:
@@ -395,6 +430,8 @@ def main():
 
         # Assert required keys
         required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs", "finetuning_type"]
+        if config_data['finetuning_type'] == "Alignment Live":
+            required_keys.append("min_backward_sample_count")
         for key in required_keys:
             assert key in config_data, f"Finetuning config missing required config entry: '{key}'"
 
@@ -409,11 +446,22 @@ def main():
         }
         for key, default_value in default_config.items():
             config_data.setdefault(key, default_value)
-        
-        if config_data['finetuning_type'] == "Alignment" and "reference_lora_path" not in config_data:
+
+        if (config_data['finetuning_type'] == "Alignment" or config_data['finetuning_type'] == "Alignment Live") \
+                                                            and "reference_lora_path" not in config_data:
             config_data["reference_lora_path"] = str(config_data['finetuning_lora_path'] + "_ref")
             args.lora_dirs.append(config_data['reference_lora_path'])
         
+        if config_data['finetuning_type'] == "Alignment Live":
+            from pathlib import Path
+            file_path = Path(config_data["finetuning_data_path"])
+            file_path.parent.mkdir(parents=True, exist_ok=True) 
+            is_new = not file_path.exists()
+            file_path.touch(exist_ok=True)
+            if is_new:
+                with file_path.open("a") as f:
+                    f.write("prompt,completion,label" + "\n")
+
         args.scheduler = "slora_plus"
         args.lora_dirs.append(config_data['finetuning_lora_path'])
         args.finetuning_config = config_data
@@ -449,6 +497,8 @@ def main():
         max_req_total_len=args.max_req_total_len,
         trust_remote_code=args.trust_remote_code,
         dummy=args.dummy,
+        live_alignment=args.finetuning_config.get("finetuning_type", "SFT") == "Alignment Live",
+        finetuning_data_path=args.finetuning_config.get("finetuning_data_path", None)
     )
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)

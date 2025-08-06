@@ -6,6 +6,7 @@ from typing import final
 from slora.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from slora.common.basemodel.infer_struct import InferStateInfo
 from slora.common.mem_allocator import MemoryAllocator
+from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
 from slora.common.infer_utils import init_bloc
 from slora.common.build_utils import repair_config
 from slora.utils.model_load import hf_load_config
@@ -27,7 +28,8 @@ class TpPartBaseModel:
     infer_state_class = InferStateInfo
 
     def __init__(self, tp_rank, world_size, weight_dir,
-                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False):
+                 max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
+                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.weight_dir_ = weight_dir
@@ -36,8 +38,14 @@ class TpPartBaseModel:
         self.load_way = load_way
         self.mode = mode
         self.dummy = dummy
-
+        self.half_model = half_model
+        self.mem_manager_log_path = mem_manager_log_path
+        self.enable_unified_mem_manager = enable_unified_mem_manager
+        print("half_model:", self.half_model)
         self._init_config()
+        if self.half_model:
+            self.config["n_layer"] = int(self.config["n_layer"] / 2)
+            self.config["num_hidden_layers"] = int(self.config["num_hidden_layers"] / 2)
         self._verify_must()
         self._verify_params()
         self._init_weights()
@@ -93,6 +101,12 @@ class TpPartBaseModel:
                             head_num=self.config["num_attention_heads"] // self.world_size_,
                             head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
                             layer_num=self.config["n_layer"])
+        self.alt_mem_manager = UnifiedMemoryAllocator(
+                            tot_size=self.max_total_token_num + self.mem_adapter_size,
+                            dtype=torch.float16,
+                            hidden_dim=self.config["n_embed"],
+                            layer_num=self.config["n_layer"],
+                            )
         return 
     
     def _init_infer_layer(self):

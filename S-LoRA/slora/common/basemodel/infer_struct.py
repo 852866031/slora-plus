@@ -13,9 +13,16 @@ class InferStateInfo:
         self.b_seq_len = None
         self.max_len_in_batch = None
         self.is_prefill = None
-        
         self.mem_manager = None
         
+        self.alt_mem_manager = None
+        self.decode_mem_index_key = None
+        self.decode_mem_index_value = None
+        self.prefill_mem_index_key = None
+        self.prefill_mem_index_value = None
+        self.b_loc_key = None
+        self.b_loc_value = None
+
         self.prefill_mem_index = None
         self.prefill_key_buffer = None
         self.prefill_value_buffer = None

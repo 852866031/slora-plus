@@ -230,7 +230,6 @@ class LoraLayerWeight:
         self.w_combined_home = self.w_combined_home.reshape(2, 4 * rank, num_head, -1)
         self.w_combined_home_fp32 = self.w_combined_home.detach().clone().float()  
         self.w_combined = None
-
         return
 
     def load_to_gpu(self, prefetch=False, bmm=False, both=False):

@@ -17,6 +17,7 @@ class Req:
         self.aborted = False
         self.is_reference = is_reference
         self.is_finetuning = is_finetuning
+        self.ask_for_label = False
         self.needs_to_notify_detokenize = False
         self.text = text
         self.completion_mask = completion_mask

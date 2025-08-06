@@ -1,3 +1,9 @@
+# -----------------------------------------------------------------------------
+# LlamaBackwardEngine – Back‑propagation support utilities for S‑LoRA
+# -----------------------------------------------------------------------------
+# This module contains everything required to compute analytical gradients for a
+# LoRA‑augmented Llama model **without** replaying the entire forward graph.
+
 from enum import Enum
 import math
 import time
@@ -16,6 +22,13 @@ from slora.common.basemodel import PostLayerInferTpl
 from slora.server.router.mixed_req_queue import rprint
 
 class GradientResumePoint(Enum):
+    """Which *checkpoint* inside the backward pipeline we last finished.
+
+    This makes the backward pass resumeable, which is crucial when the engine is
+    interrupted by higher‑priority inference work.  In practice `interrupt_flag`
+    is set by the outer scheduler; on resume we skip the already computed part
+    and continue from the stored tensors.
+    """
     LOSS = 0
     LOGIT = 1
     POST = 2
@@ -24,13 +37,12 @@ class GradientResumePoint(Enum):
 
 class LlamaBackwardEngine():
     def __init__(self, mem_manager, network_config):
+        # Runtime references / constants
         self.mem_manager = mem_manager
         self.eps_ = network_config["rms_norm_eps"]
         self.vocab_size_ = network_config["vocab_size"]
         self.embed_dim_ = network_config["n_embed"]
-        #self.last_logit_list = []
-        #self.last_input_ids = None
-        #self.last_logit_and_targets = []
+        # *Mutable* state – these fields let us resume through backward.
         self.last_loss = None
         self.gradient_resume_point = GradientResumePoint.LOSS
         self.saved_logit_grad = None
@@ -39,9 +51,10 @@ class LlamaBackwardEngine():
         self.saved_loss = None
         self.saved_total_tokens_to_process = None
         self.saved_seq_lens = None
+        # Alignment training hyper‑params 
         self.is_alignment = False
-        self.alpha:   float = 0.5,   # curvature of utility
-        self.lambdas: float = 2,   # loss-aversion (λ)
+        self.alpha:   float = 0.5   # curvature of utility
+        self.lambdas: float = 2      # loss-aversion (λ)
         self.beta:    float = 0.02
         self.buffer = []
     
@@ -55,11 +68,30 @@ class LlamaBackwardEngine():
         self.beta = beta
         print(f"\033[92mAlignment mode set to {self.is_alignment}, alpha: {self.alpha}, lambdas: {self.lambdas}, beta: {self.beta}\033[0m")
         
-
+    # Top‑level backward orchestration entry‑point 
     def _context_backward(self, base_model, finetuning_adapter, interrupt_flag):
+        """Resumable backward function.
+
+        Parameters
+        ----------
+        base_model : `Llama`
+            The frozen *backbone* model (weights & per-layer meta).
+        finetuning_adapter : `LoraTpPartAdapter`
+            The LoRA adapter we are currently fine-tuning.
+        interrupt_flag : `list[bool]` (size-1)
+            Mutable flag set by the scheduler **during** backward to tell us to
+            pause ASAP. 
+        """
+        # Helper: execute a *slice* of layers [0 .. start_idx‑1] in reverse order
         def run_layer_backward(start_idx, grad_transformer_out):
             for i in reversed(range(0, start_idx)):
                 grad_transformer_out = self._lora_context_backward(i, base_model, grad_transformer_out, finetuning_adapter, self.saved_seq_lens)
+                if i == start_idx-1:
+                    print(f"Backwarding layer {i}", end="")
+                elif i == 0:
+                    print(", layer{i}")
+                else:
+                    print(", layer{i}", end="")
                 if interrupt_flag[0]:
                     print(f"\033[91mReceive interrupt after layer {i}\033[0m")
                     interrupt_flag[0] = False
@@ -93,7 +125,8 @@ class LlamaBackwardEngine():
         else:
             print("\033[91mGradient compute from beginning\033[0m")
             return self._context_backward_logic(base_model, finetuning_adapter, interrupt_flag)
-
+    
+    # Full backward (no resume state)
     def _context_backward_logic(self, base_model, finetuning_adapter, interrupt_flag):
         if self.is_alignment:
             logit_grad, kto_loss, batch_completion_loss, total_tokens_to_process, batch_seq_lens = self.get_grad_logits_alignment()
@@ -123,6 +156,12 @@ class LlamaBackwardEngine():
         
         for i in reversed(range(base_model.layers_num)):
             grad_transformer_out = self._lora_context_backward(i, base_model, grad_transformer_out, finetuning_adapter, self.saved_seq_lens) 
+            if i == base_model.layers_num-1:
+                    print(f"Backwarding layer {i}", end="")
+            elif i == 0:
+                print(f", layer{i}")
+            else:
+                print(f", layer{i}", end="")
             if interrupt_flag[0]: 
                 print(f"\033[91mReceive interrupt after layer {i}\033[0m")
                 interrupt_flag[0]= False
@@ -133,7 +172,7 @@ class LlamaBackwardEngine():
         self.gradient_resume_point = GradientResumePoint.LOSS
         return True, loss, total_tokens_to_process
 
-    
+    # Alignment‑specific logit gradient
     @torch.no_grad()
     def get_grad_logits_alignment(self): 
         alpha = self.alpha
@@ -266,6 +305,7 @@ class LlamaBackwardEngine():
 
         return results, total_tokens_to_process, batch_seq_lens
 
+    # For SFT, compute the total loss of the batch
     def compute_total_loss(self, logits_and_targets, ignore_index=-100):
         total_loss = 0.0
         total_tokens = 0
@@ -290,6 +330,7 @@ class LlamaBackwardEngine():
 
         return losses
     
+    # Backprop the gradient to the logit 
     def _logit_backward(self, logits_and_targets):
         all_logits = []
         all_targets = []
@@ -308,18 +349,7 @@ class LlamaBackwardEngine():
         return probs  # gradient of loss w.r.t logits: [N, vocab]
 
     
-    def _post_layer_backward_2(self, logit_grad: torch.Tensor, layer_weight):
-        lm_head_weight = layer_weight.lm_head_weight_.float()           # [vocab_size, D]
-        norm_weight = layer_weight.final_norm_weight_.float()          # [D]
-        transformer_out = self.mem_manager.get_finetune_activations(layer_id=-1).float()    # [N, D]
-        grad_norm_out = logit_grad @ lm_head_weight  # [N, D]
-        D = transformer_out.shape[-1]
-        norm = transformer_out.norm(2, dim=-1, keepdim=True) / (D ** 0.5)
-        grad_x_hat = grad_norm_out * norm_weight      # [N, D]
-        norm_term = (transformer_out * grad_x_hat).sum(dim=-1, keepdim=True) / (norm + self.eps_)**2
-        grad_transformer_out = (grad_x_hat - transformer_out * norm_term / D) / (norm + self.eps_)  # [N, D]
-        return grad_transformer_out
-    
+    # Backprop the gradient to the output layer
     def _post_layer_backward(self,
                             logit_grad: torch.Tensor,
                             layer_weight) -> torch.Tensor:
@@ -334,6 +364,7 @@ class LlamaBackwardEngine():
         grad_x = (g_x_hat - x * dot / (D * (r**2 + self.eps_))) / (r + self.eps_)
         return grad_x
     
+    # Backprop through LoRA augmented transformer layer
     def _lora_context_backward(self, layer_id, base_model, output_grad: torch.Tensor, 
                                 finetuning_adapter: LoraTpPartAdapter,
                                 batch_seq_lens: torch.Tensor):
@@ -347,9 +378,11 @@ class LlamaBackwardEngine():
             last_layer_input = self.mem_manager.get_finetune_activations(layer_id-1).float()    # shape [N, D]
         lora_weights = finetuning_adapter.layers[layer_id]
         # Backprop through LoRA
+        
         grad_attn_input, grad_w_combined = self._backpop_attention(base_model, last_layer_input, grad_ffn_input, lora_weights, layer_weight, layer_id, finetuning_adapter.scaling, batch_seq_lens)
         return grad_attn_input
     
+    # Backprop through the LoRA augmented attention block, only this function uses the autograd of pytorch
     def _backpop_attention(self, base_model,
                        last_layer_input: torch.Tensor, 
                        grad_ffn_input: torch.Tensor, 
@@ -358,35 +391,122 @@ class LlamaBackwardEngine():
                        layer_id: int,
                        scaling: any,
                        batch_seq_lens: torch.Tensor):
+        """
+        Back-propagate *only through the attention sub-block* of a single
+        transformer layer that has been augmented with **one LoRA adapter**.
+        The key parameter is:
+        the *combined* LoRA weight tensor ``w_combined`` that is a packed version of lora qkvo
+            (shape ``[2, 4 r, H, Hd]`` as described in the paper / original repo)
+        We want to directly get the gradient w.r.t. this tensor.
 
-        compare_layer_id = 31
+        The routine is mainly in three parts:
+        1. Create a clone of w_combined tensor for gradient computation.
+        2. Use the clone to rematerialise the missing activations (RMS-norm, QKV, rotary, masked
+        causal attention, output-proj) in **FP32** for numerical stability. (recompute forward pass)
+        3. Step 2 require grad, so the autograd graph is built automatically. Then we can use pytorch's
+        autograd to directly compute the gradient w.r.t. the combined LoRA weight tensor.
+
+        After this, we clip the gradient or safety and writes it into the original FP32 “master” copy that is saved
+
+        in the LoRA adapter object.
+        ----------
+        Parameters
+        ----------
+        base_model :
+            The full Llama model object (provides cached rotary tables, layer meta).
+        last_layer_input : torch.Tensor
+            Activations *entering* this attention block  
+            shape = ``[tokens, D]`` (mixed precision, will be cast to fp32).
+        grad_ffn_input : torch.Tensor
+            Gradient that arrives *after* the FFN residual add  
+            (i.e. ∂L/∂ attn_out_residual). Same shape as ``last_layer_input``.
+        lora_weight : LoraLayerWeight
+            Holds the LoRA weights for this layer. We only need
+            ``w_combined`` (or the “home” backup if it is still off-GPU).
+        layer_weight : LlamaTransformerLayerWeight
+            The frozen base weights (Q/K/V/O + layer norms, etc.).
+        layer_id : int
+            Index of the current transformer layer (for debug / diff printing).
+        scaling : float
+            α / r from the LoRA paper  the scalar applied to B @ A branch.
+        batch_seq_lens : torch.Tensor
+            Per-request **sequence lengths** inside the **flattened token batch**
+            produced by the router (shape ``[B]``).
+
+        ----------
+        Returns
+        -------
+        grad_attn_input : torch.Tensor
+            ∂L/∂ input_to_this_layer  to be propagated into the lower layer.
+        grad_w_combined : torch.Tensor | None
+            Gradient for the packed LoRA weight tensor
+            (same shape as ``w_combined``).  Note: because we immediately copy
+            this gradient into ``w_combined_home_fp32.grad`` the caller usually
+            does not need the return value, but it is provided for diagnostic
+            purposes.
+
+        ----------
+        Implementation notes
+        --------------------
+        * The function uses **torch.autograd** on small leaf-clones
+        (``x_norm_leaf`` & sliced LoRA matrices) so that PyTorch builds the
+        backward graph for us – this is simpler and less error-prone than
+        hand-deriving every Jacobian.
+        * Rotary embedding is executed by the local helper
+        ``rotary_emb_fwd_pt`` (identical numerics to S-LoRA's Triton kernel).
+        * Causal masking is re-applied *per request* using the original
+        sequence-length list; this yields bit-for-bit outputs equal to the
+        forward pass.
+        * After the backward call we perform an **in-place gradient clip**
+        (max-norm = 1) **before** copying to the FP32 master weight.
+        * Debug helpers ``report_diff_percent`` can be toggled by changing
+        ``compare_layer_id`` to visualise discrepancies versus the forward
+        cache.
+        """
+        
+         # ---------------------------
+        # Debug / comparison settings
+        # ---------------------------
+        compare_layer_id = 31 #layer to compare with the saved intermediate result saved during forward pass
+
+        # Grab layer-specific inference metadata (e.g. embed_dim) --------------
         base_layer_infer = base_model.layers_infer[layer_id]
+
+        # Build *flattened* position index for **all** tokens in this micro‑batch
         position_ids = torch.cat([
             torch.arange(0, batch_seq_lens[i], device=batch_seq_lens.device)
             for i in range(len(batch_seq_lens))
         ])
-        
         position_cos = base_model._cos_cached.index_select(0, position_ids)  # [T, D/2]
         position_sin = base_model._sin_cached.index_select(0, position_ids)  # [T, D/2]
-        # === Cast all weights to float32 ===
+
+
+        # ========================  Weight re‑materialisation  =================
+        # Everything is explicitly cast to *float32* for numerical robustness
+        # ---------------------------------------------------------------------
         w_q = layer_weight.q_weight_.float()
         w_k = layer_weight.k_weight_.float()
         w_v = layer_weight.v_weight_.float()
         w_o = layer_weight.o_weight_.float()
         w_attn_norm = layer_weight.att_norm_weight_.float()
         
-        # RMSNorm
+        # -------------------- 1️⃣  RMSNorm (x → x_norm) -----------------------
         last_layer_input_leaf = last_layer_input.float().detach().clone().requires_grad_()
         x_norm = rmsnorm_forward(last_layer_input_leaf, w_attn_norm, eps=self.eps_)
+
+         # -------------------- 2️⃣  LoRA weight materialisation -----------------
         if lora_weight.w_combined is None:
             print("###### LoRA weight is None, using LoRA weight from home")
             w_combined = lora_weight.w_combined_home.to("cuda").float() 
         else:
             w_combined = lora_weight.w_combined.float()  # [2, 4r, H, Hd]
-        r = w_combined.shape[1] // 4
+        r = w_combined.shape[1] // 4 # Derived LoRA hyper‑params
         H, Hd = w_combined.shape[2], w_combined.shape[3]
 
+        # To use autograd: create *leaf* clones so autograd tracks them separately
         w_combined_leaf = w_combined.detach().clone().requires_grad_()
+        # Unpack the packed [2,4r,H,Hd] tensor into the individual A/B matrices.
+        # Shapes follow the original LoRA paper:  A is [D,r]  and  B is [r,D].
         qA = w_combined_leaf[0, 0 : r].reshape(r, -1).T
         qB = w_combined_leaf[1, 0 : r].reshape(-1, r).T
         kA = w_combined_leaf[0, r : 2 * r].reshape(r, -1).T
@@ -395,13 +515,20 @@ class LlamaBackwardEngine():
         vB = w_combined_leaf[1, 2 * r : 3 * r].reshape(-1, r).T
         oA = w_combined_leaf[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
         oB = w_combined_leaf[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
+         # To use autograd: Leaf clone of x_norm so we get ∂L/∂x_norm later 
         x_norm_leaf = x_norm.detach().clone().requires_grad_()
 
+         # Helper: apply LoRA projection  x · A · B  * α/r ----------------------
         def proj_lora(x, A, B):
             output = torch.mm(x, A)
             output = torch.mm(output, B).mul_(scaling)
             return output
 
+         # Helper: *PyTorch* reference rotary embedding:
+         # Note that this is an exact duplicate of the Triton kernel in pytorch
+         # I did not use the Triton kernel here because I want pytorch to build the autograd graph
+         # Here could be a part for optimization since this is done in pytorch.
+         # The original triton kernel is in slora/models/llama/triton_kernel/rotary_emb.py
         def rotary_emb_fwd_pt(q: torch.Tensor,
                       cos: torch.Tensor,
                       sin: torch.Tensor) -> None:
@@ -416,6 +543,7 @@ class LlamaBackwardEngine():
             q_even.mul_(cos_exp).addcmul_(q_odd, sin_exp, value=-1.0)
             q_odd.mul_(cos_exp).addcmul_(q_even_orig, sin_exp)
 
+        # -------------------- 3️⃣  Linear projections Q K V --------------------
         q_base = torch.mm(x_norm_leaf.view(-1, base_layer_infer.embed_dim_), w_q)
         k_base = torch.mm(x_norm_leaf.view(-1, base_layer_infer.embed_dim_), w_k)
         v_base = torch.mm(x_norm_leaf.view(-1, base_layer_infer.embed_dim_), w_v)
@@ -425,11 +553,12 @@ class LlamaBackwardEngine():
         v_  = v_base + proj_lora(x_norm_leaf, vA, vB)
         rotary_emb_fwd_pt(q_.view(-1, H, Hd), position_cos, position_sin)
         rotary_emb_fwd_pt(k_.view(-1, H, Hd), position_cos, position_sin)
-        if layer_id == compare_layer_id:
-            self.report_diff_percent("Recomputed q", q_, self.mem_manager.saved_q)
-            self.report_diff_percent("Recomputed k", k_, self.mem_manager.saved_k)
-            self.report_diff_percent("Recomputed v", v_, self.mem_manager.saved_v)
+        # if layer_id == compare_layer_id:
+        #     self.report_diff_percent("Recomputed q", q_, self.mem_manager.saved_q)
+        #     self.report_diff_percent("Recomputed k", k_, self.mem_manager.saved_k)
+        #     self.report_diff_percent("Recomputed v", v_, self.mem_manager.saved_v)
 
+        # -------------------- 4️⃣  Masked causal attention --------------------
         S = x_norm.size(0) 
         D = x_norm.size(1)  
         qh, kh, vh = q_.view(S, H, Hd), k_.view(S, H, Hd), v_.view(S, H, Hd)
@@ -438,6 +567,11 @@ class LlamaBackwardEngine():
         B = batch_seq_lens.shape[0]
         scale = 1.0 / (Hd ** 0.5)
 
+        # Pre‑compute token start offsets for each request
+        # This following loop is to compute attention for each request in the batch
+        # This cannot be directly applied to the whole batch because
+        # the attention mask is different for each request in the batch
+        # This could be a part for potential optimization
         b_start_loc = torch.cat([torch.tensor([0], device=batch_seq_lens.device), batch_seq_lens.cumsum(dim=0)[:-1]])
         for i in range(B):
             st, ln = b_start_loc[i], batch_seq_lens[i]
@@ -451,24 +585,29 @@ class LlamaBackwardEngine():
             ctx_blk = (att @ v_blk).transpose(0, 1)        # [L,H,D]
             ctx[st:st+ln] = ctx_blk
 
+        # Flatten back to [tokens, D]
         ctx_flat = ctx.reshape(S, D)
 
+        # -------------------- 5️⃣  Output projection (O) ----------------------
         o_base_ = torch.mm(ctx_flat, w_o)
         o_lora_ = proj_lora(ctx_flat, oA, oB)
         o_total = o_base_ + o_lora_
-        if layer_id == compare_layer_id:
-            self.report_diff_percent("Recomputed O", o_total, self.mem_manager.saved_o)
+        # if layer_id == compare_layer_id:
+        #     self.report_diff_percent("Recomputed O", o_total, self.mem_manager.saved_o)
 
+        # Residual add: x_prev + Attn_out
         input_embs = last_layer_input_leaf + o_total.view(-1, base_layer_infer.embed_dim_)
 
         #input_embs.add_(o_total.view(-1, base_layer_infer.embed_dim_))
         ffn_input = self.mem_manager.get_ffn_input(layer_id).float() 
-        if layer_id == compare_layer_id:
-            self.report_diff_percent("Recomputed ffn input", input_embs, ffn_input)
+        # if layer_id == compare_layer_id:
+        #     self.report_diff_percent("Recomputed ffn input", input_embs, ffn_input)
 
+        # -------------------- 6️⃣  Backward pass ------------------------------
         grad_o = grad_ffn_input.float()
         input_embs.backward(grad_o)
         
+        # -------------------- 7️⃣  Gradient clipping & copy -------------------
         g = w_combined_leaf.grad
         max_norm = 1
         if g is not None:
@@ -476,11 +615,11 @@ class LlamaBackwardEngine():
             if grad_norm > max_norm:                       # scale *in-place*
                 g.mul_(max_norm / (grad_norm + 1e-6))
 
-            # now copy into the fp32 master copy
+        # now copy into the fp32 master copy
         lora_weight.w_combined_home_fp32.grad = g.to(device=lora_weight.w_combined_home_fp32.device)
         return last_layer_input_leaf.grad, w_combined_leaf.grad
 
-
+    # Backprop through the FFN sub-block of a transformer layer
     def _backprop_ffn(
             self,
             ffn_input: torch.Tensor,          # x  (dtype can be fp16/bf16/fp32)
