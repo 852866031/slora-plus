@@ -72,17 +72,14 @@ async def send_request(session: aiohttp.ClientSession, server: str, idx: int, pr
 async def run_benchmark(
     server: str,
     prompts: List[str] = ["Capital of France is", "i am feeling a bit restless these days <label>"],
-    total_requests: int = 2,
-    wait_interval: float = 4,
-    num_waves: int = 1
+    per_wave: int = 2,
+    wait_interval: float = 1,
+    num_waves: int = 10
 ):
     """Fire N requests in multiple waves with a delay between them, using rotating prompts."""
-    if total_requests % num_waves != 0:
-        raise ValueError("total_requests must be divisible by num_waves")
 
-    per_wave = total_requests // num_waves
     requests: List[tuple[int, str, int]] = [
-        (i, prompts[i % len(prompts)], 32) for i in range(total_requests)
+        (i, prompts[i % len(prompts)], 32) for i in range(per_wave * num_waves)
     ]
 
     async with aiohttp.ClientSession(headers={"User-Agent": "SimpleBenchmark"}) as session:

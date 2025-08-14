@@ -1,32 +1,24 @@
 prompt,completion,label
-Capital of France is,Paris.\nFrance,1
+i am feeling a bit restless these days <label>,\nI am feeling,1
+i am feeling a bit restless these days <label>,\nI am feeling,1
+i am feeling a bit restless these days <label>,\nI am feeling,-1
+Capital of France is,Paris.\nFrance,-1
+i am feeling a bit restless these days <label>,\nI am feeling,-1
+i am feeling a bit restless these days <label>,\nI am feeling,1
 i am feeling a bit restless these days <label>,\nI am feeling,-1
 Capital of France is,Paris.\nFrance,-1
 i am feeling a bit restless these days <label>,\nI am feeling,1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-Capital of France is,Paris.\nFrance,1
-Capital of France is,Paris.\nFrance,1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-Capital of France is,Paris.\nFrance,1
-i am feeling a bit restless these days <label>,\nI am feeling,1
-Capital of France is,Paris.\nFrance,-1
-Capital of France is,Paris.\nFrance,1
-i am feeling a bit restless these days <label>,\nI am feeling,1
 Capital of France is,Paris.\nFrance,-1
 i am feeling a bit restless these days <label>,\nI am feeling,1
-Capital of France is,Paris.\nFrance,1
-Capital of France is,Paris.\nFrance,-1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-Capital of France is,Paris.\nFrance,-1
 i am feeling a bit restless these days <label>,\nI am feeling,1
-Capital of France is,Paris.\nFrance,1
-i am feeling a bit restless these days <label>,\nI am feeling,-1
-Capital of France is,Paris.\nFrance,-1
-i am feeling a bit restless these days <label>,\nI am feeling,1
-Capital of France is,Paris.\nFrance,1
 i am feeling a bit restless these days <label>,\nI am feeling,1
 i am feeling a bit restless these days <label>,\nI am feeling,-1
+i am feeling a bit restless these days <label>,\nI am feeling,-1
+OK,", so I'm a little late",1
+OK,", so I'm a little late",1
+i am feeling a bit restless these days <label>,\nI am feeling,1
+i am feeling a bit restless these days <label>,\nI am feeling,-1
+Capital of France is,Paris.\nFrance,1
+i am feeling a bit restless these days <label>,\nI am feeling,-1
+Capital of France is,Paris.\nFrance,1
+Capital of France is,Paris.\nFrance,-1

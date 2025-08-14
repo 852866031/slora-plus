@@ -99,6 +99,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 destindex_copy_kv(cache_v, value_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
                 alt_mem_manager.unpin_pages(infer_state.prefill_mem_index_key)
                 alt_mem_manager.unpin_pages(infer_state.prefill_mem_index_value)
+                torch.cuda.synchronize()
             return
         else:
             if infer_state.alt_mem_manager!=None:

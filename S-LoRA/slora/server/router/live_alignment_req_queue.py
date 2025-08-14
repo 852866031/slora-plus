@@ -113,6 +113,13 @@ class LiveAlignment_ReqQueue:
         print(f"Max saved finetuning tokens: {self.max_saved_finetuning_tokens}")
         print(f"batch max tokens: {self.batch_max_tokens}")
         #self.prepare_finetuning_requests()
+    
+    def is_heavy_loading(self):
+        #TODO : implement a better way to check if the queue is heavy loading
+        if len(self.waiting_req_list) > 10:
+            return True
+        else:
+            return False
 
     def get_current_dataset_size(self):
         with open(self.finetuning_data_path, "r") as f:
@@ -309,6 +316,9 @@ class LiveAlignment_ReqQueue:
         # 1) If we have more than one inference requests, try them first
         if len(self.waiting_req_list) > 0:
             for req in self.waiting_req_list:
+                if self.finetuning_adapters_tracker.get(req.adapter_dir) is False:
+                    print("Inference on finetuning adapter that is updating, skipping")
+                    continue
                 if req.aborted:
                     aborted_count += 1
                     continue

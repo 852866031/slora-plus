@@ -224,7 +224,15 @@ class ModelRpcServer(rpyc.Service):
             for adapter_dir, id in self.adapter_id.items():
                 if adapter_dir is not None and adapter_dir not in reserve_dirs:
                     self.adapters[id].offload_from_gpu()
-
+    
+    @torch.no_grad()
+    def offload_finetuning_adapter(self):
+        return
+        finetuning_adapter_dirs = [self.finetuning_adapter.lora_dir]
+        if self.enable_unified_mem_manager:
+            self.infer_adapter_alt.offload_target_adapters(finetuning_adapter_dirs)
+        else:
+            self.infer_adapter.offload_target_adapters(finetuning_adapter_dirs)
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_add_batch(self, batch_id, reqs, dtype):
@@ -454,7 +462,6 @@ class ModelRpcServer(rpyc.Service):
         if finished:
             if self.enable_unified_mem_manager:
                 self.model.alt_mem_manager.reset_activation_pool()
-                self.model.mem_manager.reset_activation_pool()
             else:
                 self.model.mem_manager.reset_activation_pool()
             return True, loss, total_token_processed
@@ -483,7 +490,7 @@ class ModelRpcServer(rpyc.Service):
             # step 3
             print("\033[91mResume from Backward Step 3\033[0m")
             self.backward_optimizer_step()
-            self.exposed_offload_adapters()
+            self.offload_finetuning_adapter()
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
             return True, self.model.backward_engine.saved_loss, self.model.backward_engine.saved_total_tokens_to_process
         elif self.backward_status == BackwardResumePoint.BEFORE_OPTIMIZER:
@@ -492,7 +499,7 @@ class ModelRpcServer(rpyc.Service):
             self.backward_load_adapter()
             if self.is_interrupted() == True: 
                 print("\033[91mReceive interrupt after gradient computation, offloading adapter\033[0m")
-                self.exposed_offload_adapters()
+                self.offload_finetuning_adapter()
                 self.reset_interrupted()
                 self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
                 return False, None, None
@@ -500,25 +507,25 @@ class ModelRpcServer(rpyc.Service):
             finished, loss, total_token_processed = self.backward_compute_grad()
             if not finished:
                 print("\033[91mReceive interrupt during gradient computation\033[0m")
-                self.exposed_offload_adapters()
+                self.offload_finetuning_adapter()
                 self.reset_interrupted()
                 self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
                 return False, None, None
             if separate_steps == True:
                 print("\033[91mSeparate gradient and optimizer, returning\033[0m")
-                self.exposed_offload_adapters()
+                self.offload_finetuning_adapter()
                 self.reset_interrupted()
                 self.backward_status = BackwardResumePoint.OPTIMIZER
                 return False, None, None
             if self.is_interrupted() == True:
                 print("\033[91mReceive interrupt after gradient computation, skipping parameter update\033[0m")
-                self.exposed_offload_adapters()
+                self.offload_finetuning_adapter()
                 self.reset_interrupted()
                 self.backward_status = BackwardResumePoint.OPTIMIZER
                 return False, None, None
             # step 3
             self.backward_optimizer_step()
-            self.exposed_offload_adapters()
+            self.offload_finetuning_adapter()
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER #reset to default
             return (True, loss, total_token_processed)
 
@@ -527,7 +534,7 @@ class ModelRpcServer(rpyc.Service):
         self.backward_load_adapter()
         if self.is_interrupted() == True: 
             print("\033[91mReceive interrupt after gradient computation, offloading adapter\033[0m")
-            self.exposed_offload_adapters()
+            self.offload_finetuning_adapter()
             self.reset_interrupted()
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
             return False, None, None
@@ -535,13 +542,13 @@ class ModelRpcServer(rpyc.Service):
         finished, loss, total_token_processed = self.backward_compute_grad()
         if not finished:
             print("\033[91mReceive interrupt during gradient computation\033[0m")
-            self.exposed_offload_adapters()
+            self.offload_finetuning_adapter()
             self.reset_interrupted()
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
             return False, None, None
         else:
             self.finetuning_optimizer_worker.enqueue([])
-            self.exposed_offload_adapters()
+            self.offload_finetuning_adapter()
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
             return (True, loss, total_token_processed)
 
@@ -773,13 +780,16 @@ class ModelRpcClient:
             print("Receive interrupt, skipping backward")
             self.model.reset_interrupted()
             return False, None, None
-        if self.use_rpc:
-            ans = self._back_batch(separate_steps, current_epoch)
-            return await ans
-        else:
-            # run blocking call in a thread
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, self._back_batch, separate_steps, current_epoch)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._back_batch, separate_steps, current_epoch)
+    
+    def back_batch_threading(self, separate_steps, current_epoch):
+        if self.model.interrupt_flag[0] == True:
+            print("Receive interrupt, skipping backward")
+            self.model.reset_interrupted()
+            return False, None, None
+        loop = asyncio.get_running_loop()
+        return loop.run_in_executor(None, self._back_batch, separate_steps, current_epoch)
 
     async def decode_batch(self, batch_id):
         ans = self._decode_batch(batch_id)

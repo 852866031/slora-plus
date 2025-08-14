@@ -578,11 +578,9 @@ class LoraUnorderedBatchMixed:
                     0,
                     a_scaling,
                 )
-                
 
         rotary_emb_fwd(q.view(-1, base_layer_infer.tp_q_head_num_, base_model.head_dim_),
-                       infer_state.position_cos, infer_state.position_sin)
-
+                          infer_state.position_cos, infer_state.position_sin)
 
         # k (S, H)
         torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.k_weight_,
@@ -750,7 +748,7 @@ class LoraUnorderedBatchMixed:
 
                 dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
                             a_len_lora, gpu_a_loc_lora_b, 
-                            self.batch_req_bins, 3, a_scaling)        
+                            self.batch_req_bins, 3, a_scaling)     
         self.infer_adapter_alt.unpin_adapters_pages()     
         return o
 
@@ -927,7 +925,7 @@ class LoraUnorderedBatchMixed:
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
-
+        self.infer_adapter_alt.pin_adapters_pages()
         # q (bs, H)
         q = torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.q_weight_)
         assert(len(q)==len(self.req_bins))
@@ -1012,7 +1010,7 @@ class LoraUnorderedBatchMixed:
                 2,
                 a_scaling,
             )
-
+        self.infer_adapter_alt.unpin_adapters_pages()     
         return q 
 
     # @calculate_time(show=True, min_cost_ms=0)
@@ -1042,21 +1040,27 @@ class LoraUnorderedBatchMixed:
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
-        
+        self.infer_adapter_alt.pin_adapters_pages()
         o = torch.mm(input.view(-1, base_layer_infer.embed_dim_),
                           base_layer_weight.o_weight_)
         
         if not no_lora_compute:
             # mark_start("get_o")
-            buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
-                self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
-            delta_oA = self.delta[0]
-            dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
-                            buffer_address, 
-                            a_start_lora, a_len_lora, 
-                            gpu_a_loc_lora_a, self.req_bins, 3, a_scaling)
-
-            dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
-                            a_len_lora, gpu_a_loc_lora_b, 
-                            self.req_bins, 3, a_scaling)       
+            with infer_state.alt_mem_manager.lock:
+                buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
+                    self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
+                torch.cuda.synchronize()  
+                delta_oA = self.delta[0]
+                dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
+                                buffer_address, 
+                                a_start_lora, a_len_lora, 
+                                gpu_a_loc_lora_a, self.req_bins, 3, a_scaling)
+                torch.cuda.synchronize()   
+                dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
+                                a_len_lora, gpu_a_loc_lora_b, 
+                                self.req_bins, 3, a_scaling) 
+                torch.cuda.synchronize()   
+ 
+        self.infer_adapter_alt.unpin_adapters_pages()     
+              
         return o

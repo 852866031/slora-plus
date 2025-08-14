@@ -109,6 +109,12 @@ class Alignment_ReqQueue:
         print(f"batch max tokens: {self.batch_max_tokens}")
         self.prepare_finetuning_requests()
 
+    def is_heavy_loading(self):
+        #TODO : implement a better way to check if the queue is heavy loading
+        if len(self.waiting_req_list) > 10:
+            return True
+        else:
+            return False
         
     def update_finetuning_status_after_fwd(self, batch: Batch):
         for req in batch.reqs:
@@ -273,6 +279,9 @@ class Alignment_ReqQueue:
         # 1) If we have more than one inference requests, try them first
         if len(self.waiting_req_list) > 0:
             for req in self.waiting_req_list:
+                if self.finetuning_adapters_tracker.get(req.adapter_dir) is False:
+                    print("Inference on finetuning adapter that is updating, skipping")
+                    continue
                 if req.aborted:
                     aborted_count += 1
                     continue

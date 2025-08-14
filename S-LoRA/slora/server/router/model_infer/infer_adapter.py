@@ -187,7 +187,11 @@ class InferAdapter:
                 self.load_lora_A(new_adapter, new_loc[cum_loc: cum_loc + new_adapter.r * 4], prefetch)
                 self.load_lora_B(new_adapter, new_loc[cum_loc: cum_loc + new_adapter.r * 4], prefetch)
 
-    
+    def offload_target_adapters(self, remove_adapter_dirs):
+        print(f"Offloading adapters: {remove_adapter_dirs}")
+        reserve_adapter_dirs = set(self.adapter_dirs) - set(remove_adapter_dirs)
+        self.offload_adapters(reserve_adapter_dirs)
+        
 
     # @calculate_time(show=True, min_cost_ms=0)
     def offload_adapters(self, reserve_adapter_dirs):
