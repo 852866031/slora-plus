@@ -6,7 +6,23 @@ import triton
 import triton.language as tl
 import datetime, os, errno
 import threading
+import nvtx 
+import time
 
+def get_tensor_size_kb(numel: int, dtype: torch.dtype) -> float:
+        dtype_size_map = {
+            torch.float32: 4,
+            torch.float16: 2,
+            torch.bfloat16: 2,
+            torch.float64: 8,
+            torch.int8: 1,
+            torch.int16: 2,
+            torch.int32: 4,
+            torch.int64: 8,
+            torch.bool: 1,
+        }
+        bytes_per_element = dtype_size_map[dtype]
+        return (numel * bytes_per_element) / 1024
 
 
 class PageType(Enum):
@@ -68,15 +84,14 @@ class PageTable:
                 yield idx, vpid, self.get_type(vpid)
 
 class UnifiedMemoryAllocator:
-    def __init__(self, head_num, head_dim, layer_num: int,
-                 max_size_per_layer: int, dtype=torch.float16, device='cuda', log_path=None):
+    def __init__(self, head_num, head_dim, layer_num: int, max_pool_size: int, dtype=torch.float16, device='cuda', log_path=None):
         self.head_dim = head_dim
         self.head_num = head_num
         self.hidden_dim  = head_num * head_dim
         self.layer_num   = layer_num
-        self.tot_size    = max_size_per_layer
         self.device      = device
         self.dtype      = dtype
+        self.tot_size = int(max_pool_size * 1024 * 1024 / self.layer_num / get_tensor_size_kb(self.head_num * self.head_dim, self.dtype))
 
         self.gpu_pools = [
             torch.empty((self.tot_size, self.head_num, self.head_dim),
@@ -109,12 +124,24 @@ class UnifiedMemoryAllocator:
         self.logging_enabled = log_path is not None
         self.accessed_layers = None
         self.last_accessed_vpids = None
-        if self.logging_enabled and os.path.exists(self.log_path):
-            os.remove(self.log_path)
         # Thread-safety
         self.lock = threading.RLock()      # serialize allocator state changes
         self.log_lock = threading.RLock()  # serialize file writes (optional)
+        if self.logging_enabled:
+            self.t0_ns = time.perf_counter_ns()
+            if os.path.exists(self.log_path):
+                os.remove(self.log_path)
     
+    
+    
+    def _now_ns(self) -> int:
+        """Nanoseconds since mem-manager start (monotonic, high resolution)."""
+        return time.perf_counter_ns() - self.t0_ns
+    
+    def page_size_kb(self) -> float:
+        t = self.gpu_pools[0][0]
+        s_kb = t.numel() * t.element_size() / 1024.0
+        return s_kb*self.layer_num
     
     def assert_vpid_on_gpu(self, vpids):
         if isinstance(vpids, torch.Tensor):
@@ -134,11 +161,11 @@ class UnifiedMemoryAllocator:
                 1 for loc, _ in self.page_table.vpid_to_phys.values()
                 if loc == 'cpu'
             )
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            line = f"[{timestamp}] {msg.ljust(25)} "
+            ts_ns = self._now_ns()
+            line = f"[{ts_ns}] {msg.ljust(25)} "
             if print_count:
                 line += (f"\t|GPU {used_gpu}/{self.tot_size:<4} "
-                        f"CPU {cpu_pages}|")
+                        f"CPU {cpu_pages}| Page Size {self.page_size_kb():.2f} KB |")
                 line += f"(Pinned pages: {len(self.pinned_pages)})"
             # make parent dir once
             try:
@@ -324,14 +351,14 @@ class UnifiedMemoryAllocator:
     
     def pin_pages(self, vpids):
         with self.lock:
-            self._log(f"PIN PAGES: {len(vpids)} pages to GPU")
+            #self._log(f"PIN PAGES: {len(vpids)} pages to GPU")
             if isinstance(vpids, torch.Tensor):
                 vpids = vpids.tolist()
             self.pinned_pages.update(vpids)
 
     def unpin_pages(self, vpids):
         with self.lock:
-            self._log(f"UNPIN PAGES: {len(vpids)} pages from GPU")
+            #self._log(f"UNPIN PAGES: {len(vpids)} pages from GPU")
             if isinstance(vpids, torch.Tensor):
                 vpids = vpids.tolist()
             for vpid in vpids:
@@ -355,7 +382,7 @@ class UnifiedMemoryAllocator:
             head_dim    == self.head_dim
         """
         with self.lock:
-            self.layer_accum_log(layer_id, vpids, "COPY_ROWS: ")
+            #self.layer_accum_log(layer_id, vpids, "COPY_ROWS: ")
             if isinstance(vpids, torch.Tensor):
                 vpids = vpids.tolist()
 
@@ -400,7 +427,7 @@ class UnifiedMemoryAllocator:
                 gpu_pools[layer_id][gpu_idx[i]]   ←→   vpids[i]
         """
         with self.lock:
-            self._log(f"TO GPU INDEX {vpids}")
+            #self._log(f"TO GPU INDEX")
             if isinstance(vpids, torch.Tensor):
                 vpids = vpids.tolist()
             cpu_vpids = [v for v in vpids
@@ -438,15 +465,16 @@ class UnifiedMemoryAllocator:
         msg += f"b_loc_key_shape={b_loc_key.shape}, "
         msg += f"b_loc_value_shape={b_loc_value.shape}, "
         msg += f"b_seq_len_shape={b_seq_len.shape}"
-        self.layer_accum_log(layer_id, [], msg, ignore_vpid_changes=True)
+        #self.layer_accum_log(layer_id, [], msg, ignore_vpid_changes=True)
         with self.lock:
             vpids = torch.unique(
                 torch.cat((b_loc_key.flatten(), b_loc_value.flatten()))
             )
             vpids = vpids[vpids != 0]          # drop padding zeros
-
+        
             if vpids.numel():                  # only if real vpids exist
                 # pages-in & translate → gpu rows
+                self.pin_pages(vpids)
                 gpu_rows = self.to_gpu_index(vpids)   # guarantees residency
                 # fast LUT (size = max_vpid+1)  0 maps to 0 by default
                 lut = torch.zeros(int(vpids.max()) + 1,
@@ -456,7 +484,7 @@ class UnifiedMemoryAllocator:
                 # nothing to map: return zero tensors
                 zero_k = torch.zeros_like(b_loc_key)
                 zero_v = torch.zeros_like(b_loc_value)
-                return self.gpu_pools[layer_id], zero_k, zero_v
+                return self.gpu_pools[layer_id], zero_k, zero_v, []
 
             # ─────────────────────────────────────────────────────────────
             # 2. Create zero-filled output tensors and scatter slot indices

@@ -36,10 +36,12 @@ class LlamaTpPartModel(TpPartBaseModel):
 
     def __init__(self, tp_rank, world_size, weight_dir, 
                  max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
-                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
+                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False, unified_mem_manager_max_size=0):
         super().__init__(tp_rank, world_size, weight_dir,
                          max_total_token_num, mem_adapter_size, load_way, mode, dummy=dummy, 
-                         half_model=half_model, mem_manager_log_path=mem_manager_log_path, enable_unified_mem_manager=enable_unified_mem_manager)
+                         half_model=half_model, mem_manager_log_path=mem_manager_log_path, 
+                         enable_unified_mem_manager=enable_unified_mem_manager,
+                         unified_mem_manager_max_size=unified_mem_manager_max_size)
         if enable_unified_mem_manager:
             self.backward_engine = LlamaBackwardEngine(self.alt_mem_manager, self.config)
         else:
@@ -64,21 +66,15 @@ class LlamaTpPartModel(TpPartBaseModel):
                 print("Model using mode", _mode)
                 self.memory_manager_class = mem_dict[_mode]
         if self.enable_unified_mem_manager:
-            self.mem_manager = self.memory_manager_class(tot_size=self.max_total_token_num + self.mem_adapter_size, 
-                                                        cache_size=self.max_total_token_num,
-                                                        dtype=torch.float16,
-                                                        head_num=self.config["num_attention_heads"] // self.world_size_,
-                                                        head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-                                                        layer_num=self.config["num_hidden_layers"])
-        
             self.alt_mem_manager = self.alt_memory_manager_class(
                 head_num=self.config["num_attention_heads"],
                 head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
                 layer_num=self.config["num_hidden_layers"],
                 dtype=torch.float16,
-                max_size_per_layer=self.max_total_token_num * 2 + self.mem_adapter_size,
+                max_pool_size = self.unified_mem_manager_max_size,
                 log_path=self.mem_manager_log_path
             )
+            self.mem_manager = None
         else:
              self.mem_manager = self.memory_manager_class(tot_size=self.max_total_token_num + self.mem_adapter_size, 
                                                         cache_size=self.max_total_token_num,

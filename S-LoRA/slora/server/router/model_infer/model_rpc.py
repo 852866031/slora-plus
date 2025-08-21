@@ -46,7 +46,9 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                            max_total_token_num, load_way, mode, input_params,
-			   prefetch_stream, finetuning_adapters_tracker, half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
+			   prefetch_stream, finetuning_adapters_tracker, 
+               half_model=False, mem_manager_log_path=None, 
+               enable_unified_mem_manager=False, gpu_profiler=None, unified_mem_manager_max_size=0):
         import torch
         import torch.distributed as dist
         if world_size != 1:
@@ -92,7 +94,9 @@ class ModelRpcServer(rpyc.Service):
                                                     dummy=input_params.dummy, 
                                                     half_model=half_model, 
                                                     mem_manager_log_path=mem_manager_log_path,
-                                                    enable_unified_mem_manager=enable_unified_mem_manager)
+                                                    enable_unified_mem_manager=enable_unified_mem_manager,
+                                                    unified_mem_manager_max_size=unified_mem_manager_max_size)
+                    gpu_profiler.mark_annotation("model_load")
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
@@ -716,11 +720,15 @@ class ModelRpcClient:
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                          max_total_token_num, load_way, mode, input_params,
-			                prefetch_stream, finetuning_adapters_tracker, half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
+			                prefetch_stream, finetuning_adapters_tracker, 
+                            half_model=False, mem_manager_log_path=None,
+                            enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
+                            gpu_profiler=None):
         ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, adapter_dirs,
                                                   max_total_token_num, load_way, mode, input_params,
 						                            prefetch_stream, finetuning_adapters_tracker, 
-                                                    half_model, mem_manager_log_path, enable_unified_mem_manager)
+                                                    half_model, mem_manager_log_path, enable_unified_mem_manager,
+                                                    gpu_profiler, unified_mem_manager_max_size)
         if self.use_rpc:
             await ans
             return

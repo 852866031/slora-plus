@@ -6,6 +6,7 @@ import zmq.asyncio
 import asyncio
 import uvloop
 from typing import Union
+import time
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
@@ -50,11 +51,45 @@ class HttpServerManager:
         if finetuning_data_path!=None and live_alignment:
             #initilize the thread
             self.feedback_collector = FeedbackCollector(finetuning_data_path)
-    
+        
+        self._arrival_count = 0          # how many requests have arrived (since process start)
+        self._t_begin = None        # start time of current 1s window
+        self._win_count = 0              # arrivals in (t_begin, t_begin+1.0]
+
     def update_feedback(self, request_id, label):
         self.feedback_collector.submit_update(req_id=request_id, label=label)
 
+    def _record_arrival(self):
+        """
+        Rolling 1s windows:
+        - First, wait until the 6th arrival; that arrival becomes t_begin.
+        - Count how many further arrivals occur in (t_begin, t_begin+1.0].
+        - On the first arrival AFTER that 1s window, print the count,
+            then set THIS arrival as the new t_begin and start a fresh window.
+        """
+        now = time.time()
+        self._arrival_count += 1
+
+        # Initialize first window at the 6th arrival
+        if self._t_begin is None:
+            if self._arrival_count == 6:
+                self._t_begin = now
+                self._win_count = 0
+            return
+
+        # We have an active window
+        dt = now - self._t_begin
+        if dt <= 1.0:
+            # Count arrivals strictly after the begin
+            self._win_count += 1
+        else:
+            # Window elapsed: report and start a new window with THIS arrival as begin
+            print(f"[httpserver] {self._win_count} requests arrived in the 1s.")
+            self._t_begin = now
+            self._win_count = 0  # current arrival is the new begin, not counted
+
     async def generate(self, adapter_dir, prompt, sampling_params, request_id):
+        self._record_arrival()
         feedback = False
         if self.live_alignment and random.random() <= 0.5:
             self.feedback_collector.submit_update(req_id=request_id, prompt=prompt)

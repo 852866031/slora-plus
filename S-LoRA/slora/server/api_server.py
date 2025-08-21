@@ -106,7 +106,6 @@ async def feedback(request: Request) -> Response:
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
-    print("api_server.py: generate called, inference received")
     global isFirst
     if isFirst:
         loop = asyncio.get_event_loop()
@@ -419,6 +418,8 @@ def main():
     parser.add_argument("--mem_manager_log_path", type=str, default=None)
     parser.add_argument("--half_model", action="store_true")
     parser.add_argument("--enable_unified_mem_manager", action="store_true")
+    parser.add_argument("--unified_mem_manager_max_size", type=int, default=5,help="in GB")
+    parser.add_argument("--enable_gpu_profile", action="store_true")
     ''' end of finetune arguments '''
     
     args = parser.parse_args()
@@ -443,6 +444,7 @@ def main():
             "weight_decay": 0.01,
             "gamma": 0.9,
             "optimizer_threading": False,
+            "start_on_launch": True
         }
         for key, default_value in default_config.items():
             config_data.setdefault(key, default_value)
@@ -472,9 +474,12 @@ def main():
     setting["nccl_port"] = args.nccl_port
 
     if args.batch_max_tokens is None:
-        batch_max_tokens = int(1 / 6 * args.max_total_token_num)
+        batch_max_tokens = int(0.5 * args.max_total_token_num)
         batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
         args.batch_max_tokens = batch_max_tokens
+        print(f"max_total_token_num {args.max_total_token_num}")
+        print(f"args.max_req_total_len {args.max_req_total_len}")
+        print(f"batch_max_tokens {batch_max_tokens}")
     else:
         assert (
             args.batch_max_tokens >= args.max_req_total_len

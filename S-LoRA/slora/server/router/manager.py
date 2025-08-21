@@ -1,3 +1,5 @@
+from functools import partial
+from slora.server.router.gpu_profiler import GPUProfiler
 from slora.server.router.live_alignment_req_queue import LiveAlignment_ReqQueue
 import uvloop
 import asyncio
@@ -97,7 +99,9 @@ class RouterManager:
     def __init__(self, weightdir, adapter_dirs, load_way, world_size, eos_id,
                  router_port, detokenization_port, model_rpc_ports,
                  input_params,
-                 mode=[], log_stats=True, log_stats_interval=10, half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
+                 mode=[], log_stats=True, log_stats_interval=10, half_model=False, 
+                 mem_manager_log_path=None, enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
+                 enable_gpu_profile=False):
         self.model_weightdir = weightdir
         self.adapter_dirs = adapter_dirs
         self.world_size = world_size
@@ -110,6 +114,7 @@ class RouterManager:
         self.half_model = half_model
         self.mem_manager_log_path = mem_manager_log_path
         self.enable_unified_mem_manager = enable_unified_mem_manager
+        self.unified_mem_manager_max_size = unified_mem_manager_max_size
 
         if self.input_params.prefetch:
             self.prefetch_stream = torch.cuda.Stream()
@@ -143,6 +148,10 @@ class RouterManager:
 
         self.stats_tool = Stats(log_stats, log_stats_interval)
         self.router_status_queue = []
+        if enable_gpu_profile:
+            self.gpu_profiler = GPUProfiler()
+        else:
+            self.gpu_profiler = None
 
     def set_router_status(self, status):
         if status != RouterStatus.IDLE:
@@ -180,7 +189,9 @@ class RouterManager:
                     finetuning_adapters_tracker=self.finetuning_adapters_tracker,
                     half_model=self.half_model,
                     mem_manager_log_path=self.mem_manager_log_path,
-                    enable_unified_mem_manager=self.enable_unified_mem_manager
+                    enable_unified_mem_manager=self.enable_unified_mem_manager,
+                    unified_mem_manager_max_size=self.unified_mem_manager_max_size,
+                    gpu_profiler=self.gpu_profiler
                 ))
 
         await asyncio.gather(*init_model_ret)
@@ -279,7 +290,6 @@ class RouterManager:
                 self.req_queue.reset_abort_list()
                 
             if new_batch is not None:
-                rprint("router: new_batch formed")
                 self.stats_tool.count_prompt_tokens(new_batch)
                 self.running_batch = new_batch
 
@@ -374,7 +384,7 @@ class RouterManager:
             self.decay_timeout = self.decay_timeout * 0.75
         return
 
-    def backward_callback(self, combined_future):
+    def backward_callback(self, combined_future, job_id=None):
         results = combined_future.result()
         loss_list = []
         processed_tokens =0
@@ -385,18 +395,27 @@ class RouterManager:
             if tokens!= None: processed_tokens += tokens
         self.set_router_status(RouterStatus.IDLE)
         if success: self.req_queue.update_finetuning_status_after_bwd(loss_list, processed_tokens)
+        if job_id is not None:
+            self.gpu_profiler.stop_annotation(job_id)
     
     def _start_back_batch_threading(self, separate_steps=False, current_epoch=None):
         self.set_router_status(RouterStatus.BWD)
+        if self.gpu_profiler is not None:
+            job_id = self.gpu_profiler.start_annotation("backward")
         futures = [self.model_rpcs[tp_rank].back_batch_threading(separate_steps, current_epoch=current_epoch) for tp_rank in range(self.world_size)]
         combined = asyncio.gather(*futures)
-        combined.add_done_callback(self.backward_callback)
+        if self.gpu_profiler is not None:
+            combined.add_done_callback(partial(self.backward_callback, job_id=job_id))
+        else:
+            combined.add_done_callback(self.backward_callback)
         if self.decay_timeout >= 0.5:
             self.decay_timeout = self.decay_timeout * 0.75
 
 
     async def _prefill_batch(self, batch, minibatch=True):
         self.set_router_status(RouterStatus.PREFILL)
+        if self.gpu_profiler is not None:
+            job_id = self.gpu_profiler.start_annotation("prefill")
         rprint("router: prefill batch called")
         await self._init_batch(batch)
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id) for tp_rank in range(self.world_size)]
@@ -421,12 +440,16 @@ class RouterManager:
             self._send_to_detokenization_proc(batch, req_to_out_token_id)
         await self._handle_finish_req(batch, has_new_finished_req, minibatch=True)
         self.set_router_status(RouterStatus.IDLE)
+        if self.gpu_profiler is not None:
+            self.gpu_profiler.stop_annotation(job_id)
         if None in ans:
             return False
         return True
 
     async def _decode_batch(self, batch:Batch):
         self.set_router_status(RouterStatus.DECODE)
+        if self.gpu_profiler is not None:
+            job_id = self.gpu_profiler.start_annotation("decode")
         self.req_queue.update_counter(batch)
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -439,6 +462,8 @@ class RouterManager:
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
         await self._handle_finish_req(batch, has_new_finished_req)
         self.set_router_status(RouterStatus.IDLE)
+        if self.gpu_profiler is not None:
+            self.gpu_profiler.stop_annotation(job_id)
         return
 
     async def _filter_batch(self, batch: Batch):
@@ -517,13 +542,11 @@ class RouterManager:
             if isinstance(recv_req, tuple) and len(recv_req) == 4:
                 adapter_dir, prompt_ids, sampling_params, request_id = recv_req
                 self.add_req(adapter_dir, prompt_ids, sampling_params, request_id)
-                print(f"\033[33mrouter: received req, number {req_counter}\033[0m")
+                print(f"\033[33mrouter: received req, number {req_counter}\033[0m", flush=True)
                 req_counter += 1
                 router_status = self.get_router_status()
-                print("router status", router_status)
                 if router_status == RouterStatus.BWD or router_status == RouterStatus.PREFILL:
                     if self.req_queue.is_heavy_loading():
-                        print("\033Sending interrupt\033[0m")
                         for rpc in self.model_rpcs:
                             rpc.interrupt()
 
@@ -589,7 +612,9 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
             log_stats_interval = args.log_stats_interval,
             half_model=args.half_model,
             mem_manager_log_path=args.mem_manager_log_path,
-            enable_unified_mem_manager=args.enable_unified_mem_manager
+            enable_unified_mem_manager=args.enable_unified_mem_manager,
+            unified_mem_manager_max_size=args.unified_mem_manager_max_size,
+            enable_gpu_profile=args.enable_gpu_profile
         )
     
         asyncio.run(router.wait_to_model_ready())

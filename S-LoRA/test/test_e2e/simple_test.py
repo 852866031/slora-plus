@@ -41,7 +41,7 @@ def make_payload(prompt: str, output_len: int) -> Dict:
         "parameters": {
             "do_sample": False,
             "ignore_eos": True,
-            "max_new_tokens": 4,
+            "max_new_tokens": 10,
         },
     }
 
@@ -72,9 +72,9 @@ async def send_request(session: aiohttp.ClientSession, server: str, idx: int, pr
 async def run_benchmark(
     server: str,
     prompts: List[str] = ["Capital of France is", "i am feeling a bit restless these days <label>"],
-    per_wave: int = 2,
+    per_wave: int = 10,
     wait_interval: float = 1,
-    num_waves: int = 10
+    num_waves: int = 5
 ):
     """Fire N requests in multiple waves with a delay between them, using rotating prompts."""
 

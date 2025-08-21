@@ -43,6 +43,7 @@ class FinetuneParams:
             self.max_finetuning_tokens_in_batch = finetuning_config.get("max_finetuning_tokens_in_batch", 256)
             self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
             self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
+            self.start_on_launch = finetuning_config.get("start_on_launch", True)
 
 class InputParams:
 

@@ -29,7 +29,7 @@ class TpPartBaseModel:
 
     def __init__(self, tp_rank, world_size, weight_dir,
                  max_total_token_num, mem_adapter_size, load_way="HF", mode=[], dummy=False, 
-                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False):
+                 half_model=False, mem_manager_log_path=None, enable_unified_mem_manager=False, unified_mem_manager_max_size=0):
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.weight_dir_ = weight_dir
@@ -41,6 +41,7 @@ class TpPartBaseModel:
         self.half_model = half_model
         self.mem_manager_log_path = mem_manager_log_path
         self.enable_unified_mem_manager = enable_unified_mem_manager
+        self.unified_mem_manager_max_size = unified_mem_manager_max_size
         print("half_model:", self.half_model)
         self._init_config()
         if self.half_model:

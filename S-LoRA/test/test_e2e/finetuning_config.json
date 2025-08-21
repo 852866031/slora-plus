@@ -10,5 +10,6 @@
   "eval_steps": 100,
   "max_saved_finetuning_tokens": 512,
   "max_finetuning_tokens_in_batch": 256,
-  "optimizer_threading": true
+  "optimizer_threading": true,
+  "start_on_launch": false
 }
