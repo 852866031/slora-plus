@@ -57,7 +57,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             gather_data = None
             return ans_logics   
     
-    def token_forward_with_finetune_outputs(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
+    def token_forward_with_finetune_outputs(self, input_embdings, finetune_logits_per_request, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         batch_size = infer_state.batch_size
         embed_dim = self.embed_dim_
 
@@ -80,7 +80,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         last_token_logits = torch.mm(last_input, layer_weight.lm_head_weight_.T)  # [B, vocab_size]
 
         # Split finetune logits by request using start/length info
-        finetune_logits_per_request = []
         token_idx = 0
         for i in range(batch_size):
             start = infer_state.b_start_loc[i].item()
@@ -89,7 +88,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 finetune_logits_per_request.append(finetune_logits[token_idx : token_idx + length])
                 token_idx += length
 
-        return last_token_logits, finetune_logits_per_request
+        return last_token_logits
     
     def token_forward_alignment(self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight):
         batch_size = infer_state.batch_size

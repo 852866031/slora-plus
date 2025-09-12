@@ -45,7 +45,7 @@ def get_lora_config(lora_dir, dummy):
 class LoraTpPartAdapter:
 
     def __init__(self, tp_rank, world_size, lora_dir, network_config,
-                 swap=False, dummy=False, no_lora_swap=False, prefetch_stream=None, is_reference=False):
+                 swap=False, dummy=False, no_lora_swap=False, prefetch_stream=None, is_finetuning=False):
         assert world_size == 1
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
@@ -55,6 +55,7 @@ class LoraTpPartAdapter:
         self.r = self.lora_config["r"]
         self.lora_alpha = self.lora_config["lora_alpha"]
         self.scaling = self.lora_alpha / self.r
+        self.is_finetuning = is_finetuning
         
         rprint("loading adapter from", lora_dir)
         self.layers = [
@@ -90,6 +91,20 @@ class LoraTpPartAdapter:
             for layer_weight in self.layers:
                 layer_weight.load_to_gpu(bmm=bmm, both=both)
 
+    # def load_gpu_fp32_dict(self):
+    #     adapter_dict = {
+    #         "scaling": self.scaling,
+    #         "lora_weights": [layer.w_combined_home.float().to("cuda", non_blocking=True).requires_grad_() for layer in self.layers]
+    #     }
+    #     return adapter_dict
+    
+    def load_gpu_fp32_dict(self):
+        adapter_dict = {
+            "scaling": self.scaling,
+            "lora_weights": [layer.w_combined_home_fp32 for layer in self.layers]
+        }
+        return adapter_dict
+
 
     def offload_from_gpu(self):
         for layer_weight in self.layers:
@@ -102,6 +117,10 @@ class LoraTpPartAdapter:
     def unpack_all_combined_weights(self):
         for layer_weight in self.layers:
             layer_weight.unpack_w_combined()
+    
+    def unpack_all_combined_weights_gpu(self, new_weights):
+        for index, layer_weight in enumerate(self.layers):
+            layer_weight.unpack_w_combined_gpu(new_weights[index])
 
     def get_all_items(self):
         all_items = {}

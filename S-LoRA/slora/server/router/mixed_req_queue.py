@@ -105,10 +105,11 @@ class Mixed_ReqQueue:
         print(f"Max saved finetuning tokens: {self.max_saved_finetuning_tokens}")
         print(f"batch max tokens: {self.batch_max_tokens}")
         self.prepare_finetuning_requests()
+        self.inference_req_count = -5
 
     def is_heavy_loading(self):
         #TODO : implement a better way to check if the queue is heavy loading
-        if len(self.waiting_req_list) > 10:
+        if len(self.waiting_req_list) > 100:
             return True
         else:
             return False
@@ -119,6 +120,7 @@ class Mixed_ReqQueue:
             if req.is_finetuning:
                 self.pending_bwd_tokens += req.input_len
 
+    
 
     def update_finetuning_status_after_bwd(self, loss_list, num_processed_tokens):
         self.loss_list.extend(loss_list)
@@ -132,7 +134,7 @@ class Mixed_ReqQueue:
         grey = "*"
         white = " "
         bar = grey * filled_len + white * empty_len
-        print(f"Epoch: {self.current_epoch+1}/{self.total_epoch} [{bar}] {ratio:.1%} processed")
+        print(f"Epoch: {self.current_epoch+1}/{self.total_epoch} [{bar}] {ratio:.1%} processed", flush=True)
         if self.finetuning_tokens_processed >= self.finetuning_tokens_in_memory:
             self.epoch_avg_loss_list.append(np.mean(self.loss_list))
             print(f"Epoch {self.current_epoch} finished. Average Loss: {self.epoch_avg_loss_list[-1]:.6f}\n")
@@ -151,8 +153,10 @@ class Mixed_ReqQueue:
         else:
             print()
 
-    def finetuning_is_finished(self):
+    def finetuning_is_finished(self, sender=None):
         if self.current_epoch >= self.total_epoch:
+            if sender is not None:
+                sender.send_pyobj(True)
             return True
         else:
             return False
@@ -266,9 +270,13 @@ class Mixed_ReqQueue:
                     new_batch_total_tokens += req.input_len
                 else:
                     break
-
+        req_num = len(can_run_list)
+        self.inference_req_count += req_num
         new_batch_inference_tokens = new_batch_total_tokens
-        if self.start_task and new_batch_total_tokens * 1.2 < self.batch_max_tokens and len(self.finetuning_req_list)> 0 and self.finetuning_adapters_tracker.all_adapters_available():
+        if len(can_run_list) > 0:
+            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
+
+        if self.start_task and len(self.finetuning_req_list)> 0 and self.finetuning_adapters_tracker.all_adapters_available():
             new_batch_finetuning_tokens = 0
             self.last_index = self.sample_index
             for i in range(self.sample_index, len(self.finetuning_req_list)):
@@ -276,16 +284,16 @@ class Mixed_ReqQueue:
                 if new_batch_total_tokens + req.input_len > self.batch_max_tokens:
                     #print("Batch max tokens exceeded, breaking")
                     break
-                elif new_batch_finetuning_tokens + req.input_len > self.max_finetuning_tokens_in_batch:
+                if new_batch_finetuning_tokens + req.input_len > self.max_finetuning_tokens_in_batch:
                     #print("Max finetuning tokens in batch exceeded, breaking")
                     break
-                elif self.pending_bwd_tokens + req.input_len > self.max_saved_finetuning_tokens:
+                if self.pending_bwd_tokens + new_batch_finetuning_tokens + req.input_len > self.max_saved_finetuning_tokens:
                     # if self.flag:
                     #     print(f"self.pending_bwd_tokens: {self.pending_bwd_tokens}")
                     self.flag = False
                     #print("Max saved finetuning tokens exceeded, breaking")
                     break
-                elif new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len > new_batch_inference_tokens*2:
+                if new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len > new_batch_inference_tokens*2:
                     break
                 else:
                     can_run_list.append(req)
@@ -303,11 +311,10 @@ class Mixed_ReqQueue:
                 else:
                     infer_tokens += req.input_len
             unused = self.batch_max_tokens - (infer_tokens + finetune_tokens)
-            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
-            req_num = len(can_run_list)
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
-            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
-            print(f"\033[34mPacked request number: {req_num}, Pending requests number: {len(self.waiting_req_list)}\033[0m")
+            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
+            print(f"\033[34mPacked #inf: {req_num}, Pending #req: {len(self.waiting_req_list)}, Processed #inf: {self.inference_req_count}\033[0m")
+            print(f"\033[34mPending BWD token count: {self.pending_bwd_tokens}\033[0m")
             return new_batch
         else:
             return None

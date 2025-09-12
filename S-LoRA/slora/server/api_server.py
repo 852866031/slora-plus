@@ -65,6 +65,7 @@ TIMEOUT_KEEP_ALIVE = 5  # seconds.
 app = FastAPI()
 
 isFirst = True
+firstChecking = True
 
 from pprint import pprint
 
@@ -103,6 +104,26 @@ async def feedback(request: Request) -> Response:
         status_code=200,
         media_type="application/json"
     )
+
+@app.post("/finetuning_status")
+async def finetuning_status(request: Request) -> Response:
+    global firstChecking
+    if firstChecking:
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.finetuning_status_loop())
+        firstChecking = False
+    if httpserver_manager.finetuning_finished:
+        return Response(
+            content=json.dumps({"finished": "true"}),
+            status_code=200,
+            media_type="application/json"
+        )
+    else:
+        return Response(
+            content=json.dumps({"finished": "false"}),
+            status_code=200,
+            media_type="application/json"
+        )
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:
@@ -425,6 +446,7 @@ def main():
     args = parser.parse_args()
     print("api_server: half_model:", args.half_model)
     args.finetuning_config = {}
+    launch_on_start = True
     if args.finetuning_config_path != "":
         with open(args.finetuning_config_path, "r") as f:
             config_data = json.load(f)
@@ -467,6 +489,7 @@ def main():
         args.scheduler = "slora_plus"
         args.lora_dirs.append(config_data['finetuning_lora_path'])
         args.finetuning_config = config_data
+        launch_on_start = config_data.get("start_on_launch", True)
         
 
     assert args.max_req_input_len < args.max_req_total_len
@@ -505,6 +528,11 @@ def main():
         live_alignment=args.finetuning_config.get("finetuning_type", "SFT") == "Alignment Live",
         finetuning_data_path=args.finetuning_config.get("finetuning_data_path", None)
     )
+    if args.finetuning_config_path != "":
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.finetuning_status_loop())
+        if not launch_on_start:
+            httpserver_manager.finetuning_finished = True
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)
     pipe_detoken_reader, pipe_detoken_writer = mp.Pipe(duplex=False)
     proc_router = mp.Process(

@@ -228,7 +228,7 @@ class LoraLayerWeight:
                 self.v_lora_B_home.T.reshape(rank, num_head, -1),
                 self.o_lora_B_home.T.reshape(rank, num_head, -1)]).pin_memory()
         self.w_combined_home = self.w_combined_home.reshape(2, 4 * rank, num_head, -1)
-        self.w_combined_home_fp32 = self.w_combined_home.detach().clone().float()  
+        self.w_combined_home_fp32 = self.w_combined_home.detach().clone().float().to("cuda", non_blocking=True).requires_grad_()
         self.w_combined = None
         return
 
@@ -320,6 +320,43 @@ class LoraLayerWeight:
         self.v_lora_A = self.v_lora_B = None
         self.o_lora_A = self.o_lora_B = None
         self.w_combined = None
+
+    @torch.no_grad()
+    def unpack_w_combined_gpu(self, src):
+        self.w_combined_home.copy_(src.clamp_(-6.5e4, 6.5e4).to(dtype=self.w_combined_home.dtype))
+        wc = self.w_combined_home            # [2 , 4r , H , Hd]
+        _, four_r, H, Hd = wc.shape
+        r         = four_r // 4
+        hidden    = H * Hd                   # full hidden dim
+
+        def to_A(block):                     # block: [r,H,Hd]  → [hidden , r]
+            return block.reshape(r, hidden).T                # [H*Hd , r]
+
+        def to_B(block):                     # block: [r,H,Hd]  → [r     , hidden]
+            return block.reshape(r, hidden)                  # [r , H*Hd]
+
+        # quick view into the packed tensor
+        A_pack = wc[0]                       # [4r , H , Hd]
+        B_pack = wc[1]
+
+        # ------------------ slice & convert --------------------------------
+        # order   0:Q  1:K  2:V  3:O
+        self.q_lora_A_home = to_A(A_pack[0*r : 1*r]).contiguous()
+        self.k_lora_A_home = to_A(A_pack[1*r : 2*r]).contiguous()
+        self.v_lora_A_home = to_A(A_pack[2*r : 3*r]).contiguous()
+        self.o_lora_A_home = to_A(A_pack[3*r : 4*r]).contiguous()
+
+        self.q_lora_B_home = to_B(B_pack[0*r : 1*r]).contiguous()
+        self.k_lora_B_home = to_B(B_pack[1*r : 2*r]).contiguous()
+        self.v_lora_B_home = to_B(B_pack[2*r : 3*r]).contiguous()
+        self.o_lora_B_home = to_B(B_pack[3*r : 4*r]).contiguous()
+
+        self.q_lora_A = self.q_lora_B = None
+        self.k_lora_A = self.k_lora_B = None
+        self.v_lora_A = self.v_lora_B = None
+        self.o_lora_A = self.o_lora_B = None
+        self.w_combined = None
+        
 
     def refresh_combined_weights_home(self):
         rank = self.lora_config["r"]

@@ -22,13 +22,6 @@ from slora.common.basemodel import PostLayerInferTpl
 from slora.server.router.mixed_req_queue import rprint
 
 class GradientResumePoint(Enum):
-    """Which *checkpoint* inside the backward pipeline we last finished.
-
-    This makes the backward pass resumeable, which is crucial when the engine is
-    interrupted by higher‑priority inference work.  In practice `interrupt_flag`
-    is set by the outer scheduler; on resume we skip the already computed part
-    and continue from the stored tensors.
-    """
     LOSS = 0
     LOGIT = 1
     POST = 2
@@ -57,6 +50,7 @@ class LlamaBackwardEngine():
         self.lambdas: float = 2      # loss-aversion (λ)
         self.beta:    float = 0.02
         self.buffer = []
+        self.backward_stream = torch.cuda.Stream(device='cuda', priority=0)
     
     def setup_alignment(self, is_alignment: bool, 
                         alpha: float = 0.5, 
@@ -69,7 +63,28 @@ class LlamaBackwardEngine():
         print(f"\033[92mAlignment mode set to {self.is_alignment}, alpha: {self.alpha}, lambdas: {self.lambdas}, beta: {self.beta}\033[0m")
         
     # Top‑level backward orchestration entry‑point 
-    def _context_backward(self, base_model, finetuning_adapter, interrupt_flag):
+
+    def _context_backward(self, base_model, finetuning_adapter):
+        # # Tensors that backward will read while running on self.stream
+        safety_tensors = [
+            self.mem_manager.get_finetune_activations(-1),
+            self.mem_manager.get_input_layer_output(),
+            # add others you read during backward, e.g. per-layer cached activations
+        ]
+        for t in safety_tensors:
+            if torch.is_tensor(t) and t.is_cuda:
+                t.record_stream(self.backward_stream)
+
+        with torch.cuda.stream(self.backward_stream):
+            if finetuning_adapter.layers[0].w_combined is None:
+                print("Loading backward adapter to GPU in backward engine")
+                finetuning_adapter.load_to_gpu(prefetch=False, bmm=False)
+            done, loss, total_tokens = self._context_backward_impl(
+                base_model, finetuning_adapter
+            )
+            return done, loss, total_tokens
+
+    def _context_backward_impl(self, base_model, finetuning_adapter):
         """Resumable backward function.
 
         Parameters
@@ -92,13 +107,13 @@ class LlamaBackwardEngine():
                     print(", layer{i}")
                 else:
                     print(", layer{i}", end="")
-                if interrupt_flag[0]:
-                    print(f"\033[91mReceive interrupt after layer {i}\033[0m")
-                    interrupt_flag[0] = False
-                    self.saved_grad_transformer_out = grad_transformer_out
-                    self.resume_after_layer = i
-                    self.gradient_resume_point = GradientResumePoint.LAYER
-                    return False
+                # if interrupt_flag[0]:
+                #     print(f"\033[91mReceive interrupt after layer {i}\033[0m")
+                #     interrupt_flag[0] = False
+                #     self.saved_grad_transformer_out = grad_transformer_out
+                #     self.resume_after_layer = i
+                #     self.gradient_resume_point = GradientResumePoint.LAYER
+                #     return False
             self.gradient_resume_point = GradientResumePoint.LOSS
             return True
 
@@ -114,20 +129,20 @@ class LlamaBackwardEngine():
         elif self.gradient_resume_point == GradientResumePoint.LOGIT:
             print("\033[91mGradient compute Resume after logit\033[0m")
             grad_transformer_out = self._post_layer_backward(self.saved_logit_grad, base_model.pre_post_weight)
-            if interrupt_flag[0]:
-                print("\033[91mReceive interrupt after post_layer_grad\033[0m")
-                interrupt_flag[0] = False
-                self.saved_grad_transformer_out = grad_transformer_out
-                self.gradient_resume_point = GradientResumePoint.POST
-                return False, self.saved_loss, self.saved_total_tokens_to_process
+            # if interrupt_flag[0]:
+            #     print("\033[91mReceive interrupt after post_layer_grad\033[0m")
+            #     interrupt_flag[0] = False
+            #     self.saved_grad_transformer_out = grad_transformer_out
+            #     self.gradient_resume_point = GradientResumePoint.POST
+            #     return False, self.saved_loss, self.saved_total_tokens_to_process
             return run_layer_backward(base_model.layers_num, grad_transformer_out), self.saved_loss, self.saved_total_tokens_to_process
 
         else:
             print("\033[91mGradient compute from beginning\033[0m")
-            return self._context_backward_logic(base_model, finetuning_adapter, interrupt_flag)
+            return self._context_backward_logic(base_model, finetuning_adapter)
     
     # Full backward (no resume state)
-    def _context_backward_logic(self, base_model, finetuning_adapter, interrupt_flag):
+    def _context_backward_logic(self, base_model, finetuning_adapter):
         if self.is_alignment:
             logit_grad, kto_loss, batch_completion_loss, total_tokens_to_process, batch_seq_lens = self.get_grad_logits_alignment()
             loss = (kto_loss, batch_completion_loss)
@@ -135,24 +150,24 @@ class LlamaBackwardEngine():
             logits_and_targets, total_tokens_to_process, batch_seq_lens = self.get_logits_and_targets()
             logit_grad = self._logit_backward(logits_and_targets)
             loss = self.compute_total_loss(logits_and_targets)
-            print(f"\033[92mBackward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}\033[0m")
+            print(f"\033[92mBackward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}\033[0m", flush=True)
 
         self.saved_seq_lens = batch_seq_lens
         self.saved_loss = loss
         self.saved_total_tokens_to_process = total_tokens_to_process
-        if interrupt_flag[0]: 
-            print("\033[91mReceive interrupt after logit_grad\033[0m")
-            interrupt_flag[0]= False
-            self.saved_logit_grad = logit_grad
-            self.gradient_resume_point = GradientResumePoint.LOGIT
-            return False, loss, total_tokens_to_process
+        # if interrupt_flag[0]: 
+        #     print("\033[91mReceive interrupt after logit_grad\033[0m")
+        #     interrupt_flag[0]= False
+        #     self.saved_logit_grad = logit_grad
+        #     self.gradient_resume_point = GradientResumePoint.LOGIT
+        #     return False, loss, total_tokens_to_process
         grad_transformer_out = self._post_layer_backward(logit_grad, base_model.pre_post_weight)
-        if interrupt_flag[0]: 
-            print("\033[91mReceive interrupt after post_layer_grad\033[0m")
-            interrupt_flag[0]= False
-            self.saved_grad_transformer_out = grad_transformer_out
-            self.gradient_resume_point = GradientResumePoint.POST
-            return False, loss, total_tokens_to_process
+        # if interrupt_flag[0]: 
+        #     print("\033[91mReceive interrupt after post_layer_grad\033[0m")
+        #     interrupt_flag[0]= False
+        #     self.saved_grad_transformer_out = grad_transformer_out
+        #     self.gradient_resume_point = GradientResumePoint.POST
+        #     return False, loss, total_tokens_to_process
         
         for i in reversed(range(base_model.layers_num)):
             grad_transformer_out = self._lora_context_backward(i, base_model, grad_transformer_out, finetuning_adapter, self.saved_seq_lens) 
@@ -162,13 +177,13 @@ class LlamaBackwardEngine():
                 print(f", layer{i}")
             else:
                 print(f", layer{i}", end="")
-            if interrupt_flag[0]: 
-                print(f"\033[91mReceive interrupt after layer {i}\033[0m")
-                interrupt_flag[0]= False
-                self.saved_grad_transformer_out = grad_transformer_out
-                self.resume_after_layer = i
-                self.gradient_resume_point = GradientResumePoint.LAYER
-                return False, loss, total_tokens_to_process
+            # if interrupt_flag[0]: 
+            #     print(f"\033[91mReceive interrupt after layer {i}\033[0m")
+            #     interrupt_flag[0]= False
+            #     self.saved_grad_transformer_out = grad_transformer_out
+            #     self.resume_after_layer = i
+            #     self.gradient_resume_point = GradientResumePoint.LAYER
+            #     return False, loss, total_tokens_to_process
         self.gradient_resume_point = GradientResumePoint.LOSS
         return True, loss, total_tokens_to_process
 

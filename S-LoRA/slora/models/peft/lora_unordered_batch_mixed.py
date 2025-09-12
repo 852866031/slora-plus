@@ -13,13 +13,23 @@ from slora.models.llama.triton_kernel.context_flashattention_nopad import contex
 from slora.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from slora.models.peft.triton_kernel.lora.lora_prefill import lora_get_qkvo_fwd_shrink, lora_get_qkvo_fwd_expand
 from slora.server.router.model_infer.naive_infer_adapter import NaiveInferAdapter
-from slora.utils.infer_utils import mark_cost_time
+from slora.utils.infer_utils import mark_cost_time, set_random_seed
 from slora.utils.infer_utils import calculate_time, mark_start, mark_end
 from slora._kernels import dispatch_bgmv
 from ...server.router.mixed_req_queue import rprint
 import hashlib
 from slora.models.peft.alt_to_slora_kernel import dispatch_bgmv_pt, compare_tensors, dispatch_bgmv_pt_exact
 import math
+
+
+import torch
+import hashlib
+
+def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
+    h = hashlib.new(algo)
+    h.update(t.detach().cpu().numpy().tobytes())
+    return h.hexdigest()
+
 
 class LoraUnorderedBatchMixed:
     def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None, infer_adapter_alt=None, enable_unified_mem_manager=False):
@@ -82,7 +92,6 @@ class LoraUnorderedBatchMixed:
         # Notice that batch_lora only support decoding
         assert len(b_loc) == len(b_start_loc) == len(b_seq_len)
         self.delta = []
-
         self.max_b_seq_len = torch.max(b_seq_len).item()
 
         if is_prefill:
@@ -92,16 +101,20 @@ class LoraUnorderedBatchMixed:
             for _ in range(3):
                 self.delta.append(torch.zeros((len(self.batch_req_bins), self.max_lora_dim), dtype=torch.float16, device="cuda"))
 
-            return self._prefill(batch_size, total_token_num, max_len_in_batch,
-                                 input_ids,
-                                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, finetune_mask, ref_mask, no_lora_compute, interrupt_flag=interrupt_flag)
+            out = self._prefill(batch_size, total_token_num, max_len_in_batch,
+                                    input_ids,
+                                    b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, 
+                                    finetune_mask, ref_mask, no_lora_compute, interrupt_flag=interrupt_flag)
+            return out
         else:
             for _ in range(3):
                 self.delta.append(torch.zeros((len(b_seq_len), self.max_lora_dim), dtype=torch.float16, device="cuda"))
-            return self._decode(batch_size, total_token_num, max_len_in_batch,
+            out = self._decode(batch_size, total_token_num, max_len_in_batch,
                                 input_ids,
                                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len,
                                 no_lora_compute, no_lora_copy)
+            #print(tensor_hash(out))
+            return out
 
     # Prefill functions for inference and finetuning
     def _prefill(self, batch_size, total_token_num, max_len_in_batch,
@@ -118,12 +131,15 @@ class LoraUnorderedBatchMixed:
         assert (b_loc.shape[0] == b_start_loc.shape[0] == b_seq_len.shape[0])
 
         infer_state.finetune_mask = torch.zeros(input_ids.shape[0], dtype=torch.bool, device="cuda")
-        nr_finetuning_reqs = 0
+        nr_finetuning_reqs = input_ids.shape[0]
+        finetuning_start = 0
         for i in range(batch_size):
             if finetune_mask[i] == 1:
                 nr_finetuning_reqs += 1
                 start = b_start_loc[i].item()
                 length = b_seq_len[i].item()
+                if finetuning_start == input_ids.shape[0]:
+                    finetuning_start = start
                 infer_state.finetune_mask[start : start + length] = True
         if ref_mask!=None:
             infer_state.ref_mask = torch.zeros(input_ids.shape[0], dtype=torch.bool, device="cuda")
@@ -165,7 +181,8 @@ class LoraUnorderedBatchMixed:
         infer_state.prefill_value_buffer = torch.empty(
                 (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
-        predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, interrupt_flag=interrupt_flag, nr_finetuning_reqs=nr_finetuning_reqs)
+        predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, 
+                                               interrupt_flag=interrupt_flag, nr_finetuning_reqs=nr_finetuning_reqs, finetuning_start=finetuning_start)
         return predict_logics       
 
     def save_finetune_activations_to_buffer(self, layer_id, input_embs, infer_state):
@@ -213,9 +230,63 @@ class LoraUnorderedBatchMixed:
                 infer_state.mem_manager.rewind_alignment_pool(int(nr_finetuning_reqs/2))
             else:
                 infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
+
     
     @final
-    def _context_forward(self, input_ids, infer_state, no_lora_compute=False, interrupt_flag=None, nr_finetuning_reqs=0):
+    def _context_forward(self, input_ids, infer_state, no_lora_compute=False, interrupt_flag=None, nr_finetuning_reqs=0, finetuning_start=None):
+        if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
+            print(f"\033[91mReceive interrupt before forward starts\033[0m")
+            interrupt_flag[0] = False
+            self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
+            return None
+        cuda_input_ids = input_ids
+        input_embs = self.base_model.pre_infer.context_forward(
+                cuda_input_ids, infer_state, self.base_model.pre_post_weight)
+        print("###### Input embedding device:", input_embs.device)
+
+        if torch.any(infer_state.finetune_mask):
+            infer_state.alt_mem_manager.save_embedding_output(input_embs, infer_state)
+            #infer_state.alt_mem_manager.activation_writer.enqueue(-1, input_embs, infer_state, None)
+
+        FFN_input_vpids = None
+        attention_input_vpids = None
+        for i in range(self.base_model.layers_num):
+            input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
+            if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
+                print(f"\033[91mReceive interrupt after transformer layer {i}\033[0m")
+                interrupt_flag[0] = False
+                self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
+                return None
+            if torch.any(infer_state.finetune_mask):
+                FFN_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
+                                                                            PageType.FFN_INPUT_ACTIVATION, FFN_input_vpids)
+                # FFN_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer_start(i, input_embs, finetuning_start, 
+                #                                                             PageType.FFN_INPUT_ACTIVATION, FFN_input_vpids)
+                #infer_state.alt_mem_manager.activation_writer.enqueue(i, input_embs, infer_state, PageType.FFN_INPUT_ACTIVATION)
+            self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])
+            if torch.any(infer_state.finetune_mask):
+                attention_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
+                                                                            PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
+                # attention_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer_start(i, input_embs, finetuning_start, 
+                #                                                             PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
+                #infer_state.alt_mem_manager.activation_writer.enqueue(i, input_embs, infer_state, PageType.ATTENTION_INPUT_ACTIVATION)
+        # Post processing
+        if infer_state.ref_mask is not None:
+            predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
+                    input_embs, infer_state, self.base_model.pre_post_weight)
+            infer_state.alt_mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
+            infer_state.alt_mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
+        else:
+            finetune_logits_per_request = []
+            predict_logics = self.base_model.post_infer.token_forward_with_finetune_outputs(
+                    input_embs, finetune_logits_per_request, infer_state, self.base_model.pre_post_weight)
+            if torch.any(infer_state.finetune_mask):
+                infer_state.alt_mem_manager.write_to_logit_tensor(finetune_logits_per_request)
+                #infer_state.alt_mem_manager.activation_writer.enqueue(-2, finetune_logits_per_request, None, None)
+        return predict_logics
+
+    @final
+    def _context_forward_slora(self, input_ids, infer_state, no_lora_compute=False, interrupt_flag=None, nr_finetuning_reqs=0):
         if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
             print(f"\033[91mReceive interrupt before forward starts\033[0m")
             interrupt_flag[0] = False
@@ -226,10 +297,8 @@ class LoraUnorderedBatchMixed:
         rprint("Input ids shape", cuda_input_ids.shape)
         input_embs = self.base_model.pre_infer.context_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
-        if self.enable_unified_mem_manager:
-            infer_state.alt_mem_manager.save_embedding_output(input_embs, infer_state)
-        else:
-            self.save_input_layer_output_to_buffer(input_embs, infer_state)
+        if torch.any(infer_state.finetune_mask):
+                self.save_input_layer_output_to_buffer(input_embs, infer_state)
 
         if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
             print(f"\033[91mReceive interrupt after input layer\033[0m")
@@ -240,45 +309,27 @@ class LoraUnorderedBatchMixed:
         attention_input_vpids = None
         for i in range(self.base_model.layers_num):
             input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-            if i==self.base_model.layers_num - 1 and not self.enable_unified_mem_manager:
-                infer_state.mem_manager.saved_q = q_alt.clone()
-                infer_state.mem_manager.saved_k = k_alt.view(k_alt.size(0), -1).clone()
-                infer_state.mem_manager.saved_v = v_alt.view(v_alt.size(0), -1).clone()
-                infer_state.mem_manager.saved_o = o_alt.clone()
             if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
                 print(f"\033[91mReceive interrupt after transformer layer {i}\033[0m")
                 interrupt_flag[0] = False
                 self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
                 return None
-            if self.enable_unified_mem_manager:
-                FFN_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
-                                                                                        PageType.FFN_INPUT_ACTIVATION, FFN_input_vpids)
-            else:
+            if torch.any(infer_state.finetune_mask):
                 self.save_ffn_input_to_buffer(i, input_embs, infer_state)
             self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])
-            if self.enable_unified_mem_manager:
-                attention_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
-                                                                                              PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
-            else:
-                self.save_finetune_activations_to_buffer(i, input_embs, infer_state)  
+            if torch.any(infer_state.finetune_mask):
+                self.save_finetune_activations_to_buffer(i, input_embs, infer_state)
         # Post processing      
         if infer_state.ref_mask is not None:
             predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
                     input_embs, infer_state, self.base_model.pre_post_weight)
-            if self.enable_unified_mem_manager:
-                infer_state.alt_mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-                infer_state.alt_mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
-            else:
-                infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-                infer_state.mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
+            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
+            infer_state.mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
         else:
             predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
                     input_embs, infer_state, self.base_model.pre_post_weight)
-            if self.enable_unified_mem_manager:
-                infer_state.alt_mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-            else:
-                infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-        if self.enable_unified_mem_manager:
+            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
+        if self.enable_unified_mem_manager and torch.any(infer_state.finetune_mask):
             infer_state.alt_mem_manager.update_request_token_info(infer_state)
         return predict_logics
 
@@ -1046,20 +1097,16 @@ class LoraUnorderedBatchMixed:
         
         if not no_lora_compute:
             # mark_start("get_o")
-            with infer_state.alt_mem_manager.lock:
-                buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
-                    self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
-                torch.cuda.synchronize()  
-                delta_oA = self.delta[0]
-                dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
-                                buffer_address, 
-                                a_start_lora, a_len_lora, 
-                                gpu_a_loc_lora_a, self.req_bins, 3, a_scaling)
-                torch.cuda.synchronize()   
-                dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
-                                a_len_lora, gpu_a_loc_lora_b, 
-                                self.req_bins, 3, a_scaling) 
-                torch.cuda.synchronize()   
+            buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
+                self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
+            delta_oA = self.delta[0]
+            dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
+                            buffer_address, 
+                            a_start_lora, a_len_lora, 
+                            gpu_a_loc_lora_a, self.req_bins, 3, a_scaling)
+            dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
+                            a_len_lora, gpu_a_loc_lora_b, 
+                            self.req_bins, 3, a_scaling) 
  
         self.infer_adapter_alt.unpin_adapters_pages()     
               

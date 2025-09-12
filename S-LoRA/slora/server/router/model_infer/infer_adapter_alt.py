@@ -44,8 +44,11 @@ class InferAdapterAlt:
 
         self.mem_manager.pin_pages(vpids_a)  # Ensure pages are resident on GPU
         for layer_id, layer in enumerate(adapter.layers):
-            layer.load_to_gpu()
-            rows = layer.w_combined[0]                # [4*r, head_dim]
+            if adapter.is_finetuning:
+                rows = layer.w_combined_home_fp32[0].clamp_(-6.5e4, 6.5e4).to(dtype=layer.w_combined_home.dtype)
+            else:
+                layer.load_to_gpu()
+                rows = layer.w_combined[0]                # [4*r, head_dim]
             self.mem_manager.copy_rows_to_layer(layer_id, vpids_a, rows)
             layer.offload_from_gpu()
         self.mem_manager.unpin_pages(vpids_a)  # Unpin after copying
@@ -57,204 +60,201 @@ class InferAdapterAlt:
 
         self.mem_manager.pin_pages(vpids_b)  # Ensure pages are resident on GPU
         for layer_id, layer in enumerate(adapter.layers):
-            layer.load_to_gpu()
-            rows = layer.w_combined[1]                # [4*r, head_dim]
+            if adapter.is_finetuning:
+                rows = layer.w_combined_home_fp32[1].clamp_(-6.5e4, 6.5e4).to(dtype=layer.w_combined_home.dtype)
+            else:
+                layer.load_to_gpu()
+                rows = layer.w_combined[1]                # [4*r, head_dim]
             self.mem_manager.copy_rows_to_layer(layer_id, vpids_b, rows)
             layer.offload_from_gpu()
         self.mem_manager.unpin_pages(vpids_b)  # Unpin after copying
 
     # @calculate_time(show=True, min_cost_ms=0)
     def load_adapters(self, adapters):
-        with self.mem_manager.lock:
-            new_adapters = [a for a in adapters if a and a.lora_dir not in self.idx_map]
-            if not new_adapters:
-                return
-            add_count   = len(new_adapters)
-            start_base  = self.a_start_lora.numel()
+        new_adapters = [a for a in adapters if a and a.lora_dir not in self.idx_map]
+        if not new_adapters:
+            return
+        add_count   = len(new_adapters)
+        start_base  = self.a_start_lora.numel()
 
-            self.a_start_lora = torch.cat(
-                (self.a_start_lora,
-                torch.empty(add_count, dtype=torch.long, device='cuda'))
+        self.a_start_lora = torch.cat(
+            (self.a_start_lora,
+            torch.empty(add_count, dtype=torch.long, device='cuda'))
+        )
+        self.a_len_lora   = torch.cat(
+            (self.a_len_lora,
+            torch.empty(add_count, dtype=torch.long, device='cuda'))
+        )
+        self.a_scaling    = torch.cat(
+            (self.a_scaling,
+            torch.tensor([a.scaling for a in new_adapters],
+                        dtype=torch.float16, device='cuda'))
+        )
+
+        for i, adapter in enumerate(new_adapters):
+            rows_needed = adapter.r * 4                    # for A *or* B
+            self.idx_map[adapter.lora_dir] = len(self.adapter_dirs)
+            self.adapter_dirs.append(adapter.lora_dir)
+
+            free_gpu = self.mem_manager._num_free_gpu_slots()
+            gpu_rows = min(rows_needed * 2, free_gpu)      # A+B budget
+            cpu_rows = rows_needed * 2 - gpu_rows
+
+            vpids_gpu = (self.mem_manager.alloc(gpu_rows, PageType.ADAPTER_WEIGHT)
+                        if gpu_rows else [])
+            vpids_cpu = (self.mem_manager.alloc_cpu(cpu_rows, PageType.ADAPTER_WEIGHT)
+                        if cpu_rows else [])
+            vpids_total = vpids_gpu + vpids_cpu
+            assert len(vpids_total) == rows_needed * 2
+
+            vpids_a, vpids_b = vpids_total[:rows_needed], vpids_total[rows_needed:]
+
+            # update global vpid tables
+            start_idx = self.a_loc_lora_a.numel()
+            self.a_start_lora[start_base + i] = start_idx
+            self.a_len_lora[start_base + i]   = rows_needed
+
+            self.a_loc_lora_a = torch.cat(
+                (self.a_loc_lora_a,
+                torch.tensor(vpids_a, dtype=torch.long, device='cuda'))
             )
-            self.a_len_lora   = torch.cat(
-                (self.a_len_lora,
-                torch.empty(add_count, dtype=torch.long, device='cuda'))
-            )
-            self.a_scaling    = torch.cat(
-                (self.a_scaling,
-                torch.tensor([a.scaling for a in new_adapters],
-                            dtype=torch.float16, device='cuda'))
+            self.a_loc_lora_b = torch.cat(
+                (self.a_loc_lora_b,
+                torch.tensor(vpids_b, dtype=torch.long, device='cuda'))
             )
 
-            for i, adapter in enumerate(new_adapters):
-                rows_needed = adapter.r * 4                    # for A *or* B
-                self.idx_map[adapter.lora_dir] = len(self.adapter_dirs)
-                self.adapter_dirs.append(adapter.lora_dir)
-
-                free_gpu = self.mem_manager._num_free_gpu_slots()
-                gpu_rows = min(rows_needed * 2, free_gpu)      # A+B budget
-                cpu_rows = rows_needed * 2 - gpu_rows
-
-                vpids_gpu = (self.mem_manager.alloc(gpu_rows, PageType.ADAPTER_WEIGHT)
-                            if gpu_rows else [])
-                vpids_cpu = (self.mem_manager.alloc_cpu(cpu_rows, PageType.ADAPTER_WEIGHT)
-                            if cpu_rows else [])
-                vpids_total = vpids_gpu + vpids_cpu
-                assert len(vpids_total) == rows_needed * 2
-
-                vpids_a, vpids_b = vpids_total[:rows_needed], vpids_total[rows_needed:]
-
-                # update global vpid tables
-                start_idx = self.a_loc_lora_a.numel()
-                self.a_start_lora[start_base + i] = start_idx
-                self.a_len_lora[start_base + i]   = rows_needed
-
-                self.a_loc_lora_a = torch.cat(
-                    (self.a_loc_lora_a,
-                    torch.tensor(vpids_a, dtype=torch.long, device='cuda'))
-                )
-                self.a_loc_lora_b = torch.cat(
-                    (self.a_loc_lora_b,
-                    torch.tensor(vpids_b, dtype=torch.long, device='cuda'))
-                )
-
-                self.load_lora_A(adapter, vpids_a)
-                self.load_lora_B(adapter, vpids_b)
+            self.load_lora_A(adapter, vpids_a)
+            self.load_lora_B(adapter, vpids_b)
     
     def offload_target_adapters(self, remove_adapter_dirs):
-        with self.mem_manager.lock:
-            print(f"Offloading adapters: {remove_adapter_dirs}")
-            reserve_adapter_dirs = set(self.adapter_dirs) - set(remove_adapter_dirs)
-            self.offload_adapters(reserve_adapter_dirs)
+        print(f"Offloading adapters: {remove_adapter_dirs}")
+        reserve_adapter_dirs = set(self.adapter_dirs) - set(remove_adapter_dirs)
+        self.offload_adapters(reserve_adapter_dirs)
 
     # @calculate_time(show=True, min_cost_ms=0)
     def offload_adapters(self, reserve_adapter_dirs):
-        with self.mem_manager.lock:
-            if not self.adapter_dirs:
-                return
-            if len(reserve_adapter_dirs) == len(self.adapter_dirs) and all(
-                    d in reserve_adapter_dirs for d in self.adapter_dirs):
-                # nothing to remove
-                return
-            if len(reserve_adapter_dirs) == 0:
-                # free everything
-                all_vpids = torch.cat((self.a_loc_lora_a, self.a_loc_lora_b)).tolist()
-                self.mem_manager.free(all_vpids)
+        if not self.adapter_dirs:
+            return
+        if len(reserve_adapter_dirs) == len(self.adapter_dirs) and all(
+                d in reserve_adapter_dirs for d in self.adapter_dirs):
+            # nothing to remove
+            return
+        if len(reserve_adapter_dirs) == 0:
+            # free everything
+            all_vpids = torch.cat((self.a_loc_lora_a, self.a_loc_lora_b)).tolist()
+            self.mem_manager.free(all_vpids)
 
-                # reset all bookkeeping
-                self.adapter_dirs = []
-                self.idx_map      = {}
-                self.a_start_lora = self.a_len_lora = torch.empty(0, dtype=torch.long,  device='cuda')
-                self.a_loc_lora_a = self.a_loc_lora_b = torch.empty(0, dtype=torch.long, device='cuda')
-                self.a_scaling    = torch.empty(0, dtype=torch.float16, device='cuda')
-                return
-            
-            left_indices   = []
-            remove_indices = []
-            for i, adir in enumerate(self.adapter_dirs):
-                if adir in reserve_adapter_dirs:
-                    left_indices.append(i)
-                else:
-                    remove_indices.append(i)
+            # reset all bookkeeping
+            self.adapter_dirs = []
+            self.idx_map      = {}
+            self.a_start_lora = self.a_len_lora = torch.empty(0, dtype=torch.long,  device='cuda')
+            self.a_loc_lora_a = self.a_loc_lora_b = torch.empty(0, dtype=torch.long, device='cuda')
+            self.a_scaling    = torch.empty(0, dtype=torch.float16, device='cuda')
+            return
+        
+        left_indices   = []
+        remove_indices = []
+        for i, adir in enumerate(self.adapter_dirs):
+            if adir in reserve_adapter_dirs:
+                left_indices.append(i)
+            else:
+                remove_indices.append(i)
 
-            if not remove_indices:
-                return                                        
+        if not remove_indices:
+            return                                        
 
-            vpids_to_free = []
-            for idx in remove_indices:
-                start = self.a_start_lora[idx].item()
-                length = self.a_len_lora[idx].item()
-                vpids_to_free.extend(
-                    self.a_loc_lora_a[start:start + length].tolist())
-                vpids_to_free.extend(
-                    self.a_loc_lora_b[start:start + length].tolist())
+        vpids_to_free = []
+        for idx in remove_indices:
+            start = self.a_start_lora[idx].item()
+            length = self.a_len_lora[idx].item()
+            vpids_to_free.extend(
+                self.a_loc_lora_a[start:start + length].tolist())
+            vpids_to_free.extend(
+                self.a_loc_lora_b[start:start + length].tolist())
 
-            # Free through allocator
-            self.mem_manager.free(vpids_to_free)
+        # Free through allocator
+        self.mem_manager.free(vpids_to_free)
 
-            new_adapter_dirs = []
-            new_idx_map      = {}
+        new_adapter_dirs = []
+        new_idx_map      = {}
 
-            for new_pos, old_idx in enumerate(left_indices):
-                adir = self.adapter_dirs[old_idx]
-                new_adapter_dirs.append(adir)
-                new_idx_map[adir] = new_pos
+        for new_pos, old_idx in enumerate(left_indices):
+            adir = self.adapter_dirs[old_idx]
+            new_adapter_dirs.append(adir)
+            new_idx_map[adir] = new_pos
 
-            # Copy a_len / a_scaling of kept adapters
-            new_a_len     = self.a_len_lora[left_indices].clone()
-            new_a_scaling = self.a_scaling[left_indices].clone()
+        # Copy a_len / a_scaling of kept adapters
+        new_a_len     = self.a_len_lora[left_indices].clone()
+        new_a_scaling = self.a_scaling[left_indices].clone()
 
-            # Build new a_start (prefix sum) and new a_loc tables
-            new_a_start   = torch.empty_like(new_a_len)
-            new_a_start[0] = 0
-            if new_a_start.numel() > 1:
-                new_a_start[1:] = torch.cumsum(new_a_len, dim=0)[:-1]
+        # Build new a_start (prefix sum) and new a_loc tables
+        new_a_start   = torch.empty_like(new_a_len)
+        new_a_start[0] = 0
+        if new_a_start.numel() > 1:
+            new_a_start[1:] = torch.cumsum(new_a_len, dim=0)[:-1]
 
-            total_rows = int(new_a_len.sum().item())
-            new_loc_a  = torch.empty(total_rows, dtype=torch.long, device='cuda')
-            new_loc_b  = torch.empty(total_rows, dtype=torch.long, device='cuda')
+        total_rows = int(new_a_len.sum().item())
+        new_loc_a  = torch.empty(total_rows, dtype=torch.long, device='cuda')
+        new_loc_b  = torch.empty(total_rows, dtype=torch.long, device='cuda')
 
-            write_cursor = 0
-            for new_pos, old_idx in enumerate(left_indices):
-                rows = new_a_len[new_pos].item()
-                old_start = self.a_start_lora[old_idx].item()
-                new_loc_a[write_cursor:write_cursor+rows] = \
-                    self.a_loc_lora_a[old_start:old_start+rows]
-                new_loc_b[write_cursor:write_cursor+rows] = \
-                    self.a_loc_lora_b[old_start:old_start+rows]
-                write_cursor += rows
-            
-            '''
-            # ------------------------------------------------------------------
-            # Fast GPU copy with Triton (LoRA-A table)
-            # ------------------------------------------------------------------
-            launch_var_len_copy_triton(
-                self.a_start_lora[left_indices],        # old_a_start
-                new_a_len,                              # old_a_len (same as new)
-                self.a_loc_lora_a,                      # old_a_location  (src)
-                new_a_start,                            # new_a_start
-                new_loc_a                               # new_a_location  (dst)
-            )
+        write_cursor = 0
+        for new_pos, old_idx in enumerate(left_indices):
+            rows = new_a_len[new_pos].item()
+            old_start = self.a_start_lora[old_idx].item()
+            new_loc_a[write_cursor:write_cursor+rows] = \
+                self.a_loc_lora_a[old_start:old_start+rows]
+            new_loc_b[write_cursor:write_cursor+rows] = \
+                self.a_loc_lora_b[old_start:old_start+rows]
+            write_cursor += rows
+        
+        '''
+        # ------------------------------------------------------------------
+        # Fast GPU copy with Triton (LoRA-A table)
+        # ------------------------------------------------------------------
+        launch_var_len_copy_triton(
+            self.a_start_lora[left_indices],        # old_a_start
+            new_a_len,                              # old_a_len (same as new)
+            self.a_loc_lora_a,                      # old_a_location  (src)
+            new_a_start,                            # new_a_start
+            new_loc_a                               # new_a_location  (dst)
+        )
 
-            # ------------------------------------------------------------------
-            # Fast GPU copy with Triton (LoRA-B table)
-            # ------------------------------------------------------------------
-            launch_var_len_copy_triton(
-                self.a_start_lora[left_indices],        # old_a_start
-                new_a_len,                              # old_a_len
-                self.a_loc_lora_b,                      # old_a_location  (src)
-                new_a_start,                            # new_a_start
-                new_loc_b                               # new_a_location  (dst)
-            )
-            '''
-            self.adapter_dirs  = new_adapter_dirs
-            self.idx_map       = new_idx_map
-            self.a_start_lora  = new_a_start
-            self.a_len_lora    = new_a_len
-            self.a_loc_lora_a  = new_loc_a
-            self.a_loc_lora_b  = new_loc_b
-            self.a_scaling     = new_a_scaling
+        # ------------------------------------------------------------------
+        # Fast GPU copy with Triton (LoRA-B table)
+        # ------------------------------------------------------------------
+        launch_var_len_copy_triton(
+            self.a_start_lora[left_indices],        # old_a_start
+            new_a_len,                              # old_a_len
+            self.a_loc_lora_b,                      # old_a_location  (src)
+            new_a_start,                            # new_a_start
+            new_loc_b                               # new_a_location  (dst)
+        )
+        '''
+        self.adapter_dirs  = new_adapter_dirs
+        self.idx_map       = new_idx_map
+        self.a_start_lora  = new_a_start
+        self.a_len_lora    = new_a_len
+        self.a_loc_lora_a  = new_loc_a
+        self.a_loc_lora_b  = new_loc_b
+        self.a_scaling     = new_a_scaling
     
     def pin_adapters_pages(self):
-        with self.mem_manager.lock:
-            self.mem_manager.pin_pages(self.a_loc_lora_a)
-            self.mem_manager.pin_pages(self.a_loc_lora_b)
-    
+        self.mem_manager.pin_pages(self.a_loc_lora_a)
+        self.mem_manager.pin_pages(self.a_loc_lora_b)
+
     def unpin_adapters_pages(self):
-        with self.mem_manager.lock:
-            self.mem_manager.unpin_pages(self.a_loc_lora_a.detach().contiguous().to('cpu'))
-            self.mem_manager.unpin_pages(self.a_loc_lora_b.detach().contiguous().to('cpu'))
+        self.mem_manager.unpin_pages(self.a_loc_lora_a.detach().contiguous().to('cpu'))
+        self.mem_manager.unpin_pages(self.a_loc_lora_b.detach().contiguous().to('cpu'))
 
     def get_lora_params_at_layer(self, layer_id):
         '''
         !!! Must be called after pinning the adapter pages !!!
         !!! Must unpin the adapter pages after use !!!
         '''
-        with self.mem_manager.lock:
-            gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a)
-            gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
-            buffer_address = self.mem_manager.gpu_pools[layer_id]
-            return buffer_address, self.a_start_lora, self.a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, self.a_scaling
+        gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a)
+        gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
+        buffer_address = self.mem_manager.gpu_pools[layer_id]
+        return buffer_address, self.a_start_lora, self.a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, self.a_scaling
 
 
    

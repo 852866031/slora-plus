@@ -60,7 +60,6 @@ class DeTokenizationManager:
                         req_out.gen_metadata.update(new_gen_metadata)
                         out_text = decode_token(self.tokenizer, req_out, new_token_id, skip_special_tokens=True)
                         if out_text.endswith(u'\ufffd'):
-                            print("detoken process has exception, out_text ends with u'\ufffd'")
                             new_text = ''
                         else:
                             new_text = out_text[len(req_out.output_str):]

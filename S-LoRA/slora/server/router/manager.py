@@ -110,11 +110,12 @@ class RouterManager:
         self.input_params = input_params
         self.finetuning_params = input_params.finetuning_params
         self.no_inference_since = time.time()
-        self.decay_timeout = 2
+        self.decay_timeout = 0.1
         self.half_model = half_model
         self.mem_manager_log_path = mem_manager_log_path
         self.enable_unified_mem_manager = enable_unified_mem_manager
         self.unified_mem_manager_max_size = unified_mem_manager_max_size
+        self.update_sent = False
 
         if self.input_params.prefetch:
             self.prefetch_stream = torch.cuda.Stream()
@@ -141,7 +142,10 @@ class RouterManager:
         context = zmq.asyncio.Context(2)
         self.recv_from_httpserver = context.socket(zmq.PULL)
         self.recv_from_httpserver.bind(f"tcp://127.0.0.1:{router_port}")
-        
+
+        self.send_to_httpserver = context.socket(zmq.PUSH)
+        self.send_to_httpserver.bind(f"tcp://127.0.0.1:{router_port + 100}")
+
         self.send_to_detokenization = context.socket(zmq.PUSH)
         self.send_to_detokenization.connect(f"tcp://127.0.0.1:{detokenization_port}")
         self.model_rpc_ports = model_rpc_ports
@@ -165,6 +169,7 @@ class RouterManager:
             return self.router_status_queue[-1]
         else:
             return RouterStatus.IDLE
+    
 
     async def wait_to_model_ready(self):
         self.model_rpcs: List[ModelRpcClient] = []
@@ -254,14 +259,20 @@ class RouterManager:
             if self.running_batch is None:
                 await asyncio.sleep(0.01)  # 10ms
     
-    def _check_backward_condition(self):
+    def _check_backward_condition(self, printing=False):
         if (isinstance(self.req_queue, Mixed_ReqQueue) or \
             isinstance(self.req_queue, Alignment_ReqQueue) or isinstance(self.req_queue, LiveAlignment_ReqQueue)) \
-            and not self.req_queue.finetuning_is_finished() \
+            and not self.req_queue.finetuning_is_finished(self.send_to_httpserver) \
             and self.req_queue.pending_bwd_tokens>0 \
             and (self.decay_timeout < 0.5 or time.time() - self.no_inference_since > self.decay_timeout) \
             and self.get_router_status()== RouterStatus.IDLE:
             return True
+        else:
+            if printing:
+                print(f"Check not finished: {not self.req_queue.finetuning_is_finished()}")
+                print(f"Check pending bwd tokens: {self.req_queue.pending_bwd_tokens > 0}")
+                print(f"Check router status: {self.get_router_status()}")
+                print(f"Check timing: {self.decay_timeout < 0.5 or time.time() - self.no_inference_since > self.decay_timeout}")
         return False
 
     async def _step(self, counter_count):
@@ -281,7 +292,7 @@ class RouterManager:
                 if not new_batch.has_inference(): # here we check if there is any inference in the batch
                     self.no_inference_since = time.time()  # start tracking
                 else:
-                    self.decay_timeout = 2.0
+                    self.decay_timeout = 0.1
                 for req in new_batch.reqs:
                     if req.needs_to_notify_detokenize:
                         self.send_to_detokenization.send_pyobj(req.to_req_detokenization_state())
@@ -302,13 +313,11 @@ class RouterManager:
 
                 # merge adapter to base model
                 if self.input_params.scheduler == "peft":
-                    torch.cuda.synchronize()
                     ret = []
                     for tp_rank in range(self.world_size):
                         ret.append(self.model_rpcs[tp_rank].merge_adapter())
                     await asyncio.gather(*ret)
             
-                torch.cuda.synchronize()
                 result = await self._prefill_batch(self.running_batch)
                 if not result:
                     self.req_queue.sample_index = self.req_queue.last_index
@@ -397,12 +406,19 @@ class RouterManager:
         if success: self.req_queue.update_finetuning_status_after_bwd(loss_list, processed_tokens)
         if job_id is not None:
             self.gpu_profiler.stop_annotation(job_id)
-    
+        print(f"############ is finetuning finished? {self.req_queue.finetuning_is_finished(self.send_to_httpserver)}", flush=True)
+
     def _start_back_batch_threading(self, separate_steps=False, current_epoch=None):
-        self.set_router_status(RouterStatus.BWD)
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation("backward")
-        futures = [self.model_rpcs[tp_rank].back_batch_threading(separate_steps, current_epoch=current_epoch) for tp_rank in range(self.world_size)]
+        futures = []
+        for tp_rank in range(self.world_size):
+            fut = self.model_rpcs[tp_rank].back_batch_threading(separate_steps, current_epoch=current_epoch)
+            if isinstance(fut, asyncio.Future):
+                futures.append(fut)
+        if futures == []:
+            return
+        self.set_router_status(RouterStatus.BWD)
         combined = asyncio.gather(*futures)
         if self.gpu_profiler is not None:
             combined.add_done_callback(partial(self.backward_callback, job_id=job_id))
@@ -411,11 +427,17 @@ class RouterManager:
         if self.decay_timeout >= 0.5:
             self.decay_timeout = self.decay_timeout * 0.75
 
+    def predict_inference_tokens(self, batch: Batch):
+        token_count = 0
+        for req in batch.reqs:
+            if not req.is_finetuning:
+                token_count += req.max_output_len
+        return token_count
 
     async def _prefill_batch(self, batch, minibatch=True):
         self.set_router_status(RouterStatus.PREFILL)
         if self.gpu_profiler is not None:
-            job_id = self.gpu_profiler.start_annotation("prefill")
+            job_id = self.gpu_profiler.start_annotation(f"prefill #tokens: {batch.input_tokens()}")
         rprint("router: prefill batch called")
         await self._init_batch(batch)
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id) for tp_rank in range(self.world_size)]
@@ -440,6 +462,12 @@ class RouterManager:
             self._send_to_detokenization_proc(batch, req_to_out_token_id)
         await self._handle_finish_req(batch, has_new_finished_req, minibatch=True)
         self.set_router_status(RouterStatus.IDLE)
+        if (isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Alignment_ReqQueue) or isinstance(self.req_queue, LiveAlignment_ReqQueue)) \
+            and None not in ans:
+            predict_token_gen = self.predict_inference_tokens(batch)
+            if predict_token_gen > self.req_queue.pending_bwd_tokens * 1.5 and self._check_backward_condition():
+                print("Starting backward threading after prefilling")
+                self._start_back_batch_threading(separate_steps=True, current_epoch=self.req_queue.current_epoch)
         if self.gpu_profiler is not None:
             self.gpu_profiler.stop_annotation(job_id)
         if None in ans:
@@ -449,7 +477,7 @@ class RouterManager:
     async def _decode_batch(self, batch:Batch):
         self.set_router_status(RouterStatus.DECODE)
         if self.gpu_profiler is not None:
-            job_id = self.gpu_profiler.start_annotation("decode")
+            job_id = self.gpu_profiler.start_annotation(f"decode #tokens: {batch.input_tokens()}")
         self.req_queue.update_counter(batch)
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
@@ -542,13 +570,13 @@ class RouterManager:
             if isinstance(recv_req, tuple) and len(recv_req) == 4:
                 adapter_dir, prompt_ids, sampling_params, request_id = recv_req
                 self.add_req(adapter_dir, prompt_ids, sampling_params, request_id)
-                print(f"\033[33mrouter: received req, number {req_counter}\033[0m", flush=True)
+                #print(f"\033[33mrouter: received req, number {req_counter}\033[0m", flush=True)
                 req_counter += 1
-                router_status = self.get_router_status()
-                if router_status == RouterStatus.BWD or router_status == RouterStatus.PREFILL:
-                    if self.req_queue.is_heavy_loading():
-                        for rpc in self.model_rpcs:
-                            rpc.interrupt()
+                # router_status = self.get_router_status()
+                # if router_status == RouterStatus.BWD or router_status == RouterStatus.PREFILL:
+                #     if self.req_queue.is_heavy_loading():
+                #         for rpc in self.model_rpcs:
+                #             rpc.interrupt()
 
             elif isinstance(recv_req, AbortReq):
                 abort_req = recv_req

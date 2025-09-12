@@ -1,12 +1,15 @@
 import asyncio
+from multiprocessing.dummy import Pipe
 import numpy as np
 import rpyc
+from slora.models.llama.SFT_service import LlamaSFTBackwardService
 import torch
 import traceback
 import time
 import os
 import json
 from collections import defaultdict
+from multiprocessing import Process, Pipe
 
 from datetime import timedelta
 from tqdm import tqdm
@@ -96,7 +99,7 @@ class ModelRpcServer(rpyc.Service):
                                                     mem_manager_log_path=mem_manager_log_path,
                                                     enable_unified_mem_manager=enable_unified_mem_manager,
                                                     unified_mem_manager_max_size=unified_mem_manager_max_size)
-                    gpu_profiler.mark_annotation("model_load")
+                    if gpu_profiler is not None: gpu_profiler.mark_annotation("model_load")
             else:
                 raise Exception(f"can not support {self.model_type} now")
         except Exception as e:
@@ -131,32 +134,51 @@ class ModelRpcServer(rpyc.Service):
                                                         prefetch_stream=prefetch_stream))
 
             self.finetuning_adapter = self.adapters[-1]
+            self.finetuning_adapter.is_finetuning = True
             self.finetuning_adapter_tracker = finetuning_adapters_tracker
             self.finetuning_adapter_tracker.set(self.finetuning_adapter.lora_dir, True)
             self.current_epoch = 0
             self.total_epochs = input_params.finetuning_params.num_epochs
-            lora_params = []
-            for i, layer in enumerate(self.finetuning_adapter.layers):
-                param = getattr(layer, 'w_combined_home_fp32')
-                param.requires_grad = True
-                lora_params.append(param)
-                name = f"layer_{i}.w_combined_home"
-                self.original_weights[name] = param.clone().detach().cpu()
-            self.finetuning_optimizer = torch.optim.AdamW(
-                lora_params, 
-                lr=input_params.finetuning_params.learning_rate, 
-                betas=(0.9,0.999), 
-                weight_decay=input_params.finetuning_params.weight_decay)
-            self.finetuning_scheduler = torch.optim.lr_scheduler.StepLR(
-                self.finetuning_optimizer,
-                step_size=1,      # every epoch
-                gamma=input_params.finetuning_params.gamma        # multiply by 0.5
-            )
+            # lora_params = []
+            # for i, layer in enumerate(self.finetuning_adapter.layers):
+            #     param = getattr(layer, 'w_combined_home_fp32')
+            #     param.requires_grad = True
+            #     lora_params.append(param)
+            #     name = f"layer_{i}.w_combined_home"
+            #     self.original_weights[name] = param.clone().detach().cpu()
+            # self.finetuning_optimizer = torch.optim.AdamW(
+            #     lora_params, 
+            #     lr=input_params.finetuning_params.learning_rate, 
+            #     betas=(0.9,0.999), 
+            #     weight_decay=input_params.finetuning_params.weight_decay)
+            # self.finetuning_scheduler = torch.optim.lr_scheduler.StepLR(
+            #     self.finetuning_optimizer,
+            #     step_size=1,      # every epoch
+            #     gamma=input_params.finetuning_params.gamma        # multiply by 0.5
+            # )
+            self.backward_service = None
+            if True:
+                rpc_recv, bwd_send = Pipe()
+                bwd_recv, rpc_send = Pipe()
+                backward_service_obj = LlamaSFTBackwardService(
+                    self.model.config, bwd_recv, bwd_send,
+                    lr=input_params.finetuning_params.learning_rate,
+                    weight_decay=input_params.finetuning_params.weight_decay,
+                    gamma=input_params.finetuning_params.gamma
+                )
+                backward_service_obj.receive_model_dict(self.model.export_model_dict())
+                self.rpc_recv = rpc_recv
+                self.rpc_send = rpc_send
+                self.backward_service = Process(target=backward_service_obj.start_service, daemon=True)
+                self.backward_service.start()
+                self.rpc_send.send(self.finetuning_adapter.load_gpu_fp32_dict())
+                self.rpc_send.send(self.model.alt_mem_manager.share_activation_dict())
+                self.rpc_recv.recv()
 
-            if input_params.finetuning_params.optimizer_threading:
-                from slora.server.router.model_infer.optimizer_worker import OptimizerWorker
-                self.finetuning_optimizer_worker = OptimizerWorker(self.finetuning_optimizer, self.finetuning_adapter, self.finetuning_adapter_tracker)
-                self.finetuning_optimizer_worker.start()
+            # if input_params.finetuning_params.optimizer_threading:
+            #     from slora.server.router.model_infer.optimizer_worker import OptimizerWorker
+            #     self.finetuning_optimizer_worker = OptimizerWorker(self.finetuning_optimizer, self.finetuning_adapter, self.finetuning_adapter_tracker)
+            #     self.finetuning_optimizer_worker.start()
 
             if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
                 ref_adapter_path = input_params.finetuning_params.reference_lora_path
@@ -187,6 +209,7 @@ class ModelRpcServer(rpyc.Service):
                 self.infer_adapter_alt = None
         ''' finish init adapters '''
         set_random_seed(2147483647)
+        self.forward_stream = torch.cuda.Stream(device='cuda', priority=-1)
         return
 
     def is_interrupted(self):
@@ -263,11 +286,11 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_back_batch(self, separate_steps, current_epoch):
         if current_epoch > self.current_epoch:
-            print("model_rpc: finetuning scheduler step")
-            self.finetuning_scheduler.step()
+            #print("model_rpc: finetuning scheduler step")
+            #self.finetuning_scheduler.step()
             self.current_epoch = current_epoch
         result = self.backward(separate_steps)
-        if current_epoch == self.total_epochs -1:
+        if current_epoch == self.total_epochs -1 and self.input_params.finetuning_params.finetuning_type == "Alignment":
             self.model.backward_engine.print_reset_log()
         return result
 
@@ -323,7 +346,7 @@ class ModelRpcServer(rpyc.Service):
         # assert False, f"{kwargs}"
 
         assert len(batch.adapter_dirs) == len(batch), "batch.adapter_dirs != batch"
-        # always use lora batch infer
+            # always use lora batch infer
         if (self.input_params.no_lora or self.input_params.no_kernel or
             self.input_params.scheduler == "peft" or set(batch.adapter_dirs) == {None}):
             engine = self.model
@@ -452,6 +475,8 @@ class ModelRpcServer(rpyc.Service):
                 else:
                     print(f"but w_combined_home_fp32 does not has NaN/Inf")
                 break   
+            
+      
     
     def backward_load_adapter(self):
         self.exposed_load_adapters([self.finetuning_adapter.lora_dir])
@@ -461,7 +486,13 @@ class ModelRpcServer(rpyc.Service):
 
     def backward_compute_grad(self):
         start = time.time()
-        finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter, self.interrupt_flag)
+        if self.backward_service is not None:
+            requests_info_dict = self.model.alt_mem_manager.export_requests_info()
+            requests_info_dict["current_epoch"] = self.current_epoch
+            self.rpc_send.send(requests_info_dict)
+            finished, loss, total_token_processed = self.rpc_recv.recv()
+        else:
+            finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
         print("Gradient Computation duration:", time.time()-start)
         if finished:
             if self.enable_unified_mem_manager:
@@ -535,14 +566,6 @@ class ModelRpcServer(rpyc.Service):
 
     def backward_with_optimizer_threading(self):
         print("\033[91mRunning Backward with Optimizer Threading\033[0m")
-        self.backward_load_adapter()
-        if self.is_interrupted() == True: 
-            print("\033[91mReceive interrupt after gradient computation, offloading adapter\033[0m")
-            self.offload_finetuning_adapter()
-            self.reset_interrupted()
-            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-            return False, None, None
-        # step 2
         finished, loss, total_token_processed = self.backward_compute_grad()
         if not finished:
             print("\033[91mReceive interrupt during gradient computation\033[0m")
@@ -551,8 +574,8 @@ class ModelRpcServer(rpyc.Service):
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
             return False, None, None
         else:
-            self.finetuning_optimizer_worker.enqueue([])
-            self.offload_finetuning_adapter()
+            #self.finetuning_optimizer_worker.enqueue([])
+            #self.offload_finetuning_adapter()
             self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
             return (True, loss, total_token_processed)
 

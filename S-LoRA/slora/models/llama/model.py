@@ -1,6 +1,7 @@
 import os
 import json
 from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
+from slora.models.llama.SFT_service import LlamaSFTBackwardService
 from slora.models.llama.backward_engine import LlamaBackwardEngine
 import torch
 from slora.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
@@ -44,9 +45,27 @@ class LlamaTpPartModel(TpPartBaseModel):
                          unified_mem_manager_max_size=unified_mem_manager_max_size)
         if enable_unified_mem_manager:
             self.backward_engine = LlamaBackwardEngine(self.alt_mem_manager, self.config)
+            # self.backward_engine = LlamaSFTBackwardService(self.config)
+            # if isinstance(self.backward_engine, LlamaSFTBackwardService):
+            #     self.model_dict = {
+            #         "pre_post_weight": self.pre_post_weight,
+            #         "trans_layers_weight": self.trans_layers_weight,
+            #         "_cos_cached": self._cos_cached,
+            #         "_sin_cached": self._sin_cached
+            #     }
+            #     self.backward_engine.receive_model_dict(self.model_dict)
         else:
             self.backward_engine = LlamaBackwardEngine(self.mem_manager, self.config)
         return
+    
+    def export_model_dict(self):
+        model_dict = {
+            "pre_post_weight": self.pre_post_weight,
+            "trans_layers_weight": self.trans_layers_weight,
+            "_cos_cached": self._cos_cached,
+            "_sin_cached": self._sin_cached
+        }
+        return model_dict  
     
     def _init_config(self):
         super()._init_config()
@@ -70,6 +89,7 @@ class LlamaTpPartModel(TpPartBaseModel):
                 head_num=self.config["num_attention_heads"],
                 head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
                 layer_num=self.config["num_hidden_layers"],
+                vocab_size=self.config["vocab_size"],
                 dtype=torch.float16,
                 max_pool_size = self.unified_mem_manager_max_size,
                 log_path=self.mem_manager_log_path

@@ -32,6 +32,9 @@ class HttpServerManager:
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
 
+        self.recv_from_router = context.socket(zmq.PULL)
+        self.recv_from_router.connect(f"tcp://127.0.0.1:{router_port + 100}")
+
         self.recv_from_detokenization = context.socket(zmq.PULL)
         self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
 
@@ -55,6 +58,7 @@ class HttpServerManager:
         self._arrival_count = 0          # how many requests have arrived (since process start)
         self._t_begin = None        # start time of current 1s window
         self._win_count = 0              # arrivals in (t_begin, t_begin+1.0]
+        self.finetuning_finished = False
 
     def update_feedback(self, request_id, label):
         self.feedback_collector.submit_update(req_id=request_id, label=label)
@@ -84,9 +88,10 @@ class HttpServerManager:
             self._win_count += 1
         else:
             # Window elapsed: report and start a new window with THIS arrival as begin
-            print(f"[httpserver] {self._win_count} requests arrived in the 1s.")
+            print(f"\033[34m[httpserver] {self._win_count} requests arrived in the 1s.\033[0m")
             self._t_begin = now
             self._win_count = 0  # current arrival is the new begin, not counted
+
 
     async def generate(self, adapter_dir, prompt, sampling_params, request_id):
         self._record_arrival()
@@ -94,7 +99,8 @@ class HttpServerManager:
         if self.live_alignment and random.random() <= 0.5:
             self.feedback_collector.submit_update(req_id=request_id, prompt=prompt)
             feedback = True
-        prompt_ids = self.tokenizer.encode(prompt)
+        loop = asyncio.get_running_loop()
+        prompt_ids = await loop.run_in_executor(None, self.tokenizer.encode, prompt)
         prompt_tokens = len(prompt_ids)
         if prompt_tokens > self.max_req_input_len:
             raise ValueError(
@@ -152,6 +158,13 @@ class HttpServerManager:
         except:
             pass
         return
+    
+    async def finetuning_status_loop(self):
+        while True:
+            await self.recv_from_router.recv_pyobj()
+            self.finetuning_finished = True
+            print("http: Finetuning is finished.")
+            break
 
     async def handle_loop(self):
         while True:
