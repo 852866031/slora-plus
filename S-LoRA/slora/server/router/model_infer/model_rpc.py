@@ -131,7 +131,7 @@ class ModelRpcServer(rpyc.Service):
             self.adapters.append(LoraTpPartAdapter(rank_id, world_size, finetuning_lora_path, model_cfg,
                                                     swap=input_params.swap, dummy=input_params.dummy,
                                                     no_lora_swap=input_params.no_lora_swap,
-                                                        prefetch_stream=prefetch_stream))
+                                                        prefetch_stream=prefetch_stream, is_finetuning=True))
 
             self.finetuning_adapter = self.adapters[-1]
             self.finetuning_adapter.is_finetuning = True
@@ -303,7 +303,6 @@ class ModelRpcServer(rpyc.Service):
     def exposed_filter_batch(self, batch_id, req_id_list):
         if self.world_size != 1:
             batch_id, req_id_list = obtain(batch_id), obtain(req_id_list)
-        # print("filter old size:", len(batch.reqs), "new size:", len(req_id_list))
         batch = self.cache.pop(batch_id)
         filter_batch = batch.filter(req_id_list)
         del batch
@@ -389,7 +388,7 @@ class ModelRpcServer(rpyc.Service):
             # kwargs["no_lora_copy"] = self.input_params.no_lora_copy 
 
         logits = engine.forward(**kwargs)
-        
+
         if logits is None:
             batch.nopad_max_len_in_batch += 1
             batch.nopad_b_seq_len += 1
@@ -783,21 +782,21 @@ class ModelRpcClient:
         else:
             return
 
-    # async def prefill_batch(self, batch_id):
-    #     ans = self._prefill_batch(batch_id)
-    #     if self.use_rpc:
-    #         return await ans
-    #     else:
-    #         return ans
-    
     async def prefill_batch(self, batch_id):
+        ans = self._prefill_batch(batch_id)
         if self.use_rpc:
-            ans = self._prefill_batch(batch_id)
             return await ans
         else:
-            # run blocking call in a thread
-            loop = asyncio.get_running_loop()
-            return await loop.run_in_executor(None, self._prefill_batch, batch_id)
+            return ans
+    
+    # async def prefill_batch(self, batch_id):
+    #     if self.use_rpc:
+    #         ans = self._prefill_batch(batch_id)
+    #         return await ans
+    #     else:
+    #         # run blocking call in a thread
+    #         loop = asyncio.get_running_loop()
+    #         return await loop.run_in_executor(None, self._prefill_batch, batch_id)
 
     # async def back_batch(self):
     #     ans = self._back_batch()

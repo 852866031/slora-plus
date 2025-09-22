@@ -4,7 +4,8 @@ import asyncio
 
 class Req:
     def __init__(self, adapter_dir, request_id, prompt_ids, sample_params: SamplingParams, 
-                 is_finetuning=False, is_reference = False, completion_mask = None, label=None, text=None):
+                 is_finetuning=False, is_reference = False, completion_mask = None, label=None, text=None,
+                 needs_to_notify_detokenize=False):
         self.adapter_dir = adapter_dir
         self.request_id = request_id
         self.prompt_ids = prompt_ids
@@ -18,11 +19,11 @@ class Req:
         self.is_reference = is_reference
         self.is_finetuning = is_finetuning
         self.ask_for_label = False
-        self.needs_to_notify_detokenize = False
+        self.needs_to_notify_detokenize = needs_to_notify_detokenize
         self.text = text
         self.completion_mask = completion_mask
         self.label = label
-        
+
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,
                 "request_id": self.request_id,
@@ -84,13 +85,8 @@ class Batch:
         self.id_to_reqs = {req.request_id: req for req in reqs}
 
         self.adapter_dirs = set()
-        self.finetuning_adapter_dir = None
         for req in reqs:
             self.adapter_dirs.add(req.adapter_dir)
-            if req.is_finetuning:
-                if self.finetuning_adapter_dir!= None and self.finetuning_adapter_dir != req.adapter_dir:
-                    raise ValueError("Batch contains multiple finetuning adapters.")
-                self.finetuning_adapter_dir = req.adapter_dir
 
     def input_tokens(self):
         batch_input_tokens = 0

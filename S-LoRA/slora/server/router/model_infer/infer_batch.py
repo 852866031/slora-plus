@@ -311,6 +311,98 @@ class InferBatch:
         )
 
 
+    @torch.no_grad()
+    def clip(self, x: int):
+        if x <= 0 or x > len(self):
+            raise ValueError(f"x must be between 1 and {len(self)}")
+        if x == len(self):
+            return self
+
+        # --- Step 1: indices to keep/drop ---
+        keep_indices = list(range(x))
+        drop_indices = list(range(x, len(self)))
+        keep_tensor = torch.tensor(keep_indices, dtype=torch.long, device="cuda")
+
+        # --- Step 2: free dropped requests' memory ---
+        if drop_indices:
+            if self.alt_mem_manager is not None:
+                remove_index_kv = []
+                for idx in drop_indices:
+                    remove_index_kv.append(
+                        self.nopad_b_loc_key[idx,
+                            (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
+                            (self.nopad_max_len_in_batch - 1)]
+                    )
+                    remove_index_kv.append(
+                        self.nopad_b_loc_value[idx,
+                            (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
+                            (self.nopad_max_len_in_batch - 1)]
+                    )
+                remove_index_kv = torch.cat(remove_index_kv, dim=-1)
+                self.alt_mem_manager.free(remove_index_kv)
+            else:
+                remove_index = []
+                for idx in drop_indices:
+                    remove_index.append(
+                        self.nopad_b_loc[idx,
+                            (self.nopad_max_len_in_batch - 1) - (self.nopad_b_seq_len[idx] - 1):
+                            (self.nopad_max_len_in_batch - 1)]
+                    )
+                remove_index = torch.cat(remove_index, dim=-1)
+                self.mem_manager.free(remove_index)
+
+        # --- Step 3: recompute metadata for survivors ---
+        new_seq_len = self.nopad_b_seq_len[keep_tensor]
+        nopad_max_len_in_batch = torch.max(new_seq_len).item()
+        nopad_total_token_num = torch.sum(new_seq_len).item()
+
+        nopad_b_start_loc = torch.zeros(x, dtype=torch.int32, device="cuda")
+        if x > 1:
+            nopad_b_start_loc[1:] = torch.cumsum(new_seq_len[:-1], dim=0, dtype=torch.int32)
+
+        nopad_b_loc = torch.zeros((x, self.nopad_b_loc.size(1)), dtype=torch.long, device="cuda")
+        nopad_b_loc_key = torch.zeros_like(nopad_b_loc)
+        nopad_b_loc_value = torch.zeros_like(nopad_b_loc)
+
+        span = nopad_max_len_in_batch - 1
+        nopad_b_loc[:, :span] = self.nopad_b_loc[keep_tensor,
+                            (self.nopad_max_len_in_batch - 1) - span:(self.nopad_max_len_in_batch - 1)]
+        nopad_b_loc_key[:, :span] = self.nopad_b_loc_key[keep_tensor,
+                            (self.nopad_max_len_in_batch - 1) - span:(self.nopad_max_len_in_batch - 1)]
+        nopad_b_loc_value[:, :span] = self.nopad_b_loc_value[keep_tensor,
+                            (self.nopad_max_len_in_batch - 1) - span:(self.nopad_max_len_in_batch - 1)]
+
+        # --- Step 4: rebuild InferBatch with first x requests ---
+        requests = self.requests[:x]
+        all_input_ids = self.all_input_ids[:x]
+        input_lengths = self.input_lengths[:x]
+        adapter_dirs = self.adapter_dirs[:x]
+
+        requests_idx_mapping = {r["request_id"]: i for i, r in enumerate(requests)}
+
+        return InferBatch(
+            batch_id=self.batch_id,
+            requests=requests,
+            requests_idx_mapping=requests_idx_mapping,
+            input_ids=self.input_ids[keep_tensor],
+            input_lengths=input_lengths,
+            all_input_ids=all_input_ids,
+            nopad_total_token_num=nopad_total_token_num,
+            nopad_max_len_in_batch=nopad_max_len_in_batch,
+            nopad_b_loc=nopad_b_loc,
+            nopad_b_loc_key=nopad_b_loc_key,
+            nopad_b_loc_value=nopad_b_loc_value,
+            nopad_b_start_loc=nopad_b_start_loc,
+            nopad_b_seq_len=new_seq_len,
+            out_token_id_counts=self.out_token_id_counts[:x],
+            sampling_param_list=self.sampling_param_list[:x],
+            mem_manager=self.mem_manager,
+            alt_mem_manager=self.alt_mem_manager,
+            adapter_dirs=adapter_dirs,
+            finetune_mask=None,
+            ref_mask=None,
+        )
+
     @classmethod
     @torch.no_grad()
     def merge(cls, batch1, batch2):
@@ -434,4 +526,3 @@ class InferBatch:
         p_seq_len = torch.tensor(p_seq_len, dtype=torch.int32, device="cuda")
         p_cumsum_seq_len = torch.cumsum(p_seq_len, dim=0, dtype=torch.int32)
         return presence_penalties, frequency_penalties, temperatures, top_ps, top_ks, p_token_ids, p_token_counts, p_cumsum_seq_len, p_max_len_in_batch
-

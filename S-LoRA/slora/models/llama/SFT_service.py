@@ -5,6 +5,7 @@
 # LoRA‑augmented Llama model **without** replaying the entire forward graph.
 
 from enum import Enum
+import hashlib
 import math
 import time
 from multiprocessing import Pipe
@@ -52,6 +53,13 @@ class SharedActivations():
         self.transformer_out_activations = []
         self.attention_out_activations = []
         self.input_layer_output = None
+
+
+def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
+    h = hashlib.new(algo)
+    h.update(t.detach().cpu().numpy().tobytes())
+    return h.hexdigest()
+
 
 class LlamaSFTBackwardService():
     def __init__(self, network_config, recv_pipe, send_pipe, lr=1e-4, weight_decay=0.01, gamma=0.95):
@@ -101,16 +109,9 @@ class LlamaSFTBackwardService():
                         current_epoch = msg["current_epoch"]
                         print(f"[BWD Process] Received activations. Starting backward...")
                         with torch.cuda.stream(torch.cuda.Stream()):
-                            try:
-                                torch.cuda.nvtx.range_push("Backward")
-                            except Exception as e:
-                                print("[BWD] NVTX range_push failed:", e)
-                            ok, loss, ntok, grad_list = self._context_backward()
-                            self.send_pipe.send((ok, loss, ntok))
-                            try:
-                                torch.cuda.nvtx.range_pop()
-                            except Exception as e:
-                                print("[BWD] NVTX range_pop failed:", e)
+                            start = time.time()
+                            ok, loss, ntok, grad_list = self._context_backward() 
+                            print("[BWD Process] Gradient computation duration:", time.time() - start)
                             start = time.time()
                             self.finetuning_optimizer.step()
                             self.finetuning_optimizer.zero_grad(set_to_none=True)
@@ -119,6 +120,7 @@ class LlamaSFTBackwardService():
                                 self.finetuning_scheduler.step()
                                 self.current_epoch = current_epoch
                             print("[BWD Process] Parameter update duration:", time.time() - start)
+                            self.send_pipe.send((ok, loss, ntok))
                         print(f"[BWD Process] Backward completed. Tokens={ntok}, Loss={loss:.6f}")
                     
                     except Exception as e:
@@ -153,8 +155,8 @@ class LlamaSFTBackwardService():
         self.shared_activations = SharedActivations()
         self.shared_activations.logit_tensor = activations_dict["logit_tensor"]
         self.shared_activations.concat_input_ids = activations_dict["concat_input_ids"]
-        self.shared_activations.transformer_out_activations = activations_dict["transformer_out_activations"][:]
-        self.shared_activations.attention_out_activations = activations_dict["attention_out_activations"][:]
+        self.shared_activations.transformer_out_activations = activations_dict["transformer_out_activations"]
+        self.shared_activations.attention_out_activations = activations_dict["attention_out_activations"]
         self.shared_activations.input_layer_output = activations_dict["input_layer_output"]
     
     def receive_requests_info(self, dict):
@@ -163,7 +165,7 @@ class LlamaSFTBackwardService():
         self.activations = Activations()
         request_token_info = dict["request_token_info"]
         total_token_num = sum(request_token_info)
-        self.activations.concat_input_ids = self.shared_activations.concat_input_ids[:total_token_num+len(request_token_info)]
+        self.activations.concat_input_ids = self.shared_activations.concat_input_ids[:total_token_num+len(request_token_info)].clone()
         self.activations.transformer_out_activations = []
         self.activations.attention_out_activations = []
         for i in range(self.num_layers):
@@ -171,7 +173,7 @@ class LlamaSFTBackwardService():
             self.activations.attention_out_activations.append(self.shared_activations.attention_out_activations[i][:total_token_num].float())
         self.activations.input_layer_output = self.shared_activations.input_layer_output[:total_token_num].float()
 
-        logit_tensor = self.shared_activations.logit_tensor[:total_token_num]
+        logit_tensor = self.shared_activations.logit_tensor[:total_token_num].detach().clone()
         self.activations.logit_list = []
         for n in request_token_info:
             self.activations.logit_list.append(logit_tensor[:n, :])

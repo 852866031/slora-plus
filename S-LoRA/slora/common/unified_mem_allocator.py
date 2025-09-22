@@ -1,4 +1,8 @@
 from enum import Enum, auto
+import hashlib
+import queue
+from anyio import sleep
+import numpy as np
 from slora.common.activation_writer import ActivationWriter
 from slora.common.mem_triton import triton_copy_rows
 import torch
@@ -11,6 +15,12 @@ import threading
 import nvtx 
 import time
 
+
+def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
+    h = hashlib.new(algo)
+    h.update(t.detach().cpu().numpy().tobytes())
+    return h.hexdigest()
+    
 def get_tensor_size_kb(numel: int, dtype: torch.dtype) -> float:
         dtype_size_map = {
             torch.float32: 4,
@@ -40,6 +50,9 @@ class PageTable:
         self.vpid_to_phys      = {}                 # vpid → ('gpu'|'cpu', idx)
         self.vpid_to_type      = {}                 # vpid → PageType
         self.gpu_slot_to_vpid  = [None] * max_gpu_slots
+        self.free_phys_pages_queue = queue.Queue(maxsize=max_gpu_slots)
+        for i in range(max_gpu_slots):
+            self.free_phys_pages_queue.put(i)
 
     def get_next_vpid(self) -> int:
         vpid = self.vpid_counter
@@ -112,8 +125,8 @@ class UnifiedMemoryAllocator:
         self.cpu_pools = [{} for _ in range(self.layer_num)]
         
         # mem_state[i] == 0 → free, 1 → occupied (GPU only)
-        self.mem_state = torch.zeros(self.tot_size,
-                                     dtype=torch.int8, device='cpu')
+        # self.mem_state = torch.zeros(self.tot_size,
+        #                              dtype=torch.int8, device='cpu')
 
         self.pinned_pages = set()
 
@@ -147,6 +160,7 @@ class UnifiedMemoryAllocator:
         self.max_finetuning_tokens = 256
         self.init_shared_activation_memory()
         #self.activation_writer = ActivationWriter(self)
+        self.saved_layer_0_activations = None
 
     def init_shared_activation_memory(self):
         self.shared_transformer_out_activations = [
@@ -176,6 +190,7 @@ class UnifiedMemoryAllocator:
     
     def export_requests_info(self):
         self.get_concatenated_finetune_input_ids()
+        self.saved_layer_0_activations = None
         for layer_id in range(self.layer_num):
             self.fill_activations_by_layer(layer_id, PageType.FFN_INPUT_ACTIVATION, 
                                          self.shared_attention_out_activations[layer_id])
@@ -183,6 +198,7 @@ class UnifiedMemoryAllocator:
                                          self.shared_transformer_out_activations[layer_id])
         requests_info_dict = {
             "request_token_info": self.request_token_info,
+            #"saved_layer_0_activations": self.saved_layer_0_activations,
         }
         return requests_info_dict
 
@@ -257,6 +273,10 @@ class UnifiedMemoryAllocator:
         self.assert_vpid_on_gpu(present_vpids)
         gpu_indices = [self.page_table.get_location_index(v)[1] for v in present_vpids]
         dest[:total_tokens].copy_(self.gpu_pools[layer_id][gpu_indices].view(total_tokens, -1))
+
+        # activation = dest[:total_tokens]
+        # if page_type == PageType.FFN_INPUT_ACTIVATION and layer_id==0:
+        #     self.saved_layer_0_activations = activation.clone()
         self.unpin_pages(present_vpids) 
     
     def get_thread_id(self, id):
@@ -338,39 +358,41 @@ class UnifiedMemoryAllocator:
     def _num_free_gpu_slots(self) -> int:
         # mem_state is on CPU, so .sum() is cheap
         with self.page_table_lock:
-            return int(self.tot_size - self.mem_state.sum().item())
+            #free_slots = int(self.tot_size - self.mem_state.sum().item())
+            free_slots_1 = self.page_table.free_phys_pages_queue.qsize()
+            return free_slots_1
 
-    def _find_free_gpu_slots(self, num_needed: int) -> list[int]:
+    def _get_free_gpu_slots(self, num_needed: int) -> list[int]:
         """
         Return a list of `num_needed` free GPU slot indices.
         Raise RuntimeError if not enough slots are available.
         """
         with self.page_table_lock:
-            free_slots = [i for i, state in enumerate(self.mem_state) if state == 0]
-            if len(free_slots) < num_needed:
-                raise RuntimeError(f"Requested {num_needed} free slots, but only found {len(free_slots)}")
-            return free_slots[:num_needed]
+            # free_slots = [i for i, state in enumerate(self.mem_state) if state == 0]
+            # if len(free_slots) < num_needed:
+            #     raise RuntimeError(f"Requested {num_needed} free slots, but only found {len(free_slots)}")
+            free_slots = [self.page_table.free_phys_pages_queue.get() for _ in range(num_needed)]
+            return free_slots
 
     def alloc(self, num_pages: int, page_type: PageType):
         with self.page_table_lock:
             free_now   = self._num_free_gpu_slots()
             shortfall  = max(0, num_pages - free_now)
-
             if shortfall:                                  
                 self._pages_out(self._find_victim_pages(shortfall))
             
-            free_slots = self._find_free_gpu_slots(num_pages) 
+            free_slots = [self.page_table.free_phys_pages_queue.get() for _ in range(num_pages)]
+            #time.sleep(0.1)
             vpids = []
             for gpu_idx in free_slots:
                 vpid = self.page_table.get_next_vpid()
                 self.page_table.set_type(vpid, page_type)
                 self.page_table.set_gpu_mapping(vpid, gpu_idx)
-
-                self.mem_state[gpu_idx] = 1
+                #self.mem_state[gpu_idx] = 1
                 vpids.append(vpid)
-            self._log(f"ALLOC: #pages={num_pages}, type={page_type.name}")
+            self._log(f"ALLOC: #pages={num_pages}, type={page_type.name}, {vpids}")
             return vpids
-
+    
     def free(self, vpids):
         with self.page_table_lock:
             if isinstance(vpids, torch.Tensor):
@@ -380,12 +402,14 @@ class UnifiedMemoryAllocator:
 
             for vpid in vpids:
                 location, idx = self.page_table.get_location_index(vpid)
-
                 if location == 'gpu':
                     # Free GPU slot
-                    self.mem_state[idx] = 0
+                    #self.mem_state[idx] = 0
+                    self.page_table.free_phys_pages_queue.put(idx)
+                    # for layer_pool in self.gpu_pools:
+                    #     layer_pool[idx].zero_()  # optional: clear data
                     num_gpu += 1
-
+                    
                 # Remove from all CPU layers if exists
                 for layer_pool in cpu_layers:
                     layer_pool.pop(vpid, None)  # safe, no KeyError
@@ -448,7 +472,8 @@ class UnifiedMemoryAllocator:
                 # Book-keeping: release GPU slot
                 self.page_table.set_cpu_mapping(vpid)
                 self.page_table.gpu_slot_to_vpid[gpu_idx] = None
-                self.mem_state[gpu_idx] = 0
+                self.page_table.free_phys_pages_queue.put(gpu_idx)
+                #self.mem_state[gpu_idx] = 0
 
     def _pages_in(self, vpids, priority = None):
         with self.page_table_lock:
@@ -457,14 +482,15 @@ class UnifiedMemoryAllocator:
             if num_needed > 0:
                 self._pages_out(self._find_victim_pages(num_needed, priority))
 
-            free_slots = self._find_free_gpu_slots(len(vpids))
+            free_slots = self._get_free_gpu_slots(len(vpids))
             for vpid, gpu_idx in zip(vpids, free_slots):
                 for layer in range(self.layer_num):
                     cpu_tensor = self.cpu_pools[layer][vpid]  # Must exist
                     self.gpu_pools[layer][gpu_idx].copy_(cpu_tensor)
 
                 self.page_table.set_gpu_mapping(vpid, gpu_idx)
-                self.mem_state[gpu_idx] = 1
+                #self.mem_state[gpu_idx] = 1
+
     
     def alloc_cpu(self, num_pages: int, page_type: PageType):
         with self.page_table_lock:
@@ -484,19 +510,19 @@ class UnifiedMemoryAllocator:
             return vpids
     
     def pin_pages(self, vpids):
-        #with self.page_table_lock:
+        with self.page_table_lock:
             #self._log(f"PIN PAGES: {len(vpids)} pages to GPU")
-        if isinstance(vpids, torch.Tensor):
-            vpids = vpids.tolist()
-        self.pinned_pages.update(vpids)
+            if isinstance(vpids, torch.Tensor):
+                vpids = vpids.tolist()
+            self.pinned_pages.update(vpids)
 
     def unpin_pages(self, vpids):
-        #with self.page_table_lock:
-            #self._log(f"UNPIN PAGES: {len(vpids)} pages from GPU")
-        if isinstance(vpids, torch.Tensor):
-            vpids = vpids.tolist()
-        for vpid in vpids:
-            self.pinned_pages.discard(vpid)
+        with self.page_table_lock:
+                #self._log(f"UNPIN PAGES: {len(vpids)} pages from GPU")
+            if isinstance(vpids, torch.Tensor):
+                vpids = vpids.tolist()
+            for vpid in vpids:
+                self.pinned_pages.discard(vpid)
 
     def copy_rows_to_layer(self,
                        layer_id: int,
@@ -654,42 +680,28 @@ class UnifiedMemoryAllocator:
     #     return vpids
     
     def save_activations_by_layer(self, layer_id, input_embs, infer_state, page_type, vpids=None):
-        self._log(f"SAVE_ACTIVATIONS_BY_LAYER: layer {layer_id}, type {page_type.name}")
+        #self._log(f"SAVE_ACTIVATIONS_BY_LAYER: layer {layer_id}, type {page_type.name}")
         finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
         #finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
-        finetune_activations = input_embs[finetune_mask]
+        finetune_activations = input_embs[finetune_mask].clone()
         # nonzero = torch.nonzero(finetune_mask, as_tuple=False)
         # start_idx = nonzero[0].item() if nonzero.numel() > 0 else None
         # finetune_activations = input_embs[start_idx:]
         num_new_tokens = finetune_activations.shape[0]
         if vpids is None:
             # Allocate new pages
+            start = time.time()
             vpids = self.alloc(num_new_tokens, page_type)
+            print(f"[MEM MANAGER] ALLOC duration for {num_new_tokens} tokens: {time.time() - start}")
         else:
             # Reuse existing pages
             if len(vpids) != num_new_tokens:
                 raise ValueError(f"Expected {num_new_tokens} vpids, got {len(vpids)}")
+        start = time.time()
         self.pin_pages(vpids)  # Ensure pages are resident on GPU
         self.copy_rows_to_layer(layer_id, vpids, finetune_activations)
         self.unpin_pages(vpids)  # Unpin after copying
         return vpids
-    
-    def save_activations_by_layer_start(self, layer_id, input_embs, finetuning_start, page_type, vpids=None):
-        self._log(f"SAVE_ACTIVATIONS_BY_LAYER: layer {layer_id}, type {page_type.name}")
-        finetune_activations = input_embs[finetuning_start:]
-        num_new_tokens = finetune_activations.shape[0]
-        if vpids is None:
-            # Allocate new pages
-            vpids = self.alloc(num_new_tokens, page_type)
-        else:
-            # Reuse existing pages
-            if len(vpids) != num_new_tokens:
-                raise ValueError(f"Expected {num_new_tokens} vpids, got {len(vpids)}")
-        self.pin_pages(vpids)  # Ensure pages are resident on GPU
-        self.copy_rows_to_layer(layer_id, vpids, finetune_activations)
-        self.unpin_pages(vpids)  # Unpin after copying
-        return vpids
-
     
     def save_embedding_output(self, input_embs, infer_state):
         finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
@@ -799,23 +811,24 @@ class UnifiedMemoryAllocator:
         This is useful for starting a new inference or finetuning session.
         """
         self._log("RESET ACTIVATION POOL")
-        self.request_token_info = []
-        self.finetune_input_ids = []
-        self.alignment_completion_masks = []
-        self.alignment_labels = []
-        self.finetune_logits_per_request = []
-        self.reference_logits_per_request = []
-        #self.embedding_output = torch.empty((self.max_finetuning_tokens, self.head_num * self.head_dim), 
-        #                                dtype=self.dtype, device=self.device) 
-        target_types = {PageType.ATTENTION_INPUT_ACTIVATION, PageType.FFN_INPUT_ACTIVATION}
-        target_vpids = [
-            vpid for vpid, typ in self.page_table.vpid_to_type.items()
-            if typ in target_types
-        ]
-        if target_vpids:
-            self.unpin_pages(target_vpids)
-            self.free(target_vpids)
-        self._log("RESET ACTIVATION POOL DONE")
+        with self.page_table_lock:
+            self.request_token_info = []
+            self.finetune_input_ids = []
+            self.alignment_completion_masks = []
+            self.alignment_labels = []
+            self.finetune_logits_per_request = []
+            self.reference_logits_per_request = []
+            #self.embedding_output = torch.empty((self.max_finetuning_tokens, self.head_num * self.head_dim), 
+            #                                dtype=self.dtype, device=self.device) 
+            target_types = {PageType.ATTENTION_INPUT_ACTIVATION, PageType.FFN_INPUT_ACTIVATION}
+            target_vpids = [
+                vpid for vpid, typ in self.page_table.vpid_to_type.items()
+                if typ in target_types
+            ]
+            if target_vpids:
+                self.unpin_pages(target_vpids)
+                self.free(target_vpids)
+            self._log("RESET ACTIVATION POOL DONE")
     
     def report_diff_percent(
         self,
