@@ -21,9 +21,9 @@ DEFAULTS = {
     "server": "http://localhost:8000",
     "warmup": 5,
     "requests_per_second": 5,
-    "duration_seconds": 3,
-    "prompt_length": 50, #1:2
-    "max_new_tokens": 50,
+    "duration_seconds": 20,
+    "prompt_length": 30, #1:2
+    "max_new_tokens": 30,
     "max_wait": 120.0,          # wait for server up
     "ft_poll_interval": 3.0,    # poll /finetuning_status every N seconds
     "ft_max_wait": 60.0,      # max time to wait for finetuning to finish
@@ -73,7 +73,7 @@ def prepare_schedule_rps(
         if rps == 0:
             continue
         for i in range(rps):
-            t_off = s + (i / rps)  # evenly spaced within the second
+            t_off = s + (i / rps) # time offset in seconds
             prompt = generate_random_sentence(prompt_length)
             items.append((idx, float(t_off), make_payload(prompt, max_new_tokens)))
             idx += 1
@@ -216,6 +216,7 @@ async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> 
         async def fire_at(idx: int, t_off: float, payload: Dict):
             nonlocal finished_count
             delay = (t0 + t_off) - time.monotonic()
+            # did we consider the case delay < 0?, print something and check it
             if delay > 0:
                 await asyncio.sleep(delay)
             result = await send_one(session, server, idx, payload, t0)
@@ -232,7 +233,7 @@ async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> 
     return results
 
 # ---------------- Process control ----------------
-def launch_server(requests_per_second: int, duration_seconds: int, prompt_length: int, max_new_tokens: int):
+def launch_server(requests_per_second: int, duration_seconds: int, enable_finetuning: bool):
     """Launch server wrapped with Nsight Systems."""
     import subprocess
 
@@ -244,6 +245,8 @@ def launch_server(requests_per_second: int, duration_seconds: int, prompt_length
     cmd = [
         sys.executable, "launch_server.py", "--nsys-output", nsys_output,
     ]
+    if enable_finetuning:
+        cmd.append("--enable-finetuning")
     print(f"[orchestrator] Launching server with Nsight:\n  {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, preexec_fn=os.setsid)
     return proc, nsys_output
@@ -321,56 +324,13 @@ def summarize(results) -> None:
 
 # ---------------- Artifacts: CSV + plot ----------------
 def write_latency_csv(results, out_stem: str) -> Path:
-    path = Path(f"{out_stem}_latency_timeline.csv").resolve()
+    path = Path(f"{out_stem}.csv").resolve()
     with path.open("w") as f:
         f.write("idx,t_rel_s,latency_s,status\n")
         for idx, t_rel, lat, st in results:
             f.write(f"{idx},{t_rel:.6f},{lat:.6f},{st}\n")
     print(f"[orchestrator] Wrote CSV: {path}")
     return path
-
-def plot_latencies(results, out_stem: str) -> Path:
-    path = Path(f"{out_stem}_latency_timeline.png").resolve()
-    if not results:
-        print("[orchestrator] No results to plot.")
-        return path
-
-    t_ok   = [t for (_i, t, _l, s) in results if s == "ok"]
-    l_ok   = [l for (_i, _t, l, s) in results if s == "ok"]
-    t_err  = [t for (_i, t, _l, s) in results if s != "ok"]
-    l_err  = [l for (_i, _t, l, s) in results if s != "ok"]
-
-    plt.figure(figsize=(12, 4))
-    if t_ok:
-        plt.scatter(t_ok, l_ok, s=10, alpha=0.6, label="OK")
-    if t_err:
-        plt.scatter(t_err, l_err, s=20, alpha=0.9, marker="x", label="Error")
-
-    # simple moving average over ~1s window based on density
-    if t_ok:
-        span = max(3, min(200, int(len(t_ok) / (t_ok[-1] - t_ok[0] + 1e-9))))
-        if span >= 3:
-            ma_x, ma_y = [], []
-            acc = 0.0
-            for i, val in enumerate(l_ok):
-                acc += val
-                if i >= span:
-                    acc -= l_ok[i - span]
-                if i >= span - 1:
-                    ma_x.append(t_ok[i])
-                    ma_y.append(acc / span)
-            plt.plot(ma_x, ma_y, linewidth=2.0, label=f"Moving avg (~1s)")
-
-    plt.xlabel("Time since start (s)")
-    plt.ylabel("Latency (s)")
-    plt.title("Request latency over time")
-    plt.grid(True, alpha=0.3)
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(path, dpi=150)
-    print(f"[orchestrator] Wrote plot: {path}")
-    return path
-
 
 # ---------------- Main ----------------
 async def main():
@@ -384,7 +344,16 @@ async def main():
     ap.add_argument("--max-wait", type=float, default=DEFAULTS["max_wait"])
     ap.add_argument("--ft-poll-interval", type=float, default=DEFAULTS["ft_poll_interval"])
     ap.add_argument("--ft-max-wait", type=float, default=DEFAULTS["ft_max_wait"])
+    ap.add_argument("--co", action="store_true")
+    ap.add_argument("--inf", action="store_true")
+    ap.add_argument("--enable-finetuning", action="store_true")
+    ap.add_argument("--enable_nsys", action="store_true", help="Launch server with Nsight Systems")
     args = ap.parse_args()
+
+    if args.co:
+        args.enable_finetuning = True
+    elif args.inf:
+        args.enable_finetuning = False
 
     schedule = prepare_schedule_rps(
         requests_per_second=args.requests_per_second,
@@ -396,7 +365,7 @@ async def main():
           f"for {args.duration_seconds}s.")
 
     proc, nsys_output = launch_server(
-        args.requests_per_second, args.duration_seconds, args.prompt_length, args.max_new_tokens
+        args.requests_per_second, args.duration_seconds, args.enable_finetuning
     )
     nsys_rep = Path(f"{nsys_output}.nsys-rep").resolve()
 
@@ -404,7 +373,7 @@ async def main():
         await wait_for_server(args.server, max_wait_s=args.max_wait)
 
         # (No finetuning wait here)
-        await warmup(args.server, args.warmup, args.prompt_length, args.max_new_tokens)
+        #await warmup(args.server, args.warmup, args.prompt_length, args.max_new_tokens)
         results = await run_schedule(args.server, schedule)
         summarize(results)
 
@@ -415,18 +384,21 @@ async def main():
         )
 
         # artifacts
-        out_stem = f"rps{args.requests_per_second}_dur{args.duration_seconds}s"
+        if args.enable_finetuning:
+            out_stem = "latency_co-serving"
+        else:
+            out_stem = "latency_inference"
         write_latency_csv(results, out_stem)
-        plot_latencies(results, out_stem)
 
     finally:
         print("[orchestrator] Stopping server…")
         kill_server(proc)
-        time.sleep(8)
-        if nsys_rep.exists():
-            print(f"\n✅ Nsight Systems report: {nsys_rep}")
-        else:
-            print(f"\n⚠️  Nsight report not found yet. Expected: {nsys_rep}")
+        if args.enable_nsys:
+            time.sleep(8)
+            if nsys_rep.exists():
+                print(f"\n✅ Nsight Systems report: {nsys_rep}")
+            else:
+                print(f"\n⚠️  Nsight report not found yet. Expected: {nsys_rep}")
         print("[orchestrator] Done.")
         os.system("pkill -f nsys")
 

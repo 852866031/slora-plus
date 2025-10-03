@@ -1,21 +1,44 @@
 import argparse
 import os
 import sys
+import os, subprocess, time, shutil
+
 
 # base_model = "dummy-llama-7b"
 base_model = "huggyllama/llama-7b"
 #adapter_dirs = ["tloen/alpaca-lora-7b"]
 adapter_dirs = ["tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
 finetuning_lora_dir = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/finetuning_adapter"
-finetuning_config_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/finetuning_config.json"
+finetuning_config_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/finetuning_config.json"
+no_finetuning_config_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/no_finetuning_config.json"
 
 half_model = False
 enable_unified_mem_manager = True
 mem_manager_log_path = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/mem_manager_log.txt"
 enable_gpu_profile = False
 unified_mem_manager_max_size = 8
+#  sudo echo quit | sudo nvidia-cuda-mps-control
+
+def is_mps_running():
+    """
+    Returns True if the MPS control daemon is up and responding.
+    """
+    exe = shutil.which("nvidia-cuda-mps-control")
+    if not exe:
+        return False
+    # Try to talk to the daemon (this is a client; it fails if the daemon isn't up)
+    try:
+        p = subprocess.Popen([exe], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = p.communicate("get_server_list\nquit\n", timeout=2.0)
+        return p.returncode == 0
+    except Exception:
+        return False
+
 
 if __name__ == "__main__":
+    if not is_mps_running():
+        print("MPS control daemon is not running. Please start it before running this script:\n sudo nvidia-cuda-mps-control -d")
+        sys.exit(1)
     parser = argparse.ArgumentParser()
     parser.add_argument("--nsys-output", type=str, default="my_trace_report")
     parser.add_argument("--num-adapter", type=int)
@@ -24,6 +47,7 @@ if __name__ == "__main__":
     parser.add_argument("--no-lora-compute", action="store_true")
     parser.add_argument("--no-prefetch", action="store_true")
     parser.add_argument("--no-mem-pool", action="store_true")
+    parser.add_argument("--enable-finetuning", action="store_true")
 
     ''' slora arguments '''
     args = parser.parse_args()
@@ -38,8 +62,10 @@ if __name__ == "__main__":
     cmd += f" --tokenizer_mode auto"
     cmd += f" --pool-size-lora {args.pool_size_lora}"
 
-    
-    cmd += f" --finetuning_config_path {finetuning_config_path}"
+    if args.enable_finetuning:
+        cmd += f" --finetuning_config_path {finetuning_config_path}"
+    else:
+        cmd += f" --finetuning_config_path {no_finetuning_config_path}"
 
     num_iter = args.num_adapter // len(adapter_dirs) + 1
     for adapter_dir in adapter_dirs:
