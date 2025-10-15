@@ -490,6 +490,9 @@ class InferBatch:
 
     def __len__(self):
         return len(self.requests)
+
+    def is_finetuning_only(self):
+        return torch.all(self.finetune_mask).item() == 1
     
     
     def get_post_sample_tensors(self):

@@ -23,6 +23,7 @@ import uvloop
 import sys
 from pprint import pprint
 from .build_prompt import build_prompt
+from typing import List, Dict, Any, Optional, Tuple
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 import argparse
@@ -107,12 +108,8 @@ async def feedback(request: Request) -> Response:
 
 @app.post("/finetuning_status")
 async def finetuning_status(request: Request) -> Response:
-    global firstChecking
-    if firstChecking:
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.finetuning_status_loop())
-        firstChecking = False
-    if httpserver_manager.finetuning_finished:
+    finished = await httpserver_manager.check_finetune_status_once()
+    if finished:
         return Response(
             content=json.dumps({"finished": "true"}),
             status_code=200,
@@ -230,6 +227,131 @@ async def generate_stream(request: Request) -> Response:
 
     return StreamingResponse(
         stream_results(), media_type="text/event-stream", background=background_tasks
+    )
+
+@app.post("/generate_batch_stream")
+async def generate_batch_stream(raw_request: Request) -> Response:
+    """
+    Accepts a batch of requests and streams *one* JSON payload per finished item
+    using Server-Sent Events (SSE). Items are emitted in completion order.
+    """
+    # Ensure background handle loop is running once
+    global isFirst
+    if isFirst:
+        loop = asyncio.get_event_loop()
+        loop.create_task(httpserver_manager.handle_loop())
+        isFirst = False
+
+    body = await raw_request.json()
+    items: List[Dict[str, Any]] = body.get("items", [])
+    if not isinstance(items, list) or len(items) == 0:
+        return create_error_response(HTTPStatus.BAD_REQUEST, "items must be a non-empty list")
+
+    # Pre-parse & verify inputs; build immutable plan to avoid repeated dict lookups.
+    parsed: List[Tuple[str, Optional[str], str, SamplingParams, bool, int]] = []
+    # (req_id, lora_dir, prompt, sampling_params, return_details, index)
+    for idx, item in enumerate(items):
+        try:
+            lora_dir = item.get("lora_dir", None)
+            prompt = item["inputs"]
+            params_dict = dict(item["parameters"])  # shallow copy; we'll pop
+            return_details = bool(params_dict.pop("return_details", False))
+            sp = SamplingParams(**params_dict)
+            sp.verify()
+            req_id = item.get("req_id", uuid.uuid4().hex)
+            parsed.append((req_id, lora_dir, prompt, sp, return_details, idx))
+        except Exception as e:
+            return create_error_response(
+                HTTPStatus.BAD_REQUEST,
+                f"Invalid item at index {idx}: {e}"
+            )
+
+    # Helper: run one request to completion and return final payload
+    async def run_one(req_id: str,
+                      lora_dir: Optional[str],
+                      prompt: str,
+                      sp: SamplingParams,
+                      return_details: bool,
+                      index: int) -> Dict[str, Any]:
+        gen = httpserver_manager.generate(lora_dir, prompt, sp, req_id)
+
+        final_chunks: List[str] = []
+        count_output_tokens = 0
+        tokens: List[Dict[str, Any]] = []
+        feedback_triggered = False
+
+        async for request_output, metadata, finished, feedback_flag in gen:
+            count_output_tokens += 1
+            final_chunks.append(request_output)
+            feedback_triggered = feedback_triggered or bool(feedback_flag)
+            if return_details:
+                md = dict(metadata) if metadata is not None else {}
+                md["text"] = request_output
+                tokens.append(md)
+
+        result = {
+            "index": index,
+            "req_id": req_id,
+            "generated_text": "".join(final_chunks),
+            "count_output_tokens": count_output_tokens,
+        }
+        if feedback_triggered:
+            result["feedback"] = req_id
+        if return_details:
+            result["tokens"] = tokens
+        return result
+
+    # For abort-on-disconnect, track pending req_ids
+    pending_req_ids = {req_id for (req_id, *_rest) in parsed}
+
+    async def abort_all_pending():
+        # Called when client disconnects or stream ends unexpectedly
+        await asyncio.gather(*(httpserver_manager.abort(rid) for rid in list(pending_req_ids)), return_exceptions=True)
+
+    # Stream results as each task finishes (unordered by design)
+    async def stream_results() -> AsyncGenerator[bytes, None]:
+        tasks = [asyncio.create_task(run_one(*tup)) for tup in parsed]
+        try:
+            # While there are tasks, wait for whichever finishes first
+            while tasks:
+                # If client disconnected, abort immediately
+                if await raw_request.is_disconnected():
+                    await abort_all_pending()
+                    return
+
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+
+                # Emit all completed results
+                for t in done:
+                    try:
+                        payload = t.result()
+                        # Remove from pending set for abort
+                        pending_req_ids.discard(payload["req_id"])
+                        # SSE event
+                        yield ("data:" + json.dumps(payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+                    except Exception as e:
+                        # Emit an error event for this index (non-fatal for others)
+                        err_payload = {"error": str(e)}
+                        yield ("data:" + json.dumps(err_payload, ensure_ascii=False) + "\n\n").encode("utf-8")
+
+                tasks = list(pending)
+
+            # Send a final terminator event for clients that expect it (optional)
+            yield b"data:{\"finished\": true}\n\n"
+
+        finally:
+            # Safety net: if anything breaks mid-stream, abort leftovers
+            if pending_req_ids:
+                await abort_all_pending()
+
+    background_tasks = BackgroundTasks()
+    # Best-effort cleanup on disconnect (FastAPI won't call this automatically on SSE close, so we also check in loop)
+    background_tasks.add_task(lambda: None)
+
+    return StreamingResponse(
+        stream_results(),
+        media_type="text/event-stream",
+        background=background_tasks
     )
 
 
@@ -529,8 +651,6 @@ def main():
         finetuning_data_path=args.finetuning_config.get("finetuning_data_path", None)
     )
     if args.finetuning_config_path != "":
-        loop = asyncio.get_event_loop()
-        loop.create_task(httpserver_manager.finetuning_status_loop())
         if not launch_on_start:
             httpserver_manager.finetuning_finished = True
     pipe_router_reader, pipe_router_writer = mp.Pipe(duplex=False)

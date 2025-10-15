@@ -10,7 +10,7 @@ import time
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
-from ..io_struct import BatchStrOut, AbortReq, BatchAbortReq
+from ..io_struct import BatchStrOut, AbortReq, BatchAbortReq, FinetuneStatusReq
 from .feedback_collector import FeedbackCollector
 
 class HttpServerManager:
@@ -28,12 +28,9 @@ class HttpServerManager:
         finetuning_data_path=None,
         live_alignment=False
     ):
-        context = zmq.asyncio.Context(2)
+        context = zmq.asyncio.Context(3)
         self.send_to_router = context.socket(zmq.PUSH)
         self.send_to_router.connect(f"tcp://127.0.0.1:{router_port}")
-
-        self.recv_from_router = context.socket(zmq.PULL)
-        self.recv_from_router.connect(f"tcp://127.0.0.1:{router_port + 100}")
 
         self.recv_from_detokenization = context.socket(zmq.PULL)
         self.recv_from_detokenization.bind(f"tcp://127.0.0.1:{httpserver_port}")
@@ -91,6 +88,13 @@ class HttpServerManager:
             print(f"\033[34m[httpserver] {self._win_count} requests arrived in the 1s.\033[0m")
             self._t_begin = now
             self._win_count = 0  # current arrival is the new begin, not counted
+    
+    async def check_finetune_status_once(self) -> bool:
+        self.send_to_router.send_pyobj(FinetuneStatusReq())
+        await asyncio.sleep(1)
+        if self.finetuning_finished:
+            return True
+        return False
 
 
     async def generate(self, adapter_dir, prompt, sampling_params, request_id):
@@ -158,18 +162,11 @@ class HttpServerManager:
         except:
             pass
         return
-    
-    async def finetuning_status_loop(self):
-        while True:
-            await self.recv_from_router.recv_pyobj()
-            self.finetuning_finished = True
-            print("http: Finetuning is finished.")
-            break
 
     async def handle_loop(self):
         while True:
-            recv_ans:Union(BatchStrOut, BatchAbortReq) = await self.recv_from_detokenization.recv_pyobj()
-            assert isinstance(recv_ans, (BatchStrOut, BatchAbortReq)), f"error recv type {type(recv_ans)}"
+            recv_ans:Union(BatchStrOut, BatchAbortReq, FinetuneStatusReq) = await self.recv_from_detokenization.recv_pyobj()
+            assert isinstance(recv_ans, (BatchStrOut, BatchAbortReq, FinetuneStatusReq)), f"error recv type {type(recv_ans)}"
             if isinstance(recv_ans, BatchStrOut):
                 #print("httpserver: received out batch from detokenization")
                 for req_id, text, metadata, finished, abort in recv_ans.reqs_infs:
@@ -195,5 +192,7 @@ class HttpServerManager:
                         del self.req_id_to_out_inf[req_id]
                     except:
                         pass
+            elif isinstance(recv_ans, FinetuneStatusReq):
+                self.finetuning_finished = recv_ans.finished
 
         return

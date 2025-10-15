@@ -1,3 +1,5 @@
+import asyncio
+import time
 import uuid
 import numpy as np
 from typing import List, Optional
@@ -51,8 +53,7 @@ class Mixed_ReqQueue:
                  max_total_tokens: int,
                  batch_max_tokens: int,
                  running_max_req_size: int,
-                 finetune_params: FinetuneParams,
-                 finetuning_adapters_tracker):
+                 finetune_params: FinetuneParams):
         self.max_total_tokens = max_total_tokens #1024
         self.batch_max_tokens = batch_max_tokens
         self.running_max_req_size = running_max_req_size
@@ -66,7 +67,6 @@ class Mixed_ReqQueue:
         self.max_saved_finetuning_tokens = finetune_params.max_saved_finetuning_tokens  #max size of saved activations in memory
         self.max_finetuning_tokens_in_batch = finetune_params.max_finetuning_tokens_in_batch #max size of finetuning tokens in a forward batch
         self.total_epoch = finetune_params.num_epochs
-        self.finetuning_adapters_tracker = finetuning_adapters_tracker
         self.start_task= finetune_params.start_on_launch
         # tracker variables
         self.finetuning_tokens_in_memory = 0 #
@@ -77,10 +77,8 @@ class Mixed_ReqQueue:
         self.current_epoch = 0
         self.sample_index = 0
         self.last_index = 0
-        self.flag = True
-        # prepare size is the number of finetuning requests to load into cpu
-        # finetuning processed size is the number of requests being forwarded and waiting for backward 
-        
+        self.ttft_slo = 0.3 #s
+
         try: 
             self.tokenizer = get_tokenizer(finetune_params.model_weightdir, 
                                            finetune_params.tokenizor_mode, 
@@ -105,22 +103,27 @@ class Mixed_ReqQueue:
         print(f"Max saved finetuning tokens: {self.max_saved_finetuning_tokens}")
         print(f"batch max tokens: {self.batch_max_tokens}")
         self.prepare_finetuning_requests()
-        self.inference_req_count = -5
-
-    def is_heavy_loading(self):
-        #TODO : implement a better way to check if the queue is heavy loading
-        if len(self.waiting_req_list) > 100:
+        self.prefill_estimator = None
+        self.decode_estimator = None
+        self.last_req_time = None
+    
+    def ready_for_bwd(self):
+        if self.pending_bwd_tokens >= self.max_saved_finetuning_tokens:
+            return True
+        elif self.sample_index >= len(self.finetuning_req_list) and self.pending_bwd_tokens > 0:
             return True
         else:
             return False
 
+    def set_estimators(self, prefill_estimator, decode_estimator):
+        self.prefill_estimator = prefill_estimator
+        self.decode_estimator = decode_estimator
 
     def update_finetuning_status_after_fwd(self, batch: Batch):
         for req in batch.reqs:
             if req.is_finetuning:
                 self.pending_bwd_tokens += req.input_len
 
-    
 
     def update_finetuning_status_after_bwd(self, loss_list, num_processed_tokens):
         self.loss_list.extend(loss_list)
@@ -153,16 +156,15 @@ class Mixed_ReqQueue:
         else:
             print()
 
-    def finetuning_is_finished(self, sender=None):
-        if self.current_epoch >= self.total_epoch:
-            if sender is not None:
-                sender.send_pyobj(True)
+    def finetuning_is_finished(self):
+        if self.start_task == False:
             return True
-        else:
-            return False
+        return self.current_epoch >= self.total_epoch and self.pending_bwd_tokens == 0
         
 
     def append(self, req: Req):
+        #print(f"New request {req.request_id} with {req.input_len} tokens at time {req.arrival_time}")
+        self.last_req_time = req.arrival_time
         self.waiting_req_list.append(req)
 
     def prepare_finetuning_requests(self):
@@ -237,91 +239,101 @@ class Mixed_ReqQueue:
             return True
         else:
             return False
+    
+    def get_req_timestamps(self, can_run_list):
+        out = []
+        for req in can_run_list:
+            out.append(req.arrival_time)
+        return out
+
+    def get_earliest_req_time(self):
+        if len(self.waiting_req_list) == 0:
+            return time.time()
+        earliest_time = None
+        for req in self.waiting_req_list:
+            if req.arrival_time is not None:
+                if earliest_time is None or req.arrival_time < earliest_time:
+                    earliest_time = req.arrival_time
+        return earliest_time
 
     def update_counter(self, req: Req):
         pass
 
-    def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int]) -> Optional[Batch]:
-        """
-        Generates a new batch. Priority:
-          1) If inference requests exist in `self.waiting_req_list`, only fill them.
-          2) Otherwise, fill with fine-tuning requests from `self.finetuning_req_list`.
-        """
+    def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
         if current_batch is not None and len(current_batch.reqs) >= self.running_max_req_size:
             return None
-
-        if current_batch is not None:
-            return None
-
         self._init_cache_list(current_batch, lora_ranks)
         new_batch_total_tokens = 0
         can_run_list = []
         aborted_count = 0
-        # 1) If we have more than one inference requests, try them first
+        earliest_inf_arrival_time = None
         if len(self.waiting_req_list) > 0:
             for req in self.waiting_req_list:
-                if self.finetuning_adapters_tracker.get(req.adapter_dir) is False:
-                    print("Inference on finetuning adapter that is updating, skipping")
-                    continue
                 if req.aborted:
-                    print("Request aborted")
                     aborted_count += 1
                     continue
                 if (self._can_add_new_req(req, lora_ranks) and
                     (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
                     can_run_list.append(req)
+                    if req.arrival_time is not None:
+                        if earliest_inf_arrival_time is None or req.arrival_time < earliest_inf_arrival_time:
+                            earliest_inf_arrival_time = req.arrival_time
                     new_batch_total_tokens += req.input_len
                 else:
                     break
-        req_num = len(can_run_list)
-        self.inference_req_count += req_num
-        new_batch_inference_tokens = new_batch_total_tokens
         if len(can_run_list) > 0:
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
 
-        if self.start_task and len(self.finetuning_req_list)> 0 and self.finetuning_adapters_tracker.all_adapters_available():
-            new_batch_finetuning_tokens = 0
+        infer_tokens = new_batch_total_tokens
+        ft_tokens = 0
+        if self.start_task and len(self.finetuning_req_list)> 0 and not is_backward_running:
             self.last_index = self.sample_index
             for i in range(self.sample_index, len(self.finetuning_req_list)):
                 req = self.finetuning_req_list[i]
                 if new_batch_total_tokens + req.input_len > self.batch_max_tokens:
-                    #print("Batch max tokens exceeded, breaking")
+                    #print(f"Finetuning req {i} too large to fit in batch, stopping addition.")
                     break
-                if new_batch_finetuning_tokens + req.input_len > self.max_finetuning_tokens_in_batch:
-                    #print("Max finetuning tokens in batch exceeded, breaking")
+                if not self.prefill_estimator.can_add_ft(infer_tokens, ft_tokens, len(can_run_list), earliest_inf_arrival_time, req.input_len, self.ttft_slo):
+                    #print(f"Finetuning req {i} cannot be added due to SLO constraints, stopping addition.")
                     break
-                if self.pending_bwd_tokens + new_batch_finetuning_tokens + req.input_len > self.max_saved_finetuning_tokens:
-                    # if self.flag:
-                    #     print(f"self.pending_bwd_tokens: {self.pending_bwd_tokens}")
-                    self.flag = False
-                    #print("Max saved finetuning tokens exceeded, breaking")
-                    break
-                if new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len > new_batch_inference_tokens/4:
+                if self.pending_bwd_tokens + ft_tokens > self.max_saved_finetuning_tokens:
+                    #print(f"Finetuning req {i} cannot be added due to max saved tokens constraint, stopping addition.")
                     break
                 else:
                     can_run_list.append(req)
                     new_batch_total_tokens += req.input_len
-                    new_batch_finetuning_tokens += req.input_len
+                    ft_tokens += req.input_len
                     self.sample_index += 1
-                    self.flag = True
 
         if len(can_run_list) > 0:
-            infer_tokens = 0
-            finetune_tokens = 0
-            for req in can_run_list:
-                if req.is_finetuning:
-                    finetune_tokens += req.input_len
-                else:
-                    infer_tokens += req.input_len
-            unused = self.batch_max_tokens - (infer_tokens + finetune_tokens)
+            unused = self.batch_max_tokens - (infer_tokens + ft_tokens)
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
-            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
-            print(f"\033[34mPacked #inf: {req_num}, Pending #req: {len(self.waiting_req_list)}, Processed #inf: {self.inference_req_count}\033[0m")
+            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {ft_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
             print(f"\033[34mPending BWD token count: {self.pending_bwd_tokens}\033[0m")
+            print(f"\033[34mPending Inference requests: {len(self.waiting_req_list)}\033[0m")
+            predicted_duration = self.prefill_estimator.predict_coserving(N_inf=infer_tokens, N_ft=ft_tokens, B=len(can_run_list))
+            print(f"\033[34mPredicted prefill time for this batch: {predicted_duration:.3f}s\033[0m")
+            earliest_arrival_time = new_batch.get_earliest_arrival_time()   
+            if earliest_arrival_time is not None:
+                predicted_longest_ttft = time.time() +  predicted_duration - earliest_arrival_time
+                print(f"\033[34mPredicted longest TTFT if we add this batch: {predicted_longest_ttft:.3f}s\033[0m")
             return new_batch
         else:
             return None
 
+    async def check_will_starve(self, current_batch) -> bool:
+        if len(self.waiting_req_list) == 0:
+            await asyncio.sleep(0.01)  # Yield to the request handler loop
+        if len(self.waiting_req_list) > 0:
+            predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens(), len(current_batch.reqs))
+            predicted_next_checking_time = time.time() + predicted_next_decode_time
+            total_pending_inf_tokens = 0
+            for req in self.waiting_req_list:
+                total_pending_inf_tokens += req.input_len
+            predicted_next_prefill_time = self.prefill_estimator.predict_inference(total_pending_inf_tokens, len(self.waiting_req_list))
+            time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
+            return time_left < 0
+        return False
 
     def next_batch(self) -> Optional[Batch]:
         print("##### NEXT BATCH CALLED")

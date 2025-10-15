@@ -157,27 +157,27 @@ class UnifiedMemoryAllocator:
         self.shared_transformer_out_activations = None
         self.shared_attention_out_activations = None
         self.embedding_output = None
-        self.max_finetuning_tokens = 256
+        self.max_finetuning_tokens = 512
         self.init_shared_activation_memory()
         #self.activation_writer = ActivationWriter(self)
         self.saved_layer_0_activations = None
 
     def init_shared_activation_memory(self):
         self.shared_transformer_out_activations = [
-            torch.empty((self.max_finetuning_tokens, self.head_num * self.head_dim),
+            torch.zeros((self.max_finetuning_tokens, self.head_num * self.head_dim),
                          dtype=self.dtype, device=self.device)
             for _ in range(self.layer_num)
         ]
         self.shared_attention_out_activations = [
-            torch.empty((self.max_finetuning_tokens, self.head_num * self.head_dim),
+            torch.zeros((self.max_finetuning_tokens, self.head_num * self.head_dim),
                          dtype=self.dtype, device=self.device)
             for _ in range(self.layer_num)
         ]
-        self.embedding_output = torch.empty((self.max_finetuning_tokens, self.head_num * self.head_dim), 
-                                        dtype=self.dtype, device=self.device) 
+        self.embedding_output = torch.zeros((self.max_finetuning_tokens, self.head_num * self.head_dim),
+                                        dtype=self.dtype, device=self.device)
         
-        self.concat_input_ids = torch.empty(self.max_finetuning_tokens*2, dtype=torch.int64, device=self.device) 
-        self.logit_tensor = torch.empty((self.max_finetuning_tokens, self.vocab_size), dtype=self.dtype, device=self.device)
+        self.concat_input_ids = torch.zeros(self.max_finetuning_tokens*2, dtype=torch.int64, device=self.device) 
+        self.logit_tensor = torch.zeros((self.max_finetuning_tokens, self.vocab_size), dtype=self.dtype, device=self.device)
     
     def share_activation_dict(self):
         return {
@@ -198,7 +198,7 @@ class UnifiedMemoryAllocator:
                                          self.shared_transformer_out_activations[layer_id])
         requests_info_dict = {
             "request_token_info": self.request_token_info,
-            #"saved_layer_0_activations": self.saved_layer_0_activations,
+            "finetuning_logits_per_request": self.finetune_logits_per_request,
         }
         return requests_info_dict
 
@@ -209,12 +209,14 @@ class UnifiedMemoryAllocator:
         return self.concat_input_ids
     
     def write_to_logit_tensor(self, logits):
+        self.finetune_logits_per_request.extend(logits)
         accumlate_len = sum(self.request_token_info)
         for logit in logits:
             n = logit.size(0)
-            self.logit_tensor[accumlate_len:accumlate_len + n, :].copy_(logit)
+            #self.logit_tensor[accumlate_len:accumlate_len + n, :].copy_(logit)
             accumlate_len += n
             self.request_token_info.append(n)
+        #print(f"Logit tensor hash: {tensor_hash(self.logit_tensor[:accumlate_len])}", flush=True)
 
     def fill_activations_by_layer(self, layer_id, page_type, dest):
         if len(self.request_token_info) == 0:
@@ -690,14 +692,11 @@ class UnifiedMemoryAllocator:
         num_new_tokens = finetune_activations.shape[0]
         if vpids is None:
             # Allocate new pages
-            start = time.time()
             vpids = self.alloc(num_new_tokens, page_type)
-            print(f"[MEM MANAGER] ALLOC duration for {num_new_tokens} tokens: {time.time() - start}")
         else:
             # Reuse existing pages
             if len(vpids) != num_new_tokens:
                 raise ValueError(f"Expected {num_new_tokens} vpids, got {len(vpids)}")
-        start = time.time()
         self.pin_pages(vpids)  # Ensure pages are resident on GPU
         self.copy_rows_to_layer(layer_id, vpids, finetune_activations)
         self.unpin_pages(vpids)  # Unpin after copying

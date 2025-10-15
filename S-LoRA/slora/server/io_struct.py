@@ -23,6 +23,7 @@ class Req:
         self.text = text
         self.completion_mask = completion_mask
         self.label = label
+        self.arrival_time = None
 
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,
@@ -87,6 +88,20 @@ class Batch:
         self.adapter_dirs = set()
         for req in reqs:
             self.adapter_dirs.add(req.adapter_dir)
+    
+    def export_batch_info(self):
+        num_inf_reqs = 0
+        num_ft_reqs = 0
+        num_inf_tokens = 0
+        num_ft_tokens = 0
+        for req in self.reqs:
+            if req.is_finetuning:
+                num_ft_reqs += 1
+                num_ft_tokens += req.input_len
+            else:
+                num_inf_reqs += 1
+                num_inf_tokens += req.input_len
+        return num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens
 
     def input_tokens(self):
         batch_input_tokens = 0
@@ -99,6 +114,27 @@ class Batch:
             if not req.is_finetuning:
                 return True
         return False
+
+    def get_inference_token_num(self):
+        infer_tokens = 0
+        for req in self.reqs:
+            if not req.is_finetuning:
+                infer_tokens += req.input_len
+        return infer_tokens
+
+    def is_coserving_batch(self):
+        for req in self.reqs:
+            if req.is_finetuning:
+                return True
+        return False
+
+    def get_earliest_arrival_time(self):
+        earliest_time = None
+        for req in self.reqs:
+            if req.arrival_time is not None:
+                if earliest_time is None or req.arrival_time < earliest_time:
+                    earliest_time = req.arrival_time
+        return earliest_time
 
     def calcu_max_tokens(self):
         tokens = 0
@@ -178,6 +214,10 @@ class BatchStrOut:
 class AbortReq:
     def __init__(self, req_id):
         self.req_id = req_id
+
+class FinetuneStatusReq:
+    def __init__(self):
+        self.finished = False
 
 class BatchAbortReq:
     def __init__(self, req_ids):

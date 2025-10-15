@@ -78,7 +78,8 @@ class LlamaSFTBackwardService():
         self.weight_decay = weight_decay
         self.gamma = gamma
         self.current_epoch = 0
-
+        self.bwd_stream = None
+        self.bwd_pause_event = None
 
     def start_service(self):
         print("[BWD Process] Started.")
@@ -96,6 +97,7 @@ class LlamaSFTBackwardService():
             step_size=1,      # every epoch
             gamma=self.gamma        # multiply by 0.5
         )
+        self.bwd_stream = torch.cuda.Stream()
         self.send_pipe.send("READY")
         while True:
             if self.recv_pipe.poll():
@@ -108,15 +110,16 @@ class LlamaSFTBackwardService():
                         self.receive_requests_info(msg)
                         current_epoch = msg["current_epoch"]
                         print(f"[BWD Process] Received activations. Starting backward...")
-                        with torch.cuda.stream(torch.cuda.Stream()):
+                        self._maybe_pause(drain_stream=True)
+                        with torch.cuda.stream(self.bwd_stream):
                             start = time.time()
-                            ok, loss, ntok, grad_list = self._context_backward() 
+                            print("[BWD Process] Gradient computation started.")
+                            ok, loss, ntok = self._context_backward() 
                             print("[BWD Process] Gradient computation duration:", time.time() - start)
                             start = time.time()
                             self.finetuning_optimizer.step()
                             self.finetuning_optimizer.zero_grad(set_to_none=True)
                             if current_epoch > self.current_epoch:
-                                print("bwd process: finetuning scheduler step")
                                 self.finetuning_scheduler.step()
                                 self.current_epoch = current_epoch
                             print("[BWD Process] Parameter update duration:", time.time() - start)
@@ -165,6 +168,20 @@ class LlamaSFTBackwardService():
         self.activations = Activations()
         request_token_info = dict["request_token_info"]
         total_token_num = sum(request_token_info)
+        
+        self.activations.logit_list = []
+        # logit_tensor = self.shared_activations.logit_tensor[:total_token_num].detach().clone()
+        # for n in request_token_info:
+        #     logit = logit_tensor[:n, :]
+        #     #self.activations.logit_list.append(logit)
+        #     print(f"Logits shape: {logit.shape}")
+        #     logit_tensor = logit_tensor[n:, :]
+
+        finetuning_logits = dict["finetuning_logits_per_request"]
+        for logits in finetuning_logits:
+            self.activations.logit_list.append(logits.clone())
+
+        #print(f"[BWD Process] Total tokens in batch: {total_token_num}, requests: {len(request_token_info)}")
         self.activations.concat_input_ids = self.shared_activations.concat_input_ids[:total_token_num+len(request_token_info)].clone()
         self.activations.transformer_out_activations = []
         self.activations.attention_out_activations = []
@@ -173,25 +190,31 @@ class LlamaSFTBackwardService():
             self.activations.attention_out_activations.append(self.shared_activations.attention_out_activations[i][:total_token_num].float())
         self.activations.input_layer_output = self.shared_activations.input_layer_output[:total_token_num].float()
 
-        logit_tensor = self.shared_activations.logit_tensor[:total_token_num].detach().clone()
-        self.activations.logit_list = []
-        for n in request_token_info:
-            self.activations.logit_list.append(logit_tensor[:n, :])
-            logit_tensor = logit_tensor[n:, :]
+        #print(f"Logit tensor hash: {tensor_hash(logit_tensor)}", flush=True)
+        
         return
+
+    def _maybe_pause(self, drain_stream=True):
+        # If bwd_pause_event is missing or set → keep going
+        if getattr(self, "bwd_pause_event", None) is None or self.bwd_pause_event.is_set():
+            return
+        if drain_stream and self.bwd_stream is not None:
+            self.bwd_stream.synchronize()
+        # Block here until resume
+        while not self.bwd_pause_event.is_set():
+            time.sleep(0.1)
 
     def _context_backward(self):
         logits_and_targets, total_tokens_to_process, batch_seq_lens = self.get_logits_and_targets()
-        logit_grad = self._logit_backward(logits_and_targets)
         loss = self.compute_total_loss(logits_and_targets)
         print(f"\033[92mBackward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}\033[0m", flush=True)
+        logit_grad = self._logit_backward(logits_and_targets)
+        self._maybe_pause(drain_stream=True)
         grad_transformer_out = self._post_layer_backward(logit_grad, self.model_weights.pre_post_weight)
-        adapter_grad_list = []
         for i in reversed(range(self.num_layers)):
-            grad_transformer_out, adapter_grad = self._lora_context_backward(i, grad_transformer_out, batch_seq_lens)
-            adapter_grad_list.append(adapter_grad)
-        adapter_grad_list.reverse()
-        return True, loss, total_tokens_to_process, adapter_grad_list
+            self._maybe_pause(drain_stream=True)
+            grad_transformer_out = self._lora_context_backward(i, grad_transformer_out, batch_seq_lens)
+        return True, loss, total_tokens_to_process
 
     def get_logits_and_targets(self):
         logits_list = self.activations.logit_list
@@ -292,9 +315,9 @@ class LlamaSFTBackwardService():
         else:
             last_layer_input = self.activations.transformer_out_activations[layer_id-1]    # shape [N, D]
         # Backprop through LoRA
-        
-        grad_attn_input, adapter_grad = self._backpop_attention(last_layer_input, grad_ffn_input, layer_weight, layer_id, batch_seq_lens)
-        return grad_attn_input, adapter_grad
+        self._maybe_pause(drain_stream=False)
+        grad_attn_input = self._backpop_attention(last_layer_input, grad_ffn_input, layer_weight, layer_id, batch_seq_lens)
+        return grad_attn_input
     
     # Backprop through the LoRA augmented attention block, only this function uses the autograd of pytorch
     def _backpop_attention(self,
@@ -303,10 +326,11 @@ class LlamaSFTBackwardService():
                        layer_weight: LlamaTransformerLayerWeight,
                        layer_id: int,
                        batch_seq_lens: torch.Tensor):
-
+        # https://github.com/benfred/py-spy
         # Build *flattened* position index for **all** tokens in this micro‑batch
+        device = last_layer_input.device
         position_ids = torch.cat([
-            torch.arange(0, batch_seq_lens[i], device=batch_seq_lens.device)
+            torch.arange(0, batch_seq_lens[i], device=device)
             for i in range(len(batch_seq_lens))
         ])
         position_cos = self.model_weights._cos_cached.index_select(0, position_ids)  # [T, D/2]
@@ -320,9 +344,9 @@ class LlamaSFTBackwardService():
         w_v = layer_weight.v_weight_.float()
         w_o = layer_weight.o_weight_.float()
         w_attn_norm = layer_weight.att_norm_weight_.float()
-        
+
         # -------------------- 1️⃣  RMSNorm (x → x_norm) -----------------------
-        last_layer_input_leaf = last_layer_input.float().detach().clone().requires_grad_()
+        last_layer_input_leaf = last_layer_input.float().detach().requires_grad_()
         x_norm = rmsnorm_forward(last_layer_input_leaf, w_attn_norm, eps=self.eps_)
 
          # -------------------- 2️⃣  LoRA weight materialisation -----------------
@@ -331,7 +355,8 @@ class LlamaSFTBackwardService():
         H, Hd = w_combined.shape[2], w_combined.shape[3]
 
         # To use autograd: create *leaf* clones so autograd tracks them separately
-        w_combined_leaf = w_combined.detach().clone().requires_grad_()
+        # w_combined_leaf = w_combined.detach().clone().requires_grad_()
+        w_combined_leaf = w_combined
         # Unpack the packed [2,4r,H,Hd] tensor into the individual A/B matrices.
         # Shapes follow the original LoRA paper:  A is [D,r]  and  B is [r,D].
         qA = w_combined_leaf[0, 0 : r].reshape(r, -1).T
@@ -343,12 +368,11 @@ class LlamaSFTBackwardService():
         oA = w_combined_leaf[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
         oB = w_combined_leaf[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
          # To use autograd: Leaf clone of x_norm so we get ∂L/∂x_norm later 
-        x_norm_leaf = x_norm.detach().clone().requires_grad_()
+        x_norm_leaf = x_norm.detach().requires_grad_()
 
          # Helper: apply LoRA projection  x · A · B  * α/r ----------------------
         def proj_lora(x, A, B):
-            output = torch.mm(x, A)
-            output = torch.mm(output, B).mul_(self.adapter_weights.scaling)
+            output = torch.mm(torch.mm(x, A), B).mul_(self.adapter_weights.scaling)
             return output
 
          # Helper: *PyTorch* reference rotary embedding:
@@ -389,7 +413,8 @@ class LlamaSFTBackwardService():
         B = batch_seq_lens.shape[0]
         scale = 1.0 / (Hd ** 0.5)
 
-        b_start_loc = torch.cat([torch.tensor([0], device=batch_seq_lens.device), batch_seq_lens.cumsum(dim=0)[:-1]])
+        b_start_loc = torch.cat([torch.tensor([0], device=device), batch_seq_lens.cumsum(dim=0)[:-1]])
+
         for i in range(B):
             st, ln = b_start_loc[i], batch_seq_lens[i]
             q_blk  = qh[st:st+ln].transpose(0, 1)          # [H,L,D]
@@ -426,9 +451,10 @@ class LlamaSFTBackwardService():
                 g.mul_(max_norm / (grad_norm + 1e-6))
 
         # now copy into the fp32 master copy
-        #lora_weight.w_combined_home_fp32.grad = g.to(device=lora_weight.w_combined_home_fp32.device)
-        self.adapter_weights.lora_weights[layer_id].grad = g
-        return last_layer_input_leaf.grad, g
+        #self.adapter_weights.lora_weights[layer_id].grad = g
+        return last_layer_input_leaf.grad
+
+
 
     # Backprop through the FFN sub-block of a transformer layer
     def _backprop_ffn(

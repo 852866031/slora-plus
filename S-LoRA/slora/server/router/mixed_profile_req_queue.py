@@ -193,7 +193,7 @@ class MixedProfile_ReqQueue:
     def prepare_inference_requests(self):
         inference_only_requests_list = []
         mixed_requests_list = []
-        for _ in range(15):
+        for _ in range(3):
             req_1, req_2 = generate_dual_inference_req(
                 adapter_dir=self.inference_adapter_dir,
                 length=inference_requests_length_default,

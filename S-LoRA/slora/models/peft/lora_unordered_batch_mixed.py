@@ -82,12 +82,12 @@ class LoraUnorderedBatchMixed:
             b_start_loc, # the start index of each request
             b_seq_len, # the current length of each request
             finetune_mask,
-            interrupt_flag,
             is_prefill=True,
             use_bmm=True,
             no_lora_compute=False,
             ref_mask = None,
-            no_lora_copy=False):
+            no_lora_copy=False,
+            prefill_interrupt_event=None,):
 
         # Notice that batch_lora only support decoding
         assert len(b_loc) == len(b_start_loc) == len(b_seq_len)
@@ -104,7 +104,7 @@ class LoraUnorderedBatchMixed:
             out = self._prefill(batch_size, total_token_num, max_len_in_batch,
                                     input_ids,
                                     b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, 
-                                    finetune_mask, ref_mask, no_lora_compute, interrupt_flag=interrupt_flag)
+                                    finetune_mask, ref_mask, no_lora_compute, prefill_interrupt_event)
             return out
         else:
             for _ in range(3):
@@ -119,7 +119,8 @@ class LoraUnorderedBatchMixed:
     # Prefill functions for inference and finetuning
     def _prefill(self, batch_size, total_token_num, max_len_in_batch,
                  input_ids,
-                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, finetune_mask, ref_mask, no_lora_compute=False, interrupt_flag=None):
+                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len, finetune_mask, ref_mask,
+                   no_lora_compute=False, prefill_interrupt_event=None):
 
         infer_state = self.base_model.infer_state_class()
         infer_state.is_prefill = True
@@ -183,8 +184,7 @@ class LoraUnorderedBatchMixed:
         infer_state.prefill_value_buffer = torch.empty(
                 (infer_state.total_token_num, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
                 dtype=torch.float16, device="cuda")
-        predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, 
-                                               interrupt_flag=interrupt_flag, nr_finetuning_reqs=nr_finetuning_reqs, finetuning_start=finetuning_start)
+        predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, prefill_interrupt_event=prefill_interrupt_event)
         return predict_logics       
 
     def save_finetune_activations_to_buffer(self, layer_id, input_embs, infer_state):
@@ -233,41 +233,38 @@ class LoraUnorderedBatchMixed:
             else:
                 infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
 
+    def interrupt_and_clean(self, prefill_interrupt_event, infer_state, FFN_input_vpids=None, attention_input_vpids=None):
+        if prefill_interrupt_event is not None and prefill_interrupt_event.is_set():
+            print("Prefill interrupted!")
+            vpids_to_free = (FFN_input_vpids or []) + (attention_input_vpids or [])
+            if vpids_to_free:
+                infer_state.alt_mem_manager.free(vpids_to_free)
+            return True
+        return False
     
     @final
-    def _context_forward(self, input_ids, infer_state, no_lora_compute=False, interrupt_flag=None, nr_finetuning_reqs=0, finetuning_start=None):
-        if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
-            print(f"\033[91mReceive interrupt before forward starts\033[0m")
-            interrupt_flag[0] = False
-            self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
-            return None
+    def _context_forward(self, input_ids, infer_state, no_lora_compute=False, prefill_interrupt_event=None):
         cuda_input_ids = input_ids
         input_embs = self.base_model.pre_infer.context_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
-
+        if self.interrupt_and_clean(prefill_interrupt_event, infer_state): return None
         if torch.any(infer_state.finetune_mask):
             infer_state.alt_mem_manager.save_embedding_output(input_embs, infer_state)
-            #infer_state.alt_mem_manager.activation_writer.enqueue(-1, input_embs, infer_state, None)
-
         FFN_input_vpids = None
         attention_input_vpids = None
         for i in range(self.base_model.layers_num):
             input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-            if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
-                print(f"\033[91mReceive interrupt after transformer layer {i}\033[0m")
-                interrupt_flag[0] = False
-                self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
-                return None
+            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): return None
             if torch.any(infer_state.finetune_mask):
                 FFN_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
                                                                             PageType.FFN_INPUT_ACTIVATION, FFN_input_vpids)
-                #infer_state.alt_mem_manager.activation_writer.enqueue(i, input_embs, infer_state, PageType.FFN_INPUT_ACTIVATION)
             self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])
+            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): return None
             if torch.any(infer_state.finetune_mask):
                 attention_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
                                                                             PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
-                #infer_state.alt_mem_manager.activation_writer.enqueue(i, input_embs, infer_state, PageType.ATTENTION_INPUT_ACTIVATION)
         # Post processing
+        if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): return None
         if infer_state.ref_mask is not None:
             predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
                     input_embs, infer_state, self.base_model.pre_post_weight)
@@ -283,12 +280,7 @@ class LoraUnorderedBatchMixed:
         return predict_logics
 
     @final
-    def _context_forward_slora(self, input_ids, infer_state, no_lora_compute=False, interrupt_flag=None, nr_finetuning_reqs=0):
-        if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
-            print(f"\033[91mReceive interrupt before forward starts\033[0m")
-            interrupt_flag[0] = False
-            self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
-            return None
+    def _context_forward_slora(self, input_ids, infer_state, no_lora_compute=False, nr_finetuning_reqs=0):
         self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
         cuda_input_ids = input_ids
         rprint("Input ids shape", cuda_input_ids.shape)
@@ -297,20 +289,10 @@ class LoraUnorderedBatchMixed:
         if torch.any(infer_state.finetune_mask):
                 self.save_input_layer_output_to_buffer(input_embs, infer_state)
 
-        if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
-            print(f"\033[91mReceive interrupt after input layer\033[0m")
-            interrupt_flag[0] = False
-            self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
-            return None
         FFN_input_vpids = None
         attention_input_vpids = None
         for i in range(self.base_model.layers_num):
             input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-            if interrupt_flag[0] and nr_finetuning_reqs==infer_state.batch_size:
-                print(f"\033[91mReceive interrupt after transformer layer {i}\033[0m")
-                interrupt_flag[0] = False
-                self.rewind_finetune_progress(nr_finetuning_reqs, infer_state)
-                return None
             if torch.any(infer_state.finetune_mask):
                 self.save_ffn_input_to_buffer(i, input_embs, infer_state)
             self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])

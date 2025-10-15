@@ -20,10 +20,10 @@ import matplotlib.pyplot as plt
 DEFAULTS = {
     "server": "http://localhost:8000",
     "warmup": 5,
-    "requests_per_second": 5,
-    "duration_seconds": 20,
-    "prompt_length": 30, #1:2
-    "max_new_tokens": 30,
+    "requests_per_second": 8,
+    "duration_seconds": 5,
+    "prompt_length": 50, #1:2
+    "max_new_tokens": 20,
     "max_wait": 120.0,          # wait for server up
     "ft_poll_interval": 3.0,    # poll /finetuning_status every N seconds
     "ft_max_wait": 60.0,      # max time to wait for finetuning to finish

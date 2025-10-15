@@ -1,5 +1,8 @@
 import asyncio
 from multiprocessing.dummy import Pipe
+import multiprocessing as mp
+import threading
+
 import numpy as np
 import rpyc
 from slora.models.llama.SFT_service import LlamaSFTBackwardService
@@ -68,7 +71,6 @@ class ModelRpcServer(rpyc.Service):
 
         self.cache = {}
         self.original_weights = {}
-        self.interrupt_flag = [False]
         self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
         self.enable_unified_mem_manager = enable_unified_mem_manager
 
@@ -157,20 +159,27 @@ class ModelRpcServer(rpyc.Service):
             #     gamma=input_params.finetuning_params.gamma        # multiply by 0.5
             # )
             self.backward_service = None
+            self.bwd_pause_event = None
             if True:
                 rpc_recv, bwd_send = Pipe()
                 bwd_recv, rpc_send = Pipe()
+                self.bwd_pause_event = mp.Event()
+                self.bwd_pause_event.set()   # set = RUNNING; clear = PAUSED
+
                 backward_service_obj = LlamaSFTBackwardService(
                     self.model.config, bwd_recv, bwd_send,
                     lr=input_params.finetuning_params.learning_rate,
                     weight_decay=input_params.finetuning_params.weight_decay,
                     gamma=input_params.finetuning_params.gamma
                 )
+                backward_service_obj.bwd_pause_event = self.bwd_pause_event
                 backward_service_obj.receive_model_dict(self.model.export_model_dict())
                 self.rpc_recv = rpc_recv
                 self.rpc_send = rpc_send
                 self.backward_service = Process(target=backward_service_obj.start_service, daemon=True)
+                os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "30"
                 self.backward_service.start()
+                os.environ.pop("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", None)
                 self.rpc_send.send(self.finetuning_adapter.load_gpu_fp32_dict())
                 self.rpc_send.send(self.model.alt_mem_manager.share_activation_dict())
                 self.rpc_recv.recv()
@@ -209,16 +218,7 @@ class ModelRpcServer(rpyc.Service):
                 self.infer_adapter_alt = None
         ''' finish init adapters '''
         set_random_seed(2147483647)
-        self.forward_stream = torch.cuda.Stream(device='cuda', priority=-1)
         return
-
-    def is_interrupted(self):
-        return self.interrupt_flag[0]
-    
-    def reset_interrupted(self):
-        self.interrupt_flag[0] = False
-        return
-
 
     @torch.no_grad()
     def exposed_load_adapters(self, adapter_dirs, prefetch=False):
@@ -251,15 +251,6 @@ class ModelRpcServer(rpyc.Service):
             for adapter_dir, id in self.adapter_id.items():
                 if adapter_dir is not None and adapter_dir not in reserve_dirs:
                     self.adapters[id].offload_from_gpu()
-    
-    @torch.no_grad()
-    def offload_finetuning_adapter(self):
-        return
-        finetuning_adapter_dirs = [self.finetuning_adapter.lora_dir]
-        if self.enable_unified_mem_manager:
-            self.infer_adapter_alt.offload_target_adapters(finetuning_adapter_dirs)
-        else:
-            self.infer_adapter.offload_target_adapters(finetuning_adapter_dirs)
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_add_batch(self, batch_id, reqs, dtype):
@@ -281,18 +272,8 @@ class ModelRpcServer(rpyc.Service):
     
     # @calculate_time(show=True, min_cost_ms=300)
     # @calculate_time(show=True, min_cost_ms=0)
-    def exposed_prefill_batch(self, batch_id):
-        return self.forward(batch_id, is_prefill=True)
-
-    def exposed_back_batch(self, separate_steps, current_epoch):
-        if current_epoch > self.current_epoch:
-            #print("model_rpc: finetuning scheduler step")
-            #self.finetuning_scheduler.step()
-            self.current_epoch = current_epoch
-        result = self.backward(separate_steps)
-        if current_epoch == self.total_epochs -1 and self.input_params.finetuning_params.finetuning_type == "Alignment":
-            self.model.backward_engine.print_reset_log()
-        return result
+    def exposed_prefill_batch(self, batch_id, prefill_interrupt_event=None):
+        return self.forward(batch_id, is_prefill=True, prefill_interrupt_event=prefill_interrupt_event)
 
     # @calculate_time(show=True, min_cost_ms=200)
     # @calculate_time(show=True, min_cost_ms=0)
@@ -326,8 +307,8 @@ class ModelRpcServer(rpyc.Service):
         del batch
         # torch.cuda.empty_cache()
         return
-    
-    def forward(self, batch_id, is_prefill):
+
+    def forward(self, batch_id, is_prefill, prefill_interrupt_event=None):
         batch: InferBatch = self.cache.pop(batch_id)
         # print(batch.requests)
         # print([req["request_id"] for req in batch.requests])
@@ -375,10 +356,10 @@ class ModelRpcServer(rpyc.Service):
                         infer_adapter_alt=self.infer_adapter_alt,
                         finetuning_adapter=self.finetuning_adapter,
                         enable_unified_mem_manager=self.enable_unified_mem_manager)
-                kwargs["interrupt_flag"] = self.interrupt_flag
                 kwargs["finetune_mask"] = batch.finetune_mask
                 kwargs["b_loc_key"] = batch.nopad_b_loc_key
                 kwargs["b_loc_value"] = batch.nopad_b_loc_value
+                kwargs["prefill_interrupt_event"] = prefill_interrupt_event
                 if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
                     kwargs["ref_mask"] = batch.ref_mask
             else:
@@ -475,24 +456,24 @@ class ModelRpcServer(rpyc.Service):
                     print(f"but w_combined_home_fp32 does not has NaN/Inf")
                 break   
             
-      
+    def exposed_back_batch(self, current_epoch):
+        self.current_epoch = current_epoch
+        result = self.backward()
+        if current_epoch == self.total_epochs -1 and self.input_params.finetuning_params.finetuning_type == "Alignment":
+            self.model.backward_engine.print_reset_log()
+        return result
     
-    def backward_load_adapter(self):
-        self.exposed_load_adapters([self.finetuning_adapter.lora_dir])
-        if self.finetuning_adapter.layers[0].w_combined is None:
-            print("Loading backward adapter to GPU")
-            self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=False)
-
-    def backward_compute_grad(self):
+    def backward(self):
         start = time.time()
         if self.backward_service is not None:
             requests_info_dict = self.model.alt_mem_manager.export_requests_info()
             requests_info_dict["current_epoch"] = self.current_epoch
+            print("send backward request to bwd process")
             self.rpc_send.send(requests_info_dict)
             finished, loss, total_token_processed = self.rpc_recv.recv()
+            print(f"backward done, cost {time.time()-start:.2f}s")
         else:
             finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
-        print("Gradient Computation duration:", time.time()-start)
         if finished:
             if self.enable_unified_mem_manager:
                 self.model.alt_mem_manager.reset_activation_pool()
@@ -501,182 +482,13 @@ class ModelRpcServer(rpyc.Service):
             return True, loss, total_token_processed
         else:
             return False, None, None
-        
 
-    def backward_optimizer_step(self):
-        start = time.time()
-        self.finetuning_optimizer.step() 
-        self.finetuning_optimizer.zero_grad(set_to_none=True)
-        self.finetuning_adapter.unpack_all_combined_weights()
-        print("Parameter update duration:", time.time()-start)
-        self.check_adapter_update()
+    def exposed_pause_backward(self):
+        self.bwd_pause_event.clear()
+
+    def exposed_resume_backward(self):
+        self.bwd_pause_event.set()
     
-    def backward(self, separate_steps=False):
-        '''
-        There is only two scenarios for resuming:
-        If broken at point 1 or point 2, we need to perform all step 1, 2 ,3 (possibly backward engine perform its own resume)
-        if broken at point 3, we need to perform step 3 only
-        separate_steps is used to decide if we want to return after step 2 and execute step 3 in the next call
-        '''
-        if self.input_params.finetuning_params.optimizer_threading:
-            return self.backward_with_optimizer_threading()
-        if self.backward_status == BackwardResumePoint.OPTIMIZER:
-            # step 3
-            print("\033[91mResume from Backward Step 3\033[0m")
-            self.backward_optimizer_step()
-            self.offload_finetuning_adapter()
-            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-            return True, self.model.backward_engine.saved_loss, self.model.backward_engine.saved_total_tokens_to_process
-        elif self.backward_status == BackwardResumePoint.BEFORE_OPTIMIZER:
-            print("\033[91mStart from Backward Step 1\033[0m")
-             # step 1
-            self.backward_load_adapter()
-            if self.is_interrupted() == True: 
-                print("\033[91mReceive interrupt after gradient computation, offloading adapter\033[0m")
-                self.offload_finetuning_adapter()
-                self.reset_interrupted()
-                self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-                return False, None, None
-            # step 2
-            finished, loss, total_token_processed = self.backward_compute_grad()
-            if not finished:
-                print("\033[91mReceive interrupt during gradient computation\033[0m")
-                self.offload_finetuning_adapter()
-                self.reset_interrupted()
-                self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-                return False, None, None
-            if separate_steps == True:
-                print("\033[91mSeparate gradient and optimizer, returning\033[0m")
-                self.offload_finetuning_adapter()
-                self.reset_interrupted()
-                self.backward_status = BackwardResumePoint.OPTIMIZER
-                return False, None, None
-            if self.is_interrupted() == True:
-                print("\033[91mReceive interrupt after gradient computation, skipping parameter update\033[0m")
-                self.offload_finetuning_adapter()
-                self.reset_interrupted()
-                self.backward_status = BackwardResumePoint.OPTIMIZER
-                return False, None, None
-            # step 3
-            self.backward_optimizer_step()
-            self.offload_finetuning_adapter()
-            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER #reset to default
-            return (True, loss, total_token_processed)
-
-    def backward_with_optimizer_threading(self):
-        print("\033[91mRunning Backward with Optimizer Threading\033[0m")
-        finished, loss, total_token_processed = self.backward_compute_grad()
-        if not finished:
-            print("\033[91mReceive interrupt during gradient computation\033[0m")
-            self.offload_finetuning_adapter()
-            self.reset_interrupted()
-            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-            return False, None, None
-        else:
-            #self.finetuning_optimizer_worker.enqueue([])
-            #self.offload_finetuning_adapter()
-            self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
-            return (True, loss, total_token_processed)
-
-
-
-    def _profile_adapter_prefill(self, adapter, batch_size, max_input_len):
-        engine = LoraUnorderedBatchInfer(self.model, [adapter]*batch_size, infer_adapter=self.infer_adapter)
-        self._profile_prefill(batch_size, max_input_len, adapter_engine=engine, rank_size=adapter.r)
-    
-    def _profile_prefill(self, batch_size, max_input_len, adapter_engine=None, rank_size=None):
-        # warm up
-        input_len = max_input_len
-        test_data = np.vstack([np.arange(1, input_len+1) for _ in range(batch_size)])
-        test_data = test_data.reshape(-1)
-        test_data = torch.from_numpy(test_data).cuda()
-        engine = self.model if adapter_engine is None else adapter_engine
-
-        
-        b_loc = torch.zeros(batch_size, input_len, dtype=torch.long, device="cuda")
-        b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        for i in range(batch_size):
-            b_loc[i, 0:input_len] = i * input_len + torch.arange(0, input_len, dtype=torch.int32, device="cuda")
-            b_start_loc[i] = i * input_len
-            b_seq_len[i] = input_len
-
-        total_token_num = input_len * batch_size
-        logics = engine.forward(batch_size, 
-                                    total_token_num, 
-                                    input_len, 
-                                    test_data,
-                                    b_loc,
-                                    b_start_loc,
-                                    b_seq_len,
-                                    is_prefill=True)
-        prob_out = torch.softmax(logics, dim=-1)
-        predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
-        predict_ids = predict_ids.detach().cpu().numpy()
-        
-        max_len_in_batch = input_len
-        for i in range(batch_size):
-            self.model.mem_manager.free(b_loc[i, max_len_in_batch - b_seq_len[i]:max_len_in_batch])
-            
-        b_loc = None
-        b_start_loc = None
-        b_seq_len = None
-        
-        import torch.distributed as dist
-        dist.barrier()
-        torch.cuda.synchronize()
-
-        prefill_start_time = time.time()
-
-        b_loc = torch.zeros(batch_size, input_len, dtype=torch.long, device="cuda")
-        b_start_loc = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        b_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        for i in range(batch_size):
-            b_start_loc[i] = i * input_len
-            b_seq_len[i] = input_len
-
-        total_token_num = batch_size * input_len
-        logics = engine.forward(batch_size, total_token_num, input_len, test_data,
-                                                    b_loc, b_start_loc, b_seq_len, is_prefill=True)
-        prob_out = torch.softmax(logics, dim=-1)
-        predict_ids = torch.argmax(prob_out, dim=1, keepdim=True)
-        predict_ids = predict_ids.detach().cpu().numpy()
-
-        torch.cuda.synchronize()
-        if adapter_engine is None:
-            self.base_prefill[batch_size][input_len] = time.time() - prefill_start_time
-        else:
-            self.adapter_prefill[rank_size][batch_size][input_len] = time.time() - prefill_start_time
-        
-        max_len_in_batch = input_len
-        for i in range(batch_size):
-            self.model.mem_manager.free(b_loc[i, max_len_in_batch - b_seq_len[i]:max_len_in_batch])
-        
-        return
-    
-    def exposed_profile_prefill(self):
-        max_bs = self.model.mem_manager.tot_size // 2048
-        print(max_bs)
-        max_input_len = 1024
-        self.base_prefill = defaultdict(dict)
-        self.adapter_prefill = defaultdict(dict)
-        for adapter in self.adapters:
-            if adapter is None:
-                continue
-            if adapter.r in self.adapter_prefill:
-                continue
-            else:
-                self.adapter_prefill[adapter.r] = defaultdict(dict)
-                self.infer_adapter.load_adapters([adapter], prefetch=False)
-                torch.cuda.synchronize()
-                for bs in range(2, max_bs+1, 2):
-                    for input_len in tqdm(range(32, max_input_len+1, 32), desc=f"profile prefill bs={bs}, adapter={adapter.r}"):
-                        if bs not in self.base_prefill or input_len not in self.base_prefill[bs]:
-                            self._profile_prefill(bs, input_len)
-                        self._profile_adapter_prefill(adapter, bs, input_len)
-                self.infer_adapter.offload_adapters([])
-        return self.base_prefill, self.adapter_prefill
-
     def exposed_unmerge_adapter(self):
         print("len adapters:", len(self.infer_adapter.adapter_dirs))
         assert len(self.infer_adapter.adapter_dirs) == 1
@@ -716,12 +528,13 @@ class ModelRpcClient:
             self._prefill_batch = async_wrap(self.model.prefill_batch)
 
             self._back_batch = async_wrap(self.model.back_batch)
+            self._pause_backward = async_wrap(self.model.pause_backward)
+            self._resume_backward = async_wrap(self.model.resume_backward)
 
             self._decode_batch = async_wrap(self.model.decode_batch)
             self._filter_batch = async_wrap(self.model.filter_batch)
             self._merge_batch = async_wrap(self.model.merge_batch)
             self._remove_batch = async_wrap(self.model.remove_batch)
-            self._profile_prefill = async_wrap(self.model.profile_prefill)
         else:
             self._init_model = self.model.exposed_init_model
             self._load_adapters = self.model.exposed_load_adapters
@@ -732,12 +545,13 @@ class ModelRpcClient:
             self._prefill_batch = self.model.exposed_prefill_batch
 
             self._back_batch = self.model.exposed_back_batch
+            self._pause_backward = self.model.exposed_pause_backward
+            self._resume_backward = self.model.exposed_resume_backward
             
             self._decode_batch = self.model.exposed_decode_batch
             self._filter_batch = self.model.exposed_filter_batch
             self._merge_batch = self.model.exposed_merge_batch
             self._remove_batch = self.model.exposed_remove_batch
-            self._profile_prefill = self.model.exposed_profile_prefill
         return
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
@@ -756,9 +570,6 @@ class ModelRpcClient:
             return
         else:
             return
-
-    def interrupt(self):
-        self.model.interrupt_flag[0] = True
 
     async def load_adapters(self, reqs, prefetch=False):
         self._load_adapters(reqs, prefetch=prefetch)
@@ -782,21 +593,21 @@ class ModelRpcClient:
         else:
             return
 
-    async def prefill_batch(self, batch_id):
-        ans = self._prefill_batch(batch_id)
-        if self.use_rpc:
-            return await ans
-        else:
-            return ans
-    
-    # async def prefill_batch(self, batch_id):
+    # async def prefill_batch(self, batch_id, prefill_interrupt_event=None):
+    #     ans = self._prefill_batch(batch_id, prefill_interrupt_event)
     #     if self.use_rpc:
-    #         ans = self._prefill_batch(batch_id)
     #         return await ans
     #     else:
-    #         # run blocking call in a thread
-    #         loop = asyncio.get_running_loop()
-    #         return await loop.run_in_executor(None, self._prefill_batch, batch_id)
+    #         return ans
+    
+    async def prefill_batch(self, batch_id, prefill_interrupt_event=None):
+        if self.use_rpc:
+            ans = self._prefill_batch(batch_id, prefill_interrupt_event)
+            return await ans
+        else:
+            # run blocking call in a thread
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(None, self._prefill_batch, batch_id, prefill_interrupt_event)
 
     # async def back_batch(self):
     #     ans = self._back_batch()
@@ -805,21 +616,35 @@ class ModelRpcClient:
     #     else:
     #         return ans
         
-    async def back_batch(self, separate_steps, current_epoch):
-        if self.model.interrupt_flag[0] == True:
-            print("Receive interrupt, skipping backward")
-            self.model.reset_interrupted()
-            return False, None, None
+    async def back_batch(self, current_epoch):
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._back_batch, separate_steps, current_epoch)
+        return await loop.run_in_executor(None, self._back_batch, current_epoch)
     
-    def back_batch_threading(self, separate_steps, current_epoch):
-        if self.model.interrupt_flag[0] == True:
-            print("Receive interrupt, skipping backward")
-            self.model.reset_interrupted()
-            return False, None, None
+    def back_batch_threading(self, current_epoch):
         loop = asyncio.get_running_loop()
-        return loop.run_in_executor(None, self._back_batch, separate_steps, current_epoch)
+        return loop.run_in_executor(None, self._back_batch, current_epoch)
+
+    async def pause_backward(self):
+        if self.use_rpc:
+            ans = self._pause_backward()
+            return await ans
+            
+        else:
+            return self._pause_backward()
+
+    async def resume_backward(self):
+        if self.use_rpc:
+            ans = self._resume_backward()
+            return await ans
+        else:
+            return self._resume_backward()
+    
+    def reset_activation_pool(self):
+        if self.model.enable_unified_mem_manager:
+            self.model.model.alt_mem_manager.reset_activation_pool()
+        else:
+            self.model.model.mem_manager.reset_activation_pool()
+        return
 
     async def decode_batch(self, batch_id):
         ans = self._decode_batch(batch_id)
@@ -852,13 +677,6 @@ class ModelRpcClient:
         else:
             return
     
-    async def profile_prefill(self):
-        ans = self._profile_prefill()
-        if self.use_rpc:
-            return await ans
-        else:
-            return ans
-
 
 def _init_env(port):
     from rpyc.utils.server import ThreadedServer
