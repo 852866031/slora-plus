@@ -121,7 +121,6 @@ class MixedProfile_ReqQueue:
                  batch_max_tokens: int,
                  running_max_req_size: int,
                  finetune_params: FinetuneParams,
-                 finetuning_adapters_tracker,
                  inference_adapter_dir: str):
         self.max_total_tokens = max_total_tokens #1024
         self.batch_max_tokens = batch_max_tokens
@@ -138,7 +137,6 @@ class MixedProfile_ReqQueue:
         self.max_saved_finetuning_tokens = finetune_params.max_saved_finetuning_tokens  #max size of saved activations in memory
         self.max_finetuning_tokens_in_batch = finetune_params.max_finetuning_tokens_in_batch #max size of finetuning tokens in a forward batch
         self.total_epoch = finetune_params.num_epochs
-        self.finetuning_adapters_tracker = finetuning_adapters_tracker
         self.start_task= finetune_params.start_on_launch
         # tracker variables
         self.finetuning_tokens_in_memory = 0 #
@@ -426,7 +424,7 @@ class MixedProfile_ReqQueue:
 
     def add_finetuning_req(self, new_batch_total_tokens, can_run_list):
         new_batch_inference_tokens=new_batch_total_tokens
-        if len(self.finetuning_req_list)> 0 and self.finetuning_adapters_tracker.all_adapters_available():
+        if len(self.finetuning_req_list)> 0:
             new_batch_finetuning_tokens = 0
             self.last_index = self.sample_index
             for i in range(self.sample_index, len(self.finetuning_req_list)):

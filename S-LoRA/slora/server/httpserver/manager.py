@@ -85,7 +85,6 @@ class HttpServerManager:
             self._win_count += 1
         else:
             # Window elapsed: report and start a new window with THIS arrival as begin
-            print(f"\033[34m[httpserver] {self._win_count} requests arrived in the 1s.\033[0m")
             self._t_begin = now
             self._win_count = 0  # current arrival is the new begin, not counted
     
@@ -137,7 +136,7 @@ class HttpServerManager:
             if request_id not in self.req_id_to_out_inf:
                 yield "", {}, -1, False
                 break
-            out_str, metadata, finished, _ = self.req_id_to_out_inf[request_id]
+            out_str, metadata, finished, _, perf_metrics = self.req_id_to_out_inf[request_id]
             if feedback:
                 if out_str == "\n":
                     out_str = "\\n"
@@ -145,7 +144,7 @@ class HttpServerManager:
             if len(metadata) != 0:
                 self.req_id_to_out_inf[request_id] = ("", {}, finished, event)
                 metadata["prompt_tokens"] = prompt_tokens
-                yield out_str, metadata, finished, feedback
+                yield out_str, metadata, finished, feedback, perf_metrics
             if finished:
                 try:
                     del self.req_id_to_out_inf[request_id]
@@ -169,7 +168,7 @@ class HttpServerManager:
             assert isinstance(recv_ans, (BatchStrOut, BatchAbortReq, FinetuneStatusReq)), f"error recv type {type(recv_ans)}"
             if isinstance(recv_ans, BatchStrOut):
                 #print("httpserver: received out batch from detokenization")
-                for req_id, text, metadata, finished, abort in recv_ans.reqs_infs:
+                for req_id, text, metadata, finished, abort, perf_metrics in recv_ans.reqs_infs:
                     try:
                         if not abort:
                             _, _, _, event = self.req_id_to_out_inf[req_id]
@@ -178,6 +177,7 @@ class HttpServerManager:
                                 metadata,
                                 finished,
                                 event,
+                                perf_metrics
                             )
                             event.set()
                         else:

@@ -1,6 +1,15 @@
-# orchestrate_benchmark.py
-from __future__ import annotations
+#!/usr/bin/env python3
+"""
+Benchmark orchestrator (consumer) that sends requests to a running server
+following a given timeline.csv file.
 
+Each row in timeline.csv specifies:
+  timestamp_s, prompt_length, max_new_tokens, second, index_in_second
+
+Requests are scheduled according to 'timestamp_s' (relative seconds since t=0).
+"""
+
+from __future__ import annotations
 import argparse
 import asyncio
 import json
@@ -14,19 +23,15 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import aiohttp
-import matplotlib.pyplot as plt
+import pandas as pd
 
 # ---------------- Defaults ----------------
 DEFAULTS = {
     "server": "http://localhost:8000",
-    "warmup": 5,
-    "requests_per_second": 8,
-    "duration_seconds": 5,
-    "prompt_length": 50, #1:2
-    "max_new_tokens": 20,
-    "max_wait": 120.0,          # wait for server up
-    "ft_poll_interval": 3.0,    # poll /finetuning_status every N seconds
-    "ft_max_wait": 60.0,      # max time to wait for finetuning to finish
+    "timeline_csv": "timeline.csv",  # NEW — use timeline.csv
+    "max_wait": 120.0,
+    "ft_poll_interval": 3.0,
+    "ft_max_wait": 60.0,
 }
 
 base_model = "huggyllama/llama-7b"
@@ -45,6 +50,7 @@ def generate_random_sentence(length: int) -> str:
 
 # ---------------- Request building ----------------
 def make_payload(prompt: str, max_new_tokens: int) -> Dict:
+    """Build JSON payload for /generate."""
     return {
         "model_dir": base_model,
         "lora_dir": DEFAULT_LORA,
@@ -57,29 +63,27 @@ def make_payload(prompt: str, max_new_tokens: int) -> Dict:
     }
 
 
-def prepare_schedule_rps(
-    requests_per_second: int,
-    duration_seconds: int,
-    prompt_length: int,
-    max_new_tokens: int,
-) -> List[Tuple[int, float, Dict]]:
-    """Precompute schedule for constant RPS load."""
-    rps = max(0, int(requests_per_second))
-    dur = max(0, int(duration_seconds))
-    items: List[Tuple[int, float, Dict]] = []
-    idx = 0
+# ---------------- Load schedule from CSV ----------------
+def load_schedule_from_csv(csv_path: str) -> List[Tuple[int, float, Dict]]:
+    """
+    Load timeline.csv and build (idx, t_off, payload) list for run_schedule().
+    Columns required: timestamp_s, prompt_length, max_new_tokens
+    """
+    df = pd.read_csv(csv_path)
+    if not all(col in df.columns for col in ["timestamp_s", "prompt_length", "max_new_tokens"]):
+        raise ValueError("timeline.csv missing required columns.")
 
-    for s in range(dur):
-        if rps == 0:
-            continue
-        for i in range(rps):
-            t_off = s + (i / rps) # time offset in seconds
-            prompt = generate_random_sentence(prompt_length)
-            items.append((idx, float(t_off), make_payload(prompt, max_new_tokens)))
-            idx += 1
+    schedule = []
+    for idx, row in enumerate(df.itertuples(index=False)):
+        t_off = float(row.timestamp_s)
+        prompt_len = int(row.prompt_length)
+        max_new = int(row.max_new_tokens)
+        prompt = generate_random_sentence(prompt_len)
+        schedule.append((idx, t_off, make_payload(prompt, max_new)))
 
-    items.sort(key=lambda x: x[1])
-    return items
+    schedule.sort(key=lambda x: x[1])
+    print(f"[orchestrator] Loaded {len(schedule)} requests from {csv_path}")
+    return schedule
 
 
 # ---------------- HTTP helpers ----------------
@@ -121,10 +125,6 @@ async def wait_for_finetuning(
     poll_interval_s: float = DEFAULTS["ft_poll_interval"],
     max_wait_s: float = DEFAULTS["ft_max_wait"],
 ) -> None:
-    """
-    Poll POST /finetuning_status every `poll_interval_s` seconds until JSON {"finished":"true"}.
-    API returns HTTP 200 for both finished and not finished.
-    """
     url = f"{server.rstrip('/')}/finetuning_status"
     t0 = time.time()
     n = 0
@@ -159,11 +159,11 @@ async def send_one(
     idx: int,
     payload: Dict,
     t0_ref: float,
-) -> Tuple[int, float, float, str]:
+) -> Tuple[int, float, float, str, float | None, float | None, float | None]:
     """
-    Return (idx, t_rel, latency, status)
-      t_rel   = time.monotonic() - t0_ref at the moment we send the request
-      latency = wall time to get the full response
+    Return (idx, t_rel, latency, status, ttft, avg_tbt, worst_tbt)
+      t_rel   = time.monotonic() - t0_ref at send time
+      latency = total response time
     """
     url = f"{server.rstrip('/')}/generate"
     t_send = time.monotonic()
@@ -172,37 +172,37 @@ async def send_one(
         async with session.post(url, json=payload) as resp:
             body = await resp.read()
             latency = time.monotonic() - t_send
+            ttft = avg_tbt = worst_tbt = None
             try:
                 data = json.loads(body)
+                ttft = data.get("ttft")
+                avg_tbt = data.get("avg_tbt")
+                worst_tbt = data.get("worst_tbt")
                 out = data.get("generated_text", ["<no-text>"])[0]
             except Exception:
                 out = body.decode(errors="replace")
-            print(f"[req {idx:04d}] @{t_rel:6.3f}s  {latency*1000:7.1f} ms", flush=True)
-            return (idx, t_rel, latency, "ok")
+
+            # print(
+            #     f"[req {idx:04d}] @{t_rel:6.3f}s  {latency*1000:7.1f} ms",
+            #     end="",
+            # )
+            # if ttft is not None:
+            #     print(f" ttft:{ttft*1000:7.1f} ms, avg_tbt:{(avg_tbt or 0)*1000:7.1f} ms, worst_tbt:{(worst_tbt or 0)*1000:7.1f} ms",flush=True,)
+            # else:
+            #     print(" (no timing info)", flush=True)
+
+            return (idx, t_rel, latency, "ok", ttft, avg_tbt, worst_tbt)
     except Exception as e:
         latency = time.monotonic() - t_send
-        print(f"[req {idx:04d}] @{t_rel:6.3f}s  FAILED after {latency*1000:7.1f} ms: {e}", flush=True)
-        return (idx, t_rel, latency, "err")
-
-
-async def warmup(server: str, n: int, prompt_length: int, max_new_tokens: int) -> None:
-    print(f"[orchestrator] Warmup: sending {n} requests…")
-    async with aiohttp.ClientSession(headers={"User-Agent": "OrchestratorWarmup"}) as session:
-        tasks = [
-            send_one(session, server, i, make_payload(generate_random_sentence(prompt_length), max_new_tokens), time.monotonic())
-            for i in range(n)
-        ]
-        await asyncio.gather(*tasks)
-    print("[orchestrator] Warmup done ✅")
+        #print(f"[req {idx:04d}] @{t_rel:6.3f}s  FAILED after {latency*1000:7.1f} ms: {e}", flush=True)
+        return (idx, t_rel, latency, "err", None, None, None)
 
 
 # ---------------- concurrent schedule with exact due-times ----------------
 async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> List[Tuple[int, float, float, str]]:
     """
     Execute the precomputed schedule with precise arrival times.
-    All requests share a common start time (t0 = time.monotonic()) and each
-    task sleeps until its absolute due time (t0 + t_off) before POSTing.
-    Prints progress whenever a request finishes.
+    Each task sleeps until its absolute due time (t0 + t_off) before POSTing.
     """
     if not schedule:
         return []
@@ -210,21 +210,17 @@ async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> 
     total = len(schedule)
     finished_count = 0
     lock = asyncio.Lock()
-
     t0 = time.monotonic()
+
     async with aiohttp.ClientSession(headers={"User-Agent": "OrchestratorLoad"}) as session:
         async def fire_at(idx: int, t_off: float, payload: Dict):
             nonlocal finished_count
             delay = (t0 + t_off) - time.monotonic()
-            # did we consider the case delay < 0?, print something and check it
             if delay > 0:
                 await asyncio.sleep(delay)
             result = await send_one(session, server, idx, payload, t0)
-
-            # update finished count safely
             async with lock:
                 finished_count += 1
-                print(f"[progress] Finished {finished_count}/{total} requests", flush=True)
             return result
 
         tasks = [asyncio.create_task(fire_at(idx, t_off, payload)) for idx, t_off, payload in schedule]
@@ -232,121 +228,102 @@ async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> 
 
     return results
 
+
 # ---------------- Process control ----------------
-def launch_server(requests_per_second: int, duration_seconds: int, enable_finetuning: bool):
-    """Launch server wrapped with Nsight Systems."""
+def launch_server(enable_finetuning: bool):
     import subprocess
-
-    nsys_output = (
-        f"nsys_report_rps{requests_per_second}"
-        f"_dur{duration_seconds}s"
-    )
-
-    cmd = [
-        sys.executable, "launch_server.py", "--nsys-output", nsys_output,
-    ]
+    cmd = [sys.executable, "launch_server.py"]
     if enable_finetuning:
         cmd.append("--enable-finetuning")
-    print(f"[orchestrator] Launching server with Nsight:\n  {' '.join(cmd)}")
+    print(f"[orchestrator] Launching server:\n  {' '.join(cmd)}")
     proc = subprocess.Popen(cmd, preexec_fn=os.setsid)
-    return proc, nsys_output
+    return proc
 
 
 def kill_server(proc) -> None:
-    """
-    Stop the launched server as if Ctrl-C was pressed.
-    Sends SIGINT to the process group, then escalates if needed.
-    """
+    """Gracefully stop launched server."""
     try:
         pgid = os.getpgid(proc.pid)
     except Exception:
         pgid = None
-
-    # Step 1: send Ctrl-C (SIGINT) to entire process group
     try:
         if pgid:
             os.killpg(pgid, signal.SIGINT)
         else:
             proc.send_signal(signal.SIGINT)
-    except Exception:
-        pass
-
-    # Step 2: wait a bit for graceful shutdown
-    try:
-        proc.wait(timeout=20)
-        return
-    except Exception:
-        pass
-
-    # Step 3: escalate to SIGTERM
-    try:
-        if pgid:
-            os.killpg(pgid, signal.SIGTERM)
-        else:
-            proc.terminate()
-    except Exception:
-        pass
-    try:
         proc.wait(timeout=10)
-        return
-    except Exception:
-        pass
-
-    # Step 4: final resort SIGKILL
-    try:
-        if pgid:
-            os.killpg(pgid, signal.SIGKILL)
-        else:
-            proc.kill()
     except Exception:
         pass
 
 
+# ---------------- Summaries ----------------
 def summarize(results) -> None:
-    lat_ok = [lat for (_i, _t, lat, st) in results if st == "ok"]
-    lat_all = [lat for (_i, _t, lat, _st) in results]
-    if not lat_all:
+    """
+    Works with either:
+      (idx, t_rel, latency, status)
+    or
+      (idx, t_rel, latency, status, ttft, avg_tbt, worst_tbt)
+    """
+    if not results:
         print("[orchestrator] No results collected.")
         return
 
-    def pct(vals, p):
-        vals = sorted(vals)
-        k = int((p / 100.0) * (len(vals) - 1))
-        return vals[k]
+    # indices: 0 idx, 1 t_rel, 2 latency, 3 status, 4 ttft, 5 avg_tbt, 6 worst_tbt
+    lat_ok = [r[2] for r in results if len(r) >= 4 and r[3] == "ok"]
+    if not lat_ok:
+        print("[orchestrator] No successful requests.")
+        return
 
     print("\n== Latency Summary ==")
-    print(f"Requests (ok/total): {len(lat_ok)}/{len(lat_all)}")
-    if lat_ok:
-        print(f"Mean    : {sum(lat_ok)/len(lat_ok):.4f} s")
-        print(f"P50/P90 : {pct(lat_ok,50):.4f} / {pct(lat_ok,90):.4f} s")
-        print(f"Min/Max : {min(lat_ok):.4f} / {max(lat_ok):.4f} s")
+    print(f"Requests (ok/total): {len(lat_ok)}/{len(results)}")
+    print(f"Mean    : {np.mean(lat_ok):.4f} s")
+    print(f"P50/P90 : {np.percentile(lat_ok,50):.4f} / {np.percentile(lat_ok,90):.4f} s")
+    print(f"Min/Max : {np.min(lat_ok):.4f} / {np.max(lat_ok):.4f} s")
+
+    # Optional: summarize ttft / avg_tbt / worst_tbt if present
+    if any(len(r) >= 7 for r in results):
+        ttft_ok      = [r[4] for r in results if len(r) >= 7 and r[3] == "ok" and r[4] is not None]
+        avg_tbt_ok   = [r[5] for r in results if len(r) >= 7 and r[3] == "ok" and r[5] is not None]
+        worst_tbt_ok = [r[6] for r in results if len(r) >= 7 and r[3] == "ok" and r[6] is not None]
+
+        if ttft_ok:
+            print("\n-- TTFT (s) --")
+            print(f"Mean {np.mean(ttft_ok):.4f} | P50 {np.percentile(ttft_ok,50):.4f} | P90 {np.percentile(ttft_ok,90):.4f}")
+        if avg_tbt_ok:
+            print("-- Avg TBT (s) --")
+            print(f"Mean {np.mean(avg_tbt_ok):.4f} | P50 {np.percentile(avg_tbt_ok,50):.4f} | P90 {np.percentile(avg_tbt_ok,90):.4f}")
+        if worst_tbt_ok:
+            print("-- Worst TBT (s) --")
+            print(f"Mean {np.mean(worst_tbt_ok):.4f} | P50 {np.percentile(worst_tbt_ok,50):.4f} | P90 {np.percentile(worst_tbt_ok,90):.4f}")
 
 
-# ---------------- Artifacts: CSV + plot ----------------
 def write_latency_csv(results, out_stem: str) -> Path:
+    """
+    Save detailed latency metrics to CSV.
+    Columns:
+      idx,t_rel_s,latency_s,status,ttft_s,avg_tbt_s,worst_tbt_s
+    """
     path = Path(f"{out_stem}.csv").resolve()
     with path.open("w") as f:
-        f.write("idx,t_rel_s,latency_s,status\n")
-        for idx, t_rel, lat, st in results:
-            f.write(f"{idx},{t_rel:.6f},{lat:.6f},{st}\n")
+        f.write("idx,t_rel_s,latency_s,status,ttft_s,avg_tbt_s,worst_tbt_s\n")
+        for idx, t_rel, lat, st, ttft, avg_tbt, worst_tbt in results:
+            ttft = "" if ttft is None else f"{ttft:.6f}"
+            avg_tbt = "" if avg_tbt is None else f"{avg_tbt:.6f}"
+            worst_tbt = "" if worst_tbt is None else f"{worst_tbt:.6f}"
+            f.write(f"{idx},{t_rel:.6f},{lat:.6f},{st},{ttft},{avg_tbt},{worst_tbt}\n")
+
     print(f"[orchestrator] Wrote CSV: {path}")
     return path
 
+
 # ---------------- Main ----------------
 async def main():
-    ap = argparse.ArgumentParser(description="Launch server (nsys), warm up, then constant RPS load.")
+    ap = argparse.ArgumentParser(description="Replay requests from timeline.csv against a server.")
     ap.add_argument("--server", default=DEFAULTS["server"])
-    ap.add_argument("--warmup", type=int, default=DEFAULTS["warmup"])
-    ap.add_argument("--requests-per-second", type=int, default=DEFAULTS["requests_per_second"])
-    ap.add_argument("--duration-seconds", type=int, default=DEFAULTS["duration_seconds"])
-    ap.add_argument("--prompt-length", type=int, default=DEFAULTS["prompt_length"])
-    ap.add_argument("--max-new-tokens", type=int, default=DEFAULTS["max_new_tokens"])
+    ap.add_argument("--timeline-csv", default=DEFAULTS["timeline_csv"])
     ap.add_argument("--max-wait", type=float, default=DEFAULTS["max_wait"])
-    ap.add_argument("--ft-poll-interval", type=float, default=DEFAULTS["ft_poll_interval"])
-    ap.add_argument("--ft-max-wait", type=float, default=DEFAULTS["ft_max_wait"])
     ap.add_argument("--co", action="store_true")
     ap.add_argument("--inf", action="store_true")
-    ap.add_argument("--enable-finetuning", action="store_true")
     ap.add_argument("--enable_nsys", action="store_true", help="Launch server with Nsight Systems")
     args = ap.parse_args()
 
@@ -355,56 +332,27 @@ async def main():
     elif args.inf:
         args.enable_finetuning = False
 
-    schedule = prepare_schedule_rps(
-        requests_per_second=args.requests_per_second,
-        duration_seconds=args.duration_seconds,
-        prompt_length=args.prompt_length,
-        max_new_tokens=args.max_new_tokens,
-    )
-    print(f"[orchestrator] Prepared {len(schedule)} requests at {args.requests_per_second} RPS "
-          f"for {args.duration_seconds}s.")
+    schedule = load_schedule_from_csv(args.timeline_csv)
+    print(f"[orchestrator] Schedule loaded: {len(schedule)} requests from {args.timeline_csv}")
 
-    proc, nsys_output = launch_server(
-        args.requests_per_second, args.duration_seconds, args.enable_finetuning
-    )
-    nsys_rep = Path(f"{nsys_output}.nsys-rep").resolve()
+    proc = launch_server(args.enable_finetuning)
 
     try:
         await wait_for_server(args.server, max_wait_s=args.max_wait)
-
-        # (No finetuning wait here)
-        #await warmup(args.server, args.warmup, args.prompt_length, args.max_new_tokens)
         results = await run_schedule(args.server, schedule)
-        summarize(results)
-
-        await wait_for_finetuning(
-            args.server,
-            poll_interval_s=args.ft_poll_interval,
-            max_wait_s=args.ft_max_wait,
-        )
-
-        # artifacts
-        if args.enable_finetuning:
-            out_stem = "latency_co-serving"
-        else:
-            out_stem = "latency_inference"
-        write_latency_csv(results, out_stem)
-
+        await wait_for_finetuning(args.server)
     finally:
         print("[orchestrator] Stopping server…")
         kill_server(proc)
-        if args.enable_nsys:
-            time.sleep(8)
-            if nsys_rep.exists():
-                print(f"\n✅ Nsight Systems report: {nsys_rep}")
-            else:
-                print(f"\n⚠️  Nsight report not found yet. Expected: {nsys_rep}")
+        summarize(results)
+        out_stem = "latency_co-serving" if args.enable_finetuning else "latency_inference"
+        write_latency_csv(results, out_stem)
         print("[orchestrator] Done.")
-        os.system("pkill -f nsys")
 
 
 if __name__ == "__main__":
     try:
+        import numpy as np
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n[orchestrator] Interrupted — exiting…", flush=True)

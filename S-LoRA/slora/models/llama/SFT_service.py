@@ -25,6 +25,12 @@ from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_f
 from slora.common.basemodel import PostLayerInferTpl
 from slora.server.router.mixed_req_queue import rprint
 
+def bwd_print(*args, sep=' ', end='\n'):
+    color = "\033[35m"
+    RESET = "\033[0m"
+    text = sep.join(str(arg) for arg in args)
+    print(f"{color}[BWD]: {text}{RESET}", end=end)
+
 class BaseModelWeights():
     def __init__(self):
         self.pre_post_weight = None
@@ -80,9 +86,10 @@ class LlamaSFTBackwardService():
         self.current_epoch = 0
         self.bwd_stream = None
         self.bwd_pause_event = None
+        self.working = False
 
     def start_service(self):
-        print("[BWD Process] Started.")
+        bwd_print("Started.")
         msg = self.recv_pipe.recv()
         self.receive_adapter(msg)
         msg = self.recv_pipe.recv()
@@ -103,36 +110,34 @@ class LlamaSFTBackwardService():
             if self.recv_pipe.poll():
                 msg = self.recv_pipe.recv()
                 if msg == "EXIT":
-                    print("[BWD Process] Shutting down.")
+                    bwd_print("Shutting down.")
                     break
                 elif isinstance(msg, dict):
                     try:
                         self.receive_requests_info(msg)
                         current_epoch = msg["current_epoch"]
-                        print(f"[BWD Process] Received activations. Starting backward...")
+                        bwd_print(f"Received activations. Starting backward...")
+                        self.working = True
                         self._maybe_pause(drain_stream=True)
                         with torch.cuda.stream(self.bwd_stream):
                             start = time.time()
-                            print("[BWD Process] Gradient computation started.")
                             ok, loss, ntok = self._context_backward() 
-                            print("[BWD Process] Gradient computation duration:", time.time() - start)
-                            start = time.time()
                             self.finetuning_optimizer.step()
                             self.finetuning_optimizer.zero_grad(set_to_none=True)
                             if current_epoch > self.current_epoch:
                                 self.finetuning_scheduler.step()
                                 self.current_epoch = current_epoch
-                            print("[BWD Process] Parameter update duration:", time.time() - start)
                             self.send_pipe.send((ok, loss, ntok))
-                        print(f"[BWD Process] Backward completed. Tokens={ntok}, Loss={loss:.6f}")
+                        bwd_print(f"Backward completed, duration {time.time()-start:.2f}s")
+                        self.working = False
                     
                     except Exception as e:
                         import traceback
                         tb = traceback.format_exc()
                         self.send_pipe.send({"error": str(e), "traceback": tb})
-                        print(f"[BWD Process] Backward failed with error: {e}\n{tb}")
+                        bwd_print(f"Backward failed with error: {e}\n{tb}")
             else:
-                time.sleep(0.01)  # yield to CPU, avoid busy wait
+                time.sleep(0.1)  # yield to CPU, avoid busy wait
     
 
     def receive_model_dict(self, model_dict):
@@ -140,7 +145,6 @@ class LlamaSFTBackwardService():
         self.model_weights.trans_layers_weight = model_dict["trans_layers_weight"][:]
         self.model_weights._cos_cached = model_dict["_cos_cached"]
         self.model_weights._sin_cached = model_dict["_sin_cached"]
-        print(f"[BWD Process] Received model weights.")
         return
 
     def receive_adapter(self, adapter_dict):
@@ -201,13 +205,15 @@ class LlamaSFTBackwardService():
         if drain_stream and self.bwd_stream is not None:
             self.bwd_stream.synchronize()
         # Block here until resume
+        if self.working: bwd_print("Paused")
         while not self.bwd_pause_event.is_set():
             time.sleep(0.1)
+        if self.working: bwd_print("Resumed")
 
     def _context_backward(self):
         logits_and_targets, total_tokens_to_process, batch_seq_lens = self.get_logits_and_targets()
         loss = self.compute_total_loss(logits_and_targets)
-        print(f"\033[92mBackward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}\033[0m", flush=True)
+        bwd_print(f"Backward Total Tokens: {total_tokens_to_process}, Loss: {loss:.12f}")
         logit_grad = self._logit_backward(logits_and_targets)
         self._maybe_pause(drain_stream=True)
         grad_transformer_out = self._post_layer_backward(logit_grad, self.model_weights.pre_post_weight)

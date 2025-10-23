@@ -49,27 +49,6 @@ def _random_sentence(num_words: int) -> str:
 
 # ---------------------- Main Class ----------------------
 class ProfilingBatchGenerator:
-    """
-    Generate **5 inference-only** batches and **3 co-serving** batches with exact token totals
-    by slicing from a pre-tokenized long sequence. This guarantees that the sum of
-    `prompt_ids` lengths matches the requested budgets *after* tokenization.
-
-    Constraints:
-        - Per-batch token budget is exact (no soft caps):
-            INF-only totals: [500, 1000, 1500, 2000, 2450]
-            Co-serving (N_inf, N_ft): [(2200, 300), (1800, 300), (1200, 200)]
-        - For co-serving: N_inf > 5 * N_ft (strictly enforced by construction).
-
-    Public API:
-        - inference_batches: List[Batch]
-        - coserving_batches: List[Batch]
-
-    Usage:
-        gen = BatchExperimentGenerator(...)
-        gen.prepare()
-        for b in gen.inference_batches: ...
-        for b in gen.coserving_batches: ...
-    """
 
     def __init__(
         self,
@@ -164,7 +143,6 @@ class ProfilingBatchGenerator:
         for L in lengths:
             ids = self._take_slice(L)
             reqs.append(self._new_infer_req_from_ids(ids, max_new_tokens=2))
-        self._print_batch_layout(reqs, budget=total_tokens, max_ft=0)
         return Batch(uuid.uuid4().hex, reqs)
 
     def _build_coserve_batch_exact(self, n_inf: int, n_ft: int) -> Batch:
@@ -187,7 +165,6 @@ class ProfilingBatchGenerator:
         ft_tokens = sum(r.input_len for r in reqs if r.is_finetuning)
         assert infer_tokens == n_inf and ft_tokens == n_ft, "Exact totals must match"
 
-        self._print_batch_layout(reqs, budget=n_inf + n_ft, max_ft=n_ft)
         return Batch(uuid.uuid4().hex, reqs)
 
     # ---------------------- Partitioning ----------------------
@@ -233,15 +210,6 @@ class ProfilingBatchGenerator:
             is_finetuning=True,
             needs_to_notify_detokenize=False,
             text=text,
-        )
-
-    # ---------------------- Printing ----------------------
-    def _print_batch_layout(self, reqs: List[Req], budget: int, max_ft: int = 0):
-        infer_tokens = sum(r.input_len for r in reqs if not r.is_finetuning)
-        finetune_tokens = sum(r.input_len for r in reqs if r.is_finetuning)
-        unused = budget - (infer_tokens + finetune_tokens)
-        print(
-            f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {max_ft}) / {unused} unused] \033[0m"
         )
 
 

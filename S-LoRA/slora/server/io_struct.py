@@ -24,6 +24,25 @@ class Req:
         self.completion_mask = completion_mask
         self.label = label
         self.arrival_time = None
+        self.time_between_tokens = []
+        self.last_token_time = None
+        self.time_to_first_token = None
+    
+    def avg_tbt(self):
+        if len(self.time_between_tokens) == 0:
+            return 0.0
+        return sum(self.time_between_tokens) / len(self.time_between_tokens)
+
+    def worst_tbt(self):
+        if len(self.time_between_tokens) == 0:
+            return 0.0
+        return max(self.time_between_tokens)
+    
+    def export_perf_metrics(self):
+        return (self.time_to_first_token, self.avg_tbt(), self.worst_tbt())
+    
+    def avg_tbt_if_next_token(self, time):
+        return (sum(self.time_between_tokens) + time) / (len(self.time_between_tokens) + 1)
 
     def to_rpc_obj(self):
         return {"adapter_dir": self.adapter_dir,
@@ -88,7 +107,31 @@ class Batch:
         self.adapter_dirs = set()
         for req in reqs:
             self.adapter_dirs.add(req.adapter_dir)
-    
+        
+    def record_token_time(self, decode_end_time):
+        for req in self.reqs:
+            if not req.is_finetuning:
+                req.time_between_tokens.append(decode_end_time - req.last_token_time)
+                req.last_token_time = decode_end_time
+
+    def record_time_to_first_token(self, prefill_end_time):
+        for req in self.reqs:
+            if not req.is_finetuning and req.time_to_first_token is None:
+                req.time_to_first_token = prefill_end_time - req.arrival_time
+                if req.last_token_time is None:
+                    req.last_token_time = prefill_end_time
+
+    def get_req_with_worst_avg_tbt(self):
+        worst_req = None
+        worst_avg_tbt = -1.0
+        for req in self.reqs:
+            if not req.is_finetuning:
+                avg_tbt = req.avg_tbt()
+                if avg_tbt > worst_avg_tbt:
+                    worst_avg_tbt = avg_tbt
+                    worst_req = req
+        return worst_req
+  
     def export_batch_info(self):
         num_inf_reqs = 0
         num_ft_reqs = 0
@@ -205,11 +248,13 @@ class Batch:
         
 class BatchTokenIdOut:
     def __init__(self):
-        self.reqs_infs: List[Tuple[str, int, Dict, bool, bool]] = []  # [req_id, new_token_id, gen_metadata, finished_state, abort_state]
+        self.reqs_infs: List[Tuple[str, int, Dict, bool, bool, Tuple[float, float, float]]] = []  
+        # [req_id, new_token_id, gen_metadata, finished_state, abort_state, perf_metrics]
 
 class BatchStrOut:
     def __init__(self):
-        self.reqs_infs: List[Tuple[str, str, Dict, bool, bool]] = [] # [req_id, token_str, gen_metadata, finished_state, abort_state]
+        self.reqs_infs: List[Tuple[str, str, Dict, bool, bool, Tuple[float, float, float]]] = [] 
+        # [req_id, token_str, gen_metadata, finished_state, abort_state, perf_metrics]
         
 class AbortReq:
     def __init__(self, req_id):

@@ -53,7 +53,7 @@ class DeTokenizationManager:
                         
                 if isinstance(recv_obj, BatchTokenIdOut):
                     new_batch_str_out = BatchStrOut()
-                    for req_id, new_token_id, new_gen_metadata, finished, abort in recv_obj.reqs_infs:
+                    for req_id, new_token_id, new_gen_metadata, finished, abort, perf_metrics in recv_obj.reqs_infs:
                         if req_id not in self.req_id_to_out:
                             print(f"detoken process has exception, req_id {req_id} not in req_id_to_out")
                             continue
@@ -65,9 +65,8 @@ class DeTokenizationManager:
                             new_text = ''
                         else:
                             new_text = out_text[len(req_out.output_str):]
-                            #print(f"detoken process has new_text: \033[92m{new_text}\033[0m")
                             req_out.output_str = out_text
-                        new_batch_str_out.reqs_infs.append((req_id, new_text, new_gen_metadata, True if abort else finished, abort))
+                        new_batch_str_out.reqs_infs.append((req_id, new_text, new_gen_metadata, True if abort else finished, abort, perf_metrics))
                         if finished or abort:
                             try:
                                 del self.req_id_to_out[req_id]

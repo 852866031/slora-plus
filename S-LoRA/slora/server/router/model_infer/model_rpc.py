@@ -52,7 +52,7 @@ class ModelRpcServer(rpyc.Service):
 
     def exposed_init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                            max_total_token_num, load_way, mode, input_params,
-			   prefetch_stream, finetuning_adapters_tracker, 
+			   prefetch_stream, 
                half_model=False, mem_manager_log_path=None, 
                enable_unified_mem_manager=False, gpu_profiler=None, unified_mem_manager_max_size=0):
         import torch
@@ -137,8 +137,6 @@ class ModelRpcServer(rpyc.Service):
 
             self.finetuning_adapter = self.adapters[-1]
             self.finetuning_adapter.is_finetuning = True
-            self.finetuning_adapter_tracker = finetuning_adapters_tracker
-            self.finetuning_adapter_tracker.set(self.finetuning_adapter.lora_dir, True)
             self.current_epoch = 0
             self.total_epochs = input_params.finetuning_params.num_epochs
             # lora_params = []
@@ -468,10 +466,8 @@ class ModelRpcServer(rpyc.Service):
         if self.backward_service is not None:
             requests_info_dict = self.model.alt_mem_manager.export_requests_info()
             requests_info_dict["current_epoch"] = self.current_epoch
-            print("send backward request to bwd process")
             self.rpc_send.send(requests_info_dict)
             finished, loss, total_token_processed = self.rpc_recv.recv()
-            print(f"backward done, cost {time.time()-start:.2f}s")
         else:
             finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
         if finished:
@@ -505,7 +501,7 @@ class ModelRpcServer(rpyc.Service):
 
 
 class ModelRpcClient:
-    def __init__(self, model_rpc, world_size, rpc_server_process=None, finetuning_adapters_tracker=None):
+    def __init__(self, model_rpc, world_size, rpc_server_process=None):
         self.model: ModelRpcServer = model_rpc
         self.world_size = world_size
         self.rpc_server_process = rpc_server_process
@@ -556,14 +552,12 @@ class ModelRpcClient:
 
     async def init_model(self, rank_id, world_size, weight_dir, adapter_dirs,
                          max_total_token_num, load_way, mode, input_params,
-			                prefetch_stream, finetuning_adapters_tracker, 
-                            half_model=False, mem_manager_log_path=None,
+			                prefetch_stream, half_model=False, mem_manager_log_path=None,
                             enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
                             gpu_profiler=None):
         ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, adapter_dirs,
                                                   max_total_token_num, load_way, mode, input_params,
-						                            prefetch_stream, finetuning_adapters_tracker, 
-                                                    half_model, mem_manager_log_path, enable_unified_mem_manager,
+						                            prefetch_stream, half_model, mem_manager_log_path, enable_unified_mem_manager,
                                                     gpu_profiler, unified_mem_manager_max_size)
         if self.use_rpc:
             await ans

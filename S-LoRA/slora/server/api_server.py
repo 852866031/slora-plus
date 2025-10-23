@@ -148,7 +148,8 @@ async def generate(request: Request) -> Response:
     count_output_tokens = 0
     tokens = []
     feedback = False
-    async for request_output, metadata, finished, feedback in results_generator:
+    perf_metrics = None
+    async for request_output, metadata, finished, feedback, perf_metrics in results_generator:
         count_output_tokens += 1
         if finished == -1:
             return Response(status_code=499)
@@ -166,6 +167,9 @@ async def generate(request: Request) -> Response:
     ret = {
         "generated_text": ["".join(final_output)],
         "count_output_tokens": count_output_tokens,
+        "ttft": perf_metrics[0] if perf_metrics is not None else None,
+        "avg_tbt": perf_metrics[1] if perf_metrics is not None else None,
+        "worst_tbt": perf_metrics[2] if perf_metrics is not None else None,
     }
     if feedback:
         ret["feedback"] = request_id
@@ -574,7 +578,7 @@ def main():
             config_data = json.load(f)
 
         # Assert required keys
-        required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs", "finetuning_type"]
+        required_keys = ["finetuning_data_path", "finetuning_lora_path", "num_epochs", "finetuning_type", "ttft_slo", "avg_tbt_slo", "max_tbt_slo"]
         if config_data['finetuning_type'] == "Alignment Live":
             required_keys.append("min_backward_sample_count")
         for key in required_keys:
@@ -705,9 +709,10 @@ def main():
         log_level="debug",
         timeout_keep_alive=TIMEOUT_KEEP_ALIVE,
         loop="uvloop",
+        access_log=False
     )
 
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method('spawn'), # this code will not be ok for settings to fork to subprocess
+    torch.multiprocessing.set_start_method('spawn')      # this code will not be ok for settings to fork to subprocess
     main()

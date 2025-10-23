@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import math
+import math
 from typing import Iterable, List, Optional, Sequence, Tuple
 import time
 import numpy as np
@@ -21,7 +23,14 @@ class BatchExecutionTracker():
         self.num_inf_tokens_list = []
         self.execution_type_list = []
         self.execution_duration_list = []
+        self.last_refit_count = 0
     
+    def check_refit(self) -> bool:
+        if self.size()%32 == 0 and self.size() > self.last_refit_count:
+            self.last_refit_count = self.size()
+            return True
+        return False
+
     def _enforce_max_size(self) -> None:
         if self.max_batches is not None and len(self.execution_type_list) > self.max_batches:
             self.drop_batch_stats(0)
@@ -205,14 +214,14 @@ class PrefillExecutionEstimator:
          # --- Error Tracking: max relative error ---
         if len(Ni_inf) > 0:
             preds_inf = a * Ni_inf + b * Bi_inf + d
-            rel_errs_inf = np.abs(preds_inf - Ti_inf) / Ti_inf
+            rel_errs_inf = (preds_inf - Ti_inf) / Ti_inf
             self.inf_err = float(np.max(rel_errs_inf))
         else:
             self.inf_err = None
 
         if len(co_pairs) > 0:
             preds_co = a * (Ni + Nf) + b * Bc + d + c * Nf
-            rel_errs_co = np.abs(preds_co - Tc) / Tc
+            rel_errs_co = (preds_co - Tc) / Tc
             self.co_err = float(np.max(rel_errs_co))
         else:
             self.co_err = None
@@ -263,7 +272,7 @@ class PrefillExecutionEstimator:
             raise ValueError("Model not fitted yet")
         result = float(self._params.a * N_inf + self._params.b * B + self._params.d)
         if self.inf_err is not None:
-            result *= (1.0 + 2 * self.inf_err)
+            result *= (1.0 + 1.5 * self.inf_err)
         return result
 
     def predict_coserving(self, N_inf: float, N_ft: float, B: float) -> float:
@@ -271,7 +280,7 @@ class PrefillExecutionEstimator:
             raise ValueError("Model not fitted yet")
         result = float(self._params.a * (N_inf + N_ft) + self._params.b * B + self._params.d + self._params.c * N_ft)
         if self.co_err is not None:
-            result *= (1.0 + 2 * self.co_err)
+            result *= (1.0 + 1.5 * self.co_err)
         return result
 
     def verify_inference(self, N_inf: float, B: float, actual_time: float) -> float:
@@ -338,6 +347,50 @@ class PrefillExecutionEstimator:
         deadline = float(earliest_req_time) + ttft_s
         return predicted_finish <= deadline
 
+    def max_next_ft_tokens(
+        self,
+        inf_token_num: float,
+        ft_token_num: float,
+        current_batch_size: int,
+        earliest_req_time: Optional[float],
+        ttft: float,
+        *,
+        ttft_unit: str = "s",
+        now: Optional[float] = None,
+    ) -> int:
+        p = self._params
+        if p.a is None or p.b is None or p.c is None or p.d is None:
+            raise ValueError("PrefillExecutionEstimator not fitted (need a,b,c,d).")
+        if earliest_req_time is None:
+            return 10**12
+        if now is None:
+            now = time.time()
+        if ttft_unit == "s":
+            ttft_s = float(ttft)
+        elif ttft_unit == "ms":
+            ttft_s = float(ttft) / 1000.0
+        else:
+            raise ValueError(f"Unsupported ttft_unit '{ttft_unit}', use 's' or 'ms'.")
+        deadline = float(earliest_req_time) + ttft_s
+        rem_time = deadline - now
+        if rem_time <= 0:
+            return 0
+        co_err = float(self.co_err) if self.co_err is not None else 0.0
+        safety = 1.0 + 2.0 * max(0.0, co_err)
+        adjusted_budget = rem_time / safety
+        N_inf = float(inf_token_num)
+        N_ft_curr = float(ft_token_num)
+        Bp = float(current_batch_size + 1)
+        const_term = p.a * (N_inf + N_ft_curr) + p.c * N_ft_curr + p.b * Bp + p.d
+        denom = p.a + p.c
+        if denom <= 0:
+            return 0
+        x_cont = (adjusted_budget - const_term) / denom
+        x_max = math.floor(x_cont)
+        if x_max < 0:
+            x_max = 0
+        return int(x_max)
+
 @dataclass
 class DecodeParams:
     a: float = 0.0   # per (total_tokens * batch_size) cost
@@ -388,7 +441,7 @@ class DecodeExecutionEstimator:
         self._params = DecodeParams(a=float(a), b=float(b), c=float(c))
         # --- compute max relative error ---
         preds = a * (Ttot * B) + b * B + c
-        rel_errs = np.abs(preds - T) / np.maximum(T, 1e-9)
+        rel_errs = (preds - T) / np.maximum(T, 1e-9)
         self.decode_err = float(np.max(rel_errs))
         return self._params
 
@@ -396,7 +449,7 @@ class DecodeExecutionEstimator:
         a, b, c = self._params.a, self._params.b, self._params.c
         result = a * (total_tokens * batch_size) + b * batch_size + c
         if self.decode_err is not None:
-            result *= (1.0 + 2 * self.decode_err)
+            result *= (1.0 + 1.5 * self.decode_err)
         return result
 
     def verify(self, total_tokens: float, batch_size: float, actual_time: float) -> float:

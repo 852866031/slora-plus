@@ -11,5 +11,8 @@
   "max_saved_finetuning_tokens": 128,
   "max_finetuning_tokens_in_batch": 128,
   "optimizer_threading": true,
-  "start_on_launch": false
+  "start_on_launch": false,
+  "ttft_slo": 0.3,
+  "avg_tbt_slo": 0.15,
+  "max_tbt_slo": 0.35
 }

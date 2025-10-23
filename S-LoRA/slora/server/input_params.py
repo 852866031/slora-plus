@@ -45,6 +45,18 @@ class FinetuneParams:
             self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
             self.start_on_launch = finetuning_config.get("start_on_launch", True)
 
+class SLOParams:
+    def __init__(
+        self,
+        ttft_slo,
+        avg_tbt_slo,
+        max_tbt_slo,
+    ) -> None:
+        self.ttft_slo = ttft_slo
+        self.avg_tbt_slo = avg_tbt_slo
+        self.max_tbt_slo = max_tbt_slo
+        return
+
 class InputParams:
 
     def __init__(
@@ -113,7 +125,12 @@ class InputParams:
             model_weightdir=model_weightdir,
             tokenizor_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
-            finetuning_config = finetuning_config
+            finetuning_config=finetuning_config
+        )
+        self.slo_params = SLOParams(
+            ttft_slo=finetuning_config.get("ttft_slo", 0.3),
+            avg_tbt_slo=finetuning_config.get("avg_tbt_slo", 0.15),
+            max_tbt_slo=finetuning_config.get("max_tbt_slo", 0.4),
         )
         return
  
