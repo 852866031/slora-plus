@@ -66,7 +66,6 @@ class LoraUnorderedBatchMixed:
 
         
         self.kv_embed_dim = base_model.tp_k_head_num_ * base_model.head_dim_
-        self.last_adapter_combined_A = {}
 
 
     @torch.no_grad()
@@ -87,7 +86,8 @@ class LoraUnorderedBatchMixed:
             no_lora_compute=False,
             ref_mask = None,
             no_lora_copy=False,
-            prefill_interrupt_event=None,):
+            prefill_interrupt_event=None,
+            print_time_profile = False):
 
         # Notice that batch_lora only support decoding
         assert len(b_loc) == len(b_start_loc) == len(b_seq_len)
@@ -112,7 +112,7 @@ class LoraUnorderedBatchMixed:
             out = self._decode(batch_size, total_token_num, max_len_in_batch,
                                 input_ids,
                                 b_loc, b_loc_key, b_loc_value, b_start_loc, b_seq_len,
-                                no_lora_compute, no_lora_copy)
+                                no_lora_compute, no_lora_copy, print_time_profile)
             #print(tensor_hash(out))
             return out
 
@@ -168,8 +168,9 @@ class LoraUnorderedBatchMixed:
             infer_state.alt_mem_manager = self.base_model.alt_mem_manager
             infer_state.b_loc_key = b_loc_key
             infer_state.b_loc_value = b_loc_value
-            infer_state.prefill_mem_index_key = torch.tensor(self.base_model.alt_mem_manager.alloc(infer_state.total_token_num, PageType.KV_CACHE))
-            infer_state.prefill_mem_index_value = torch.tensor(self.base_model.alt_mem_manager.alloc(infer_state.total_token_num, PageType.KV_CACHE))
+            infer_state.prefill_mem_index_key = self.base_model.alt_mem_manager.alloc(infer_state.total_token_num, PageType.KV_CACHE)
+            infer_state.prefill_mem_index_value = self.base_model.alt_mem_manager.alloc(infer_state.total_token_num, PageType.KV_CACHE)
+            infer_state.prefill_mem_index_cat = torch.cat([infer_state.prefill_mem_index_key, infer_state.prefill_mem_index_value], dim=0)
             init_bloc(infer_state.b_loc_key, b_seq_len, max_len_in_batch, infer_state.prefill_mem_index_key)
             init_bloc(infer_state.b_loc_value, b_seq_len, max_len_in_batch, infer_state.prefill_mem_index_value)
         else:
@@ -187,84 +188,70 @@ class LoraUnorderedBatchMixed:
         predict_logics = self._context_forward(input_ids, infer_state, no_lora_compute, prefill_interrupt_event=prefill_interrupt_event)
         return predict_logics       
 
-    def save_finetune_activations_to_buffer(self, layer_id, input_embs, infer_state):
-        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
-        finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
-        prev_total = sum(infer_state.mem_manager.request_token_info)
-        num_new_tokens = finetune_activations.shape[0]
-        # Step 2: write activations
-        infer_state.mem_manager.finetune_activation_buffer[layer_id][prev_total : prev_total + num_new_tokens] = finetune_activations.clone()
-        # Step 3: count finetuning tokens per request using finetune_mask
-        if layer_id == self.base_model.layers_num - 1:
-            b_start_loc = infer_state.b_start_loc
-            b_seq_len = infer_state.b_seq_len
-            batch_size = infer_state.batch_size
-            for i in range(batch_size):
-                start = b_start_loc[i].item()
-                end = start + b_seq_len[i].item()
-                n_finetune_tokens = finetune_mask[start:end].sum().item()
-                if n_finetune_tokens > 0:
-                    infer_state.mem_manager.request_token_info.append(n_finetune_tokens)
-    
-    def save_input_layer_output_to_buffer(self, input_embs, infer_state):
-        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
-        finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
-        prev_total = sum(infer_state.mem_manager.request_token_info)
-        num_new_tokens = finetune_activations.shape[0]
-        infer_state.mem_manager.input_layer_output[prev_total : prev_total + num_new_tokens] = finetune_activations.clone()
-    
-
-    def save_ffn_input_to_buffer(self, layer_id, input_embs, infer_state):
-        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
-        finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
-        prev_total = sum(infer_state.mem_manager.request_token_info)
-        num_new_tokens = finetune_activations.shape[0]
-        infer_state.mem_manager.ffn_input_buffer[layer_id][prev_total : prev_total + num_new_tokens] = finetune_activations
-
-    def rewind_finetune_progress(self, nr_finetuning_reqs, infer_state):
-        if self.enable_unified_mem_manager:
-            if infer_state.ref_mask is not None:
-                infer_state.alt_mem_manager.rewind_alignment_pool(int(nr_finetuning_reqs/2))
-            else:
-                infer_state.alt_mem_manager.finetune_input_ids = infer_state.alt_mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
-        else:
-            if infer_state.ref_mask is not None:
-                infer_state.mem_manager.rewind_alignment_pool(int(nr_finetuning_reqs/2))
-            else:
-                infer_state.mem_manager.finetune_input_ids = infer_state.mem_manager.finetune_input_ids[0:-nr_finetuning_reqs]
-
-    def interrupt_and_clean(self, prefill_interrupt_event, infer_state, FFN_input_vpids=None, attention_input_vpids=None):
+    def interrupt_and_clean(
+        self,
+        prefill_interrupt_event,
+        infer_state,
+        FFN_input_vpids: torch.Tensor = None,
+        attention_input_vpids: torch.Tensor = None,
+    ) -> bool:
+        """
+        Tensor-based version: if interrupted, free all given vpids (on GPU).
+        """
         if prefill_interrupt_event is not None and prefill_interrupt_event.is_set():
-            print("Prefill interrupted!")
-            vpids_to_free = (FFN_input_vpids or []) + (attention_input_vpids or [])
-            if vpids_to_free:
+            vpids_to_free = None
+            if FFN_input_vpids is not None and attention_input_vpids is not None:
+                vpids_to_free = torch.cat((FFN_input_vpids, attention_input_vpids))
+            elif FFN_input_vpids is not None:
+                vpids_to_free = FFN_input_vpids
+            elif attention_input_vpids is not None:
+                vpids_to_free = attention_input_vpids
+            if vpids_to_free is not None and vpids_to_free.numel() > 0:
+                print("Freeing vpids!")
                 infer_state.alt_mem_manager.free(vpids_to_free)
+                self.infer_adapter_alt.unpin_adapters_pages() 
+                self.base_model.alt_mem_manager.reset_b_loc_kv(None, None)
             return True
+
         return False
     
+    @torch.no_grad()
+    def sanitize_logits(self, logits: torch.Tensor, clamp_min: float = -1e4, clamp_max: float = 1e4) -> torch.Tensor:
+        return logits
+        logits_fp32 = logits.float()
+        logits_fp32 = torch.nan_to_num(logits_fp32, nan=0.0, posinf=0.0, neginf=0.0)
+        logits_fp32 = torch.clamp(logits_fp32, min=clamp_min, max=clamp_max)
+
+        if torch.isnan(logits_fp32).any() or torch.isinf(logits_fp32).any():
+            print("⚠️ NaN or Inf remain in logits after cleanup!")
+        return logits_fp32
+
     @final
     def _context_forward(self, input_ids, infer_state, no_lora_compute=False, prefill_interrupt_event=None):
         cuda_input_ids = input_ids
         input_embs = self.base_model.pre_infer.context_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
-        if self.interrupt_and_clean(prefill_interrupt_event, infer_state): return None
+        if self.interrupt_and_clean(prefill_interrupt_event, infer_state): 
+            return None
         if torch.any(infer_state.finetune_mask):
             infer_state.alt_mem_manager.save_embedding_output(input_embs, infer_state)
         FFN_input_vpids = None
         attention_input_vpids = None
         for i in range(self.base_model.layers_num):
-            input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): return None
+            input_embs = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
+            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
+                return None
             if torch.any(infer_state.finetune_mask):
                 FFN_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
                                                                             PageType.FFN_INPUT_ACTIVATION, FFN_input_vpids)
-            self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])
-            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): return None
+            self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])            
+            if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
+                return None
             if torch.any(infer_state.finetune_mask):
                 attention_input_vpids = infer_state.alt_mem_manager.save_activations_by_layer(i, input_embs, infer_state, 
                                                                             PageType.ATTENTION_INPUT_ACTIVATION, attention_input_vpids)
-        # Post processing
-        if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): return None
+        if self.interrupt_and_clean(prefill_interrupt_event, infer_state, FFN_input_vpids, attention_input_vpids): 
+            return None
         if infer_state.ref_mask is not None:
             predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
                     input_embs, infer_state, self.base_model.pre_post_weight)
@@ -274,48 +261,19 @@ class LoraUnorderedBatchMixed:
             finetune_logits_per_request = []
             predict_logics = self.base_model.post_infer.token_forward_with_finetune_outputs(
                     input_embs, finetune_logits_per_request, infer_state, self.base_model.pre_post_weight)
+            #predict_logics = self.sanitize_logits(predict_logics)
             if torch.any(infer_state.finetune_mask):
-                infer_state.alt_mem_manager.write_to_logit_tensor(finetune_logits_per_request)
-                #infer_state.alt_mem_manager.activation_writer.enqueue(-2, finetune_logits_per_request, None, None)
-        return predict_logics
-
-    @final
-    def _context_forward_slora(self, input_ids, infer_state, no_lora_compute=False, nr_finetuning_reqs=0):
-        self.finetuning_adapter.load_to_gpu(prefetch=False, bmm=True)
-        cuda_input_ids = input_ids
-        rprint("Input ids shape", cuda_input_ids.shape)
-        input_embs = self.base_model.pre_infer.context_forward(
-                cuda_input_ids, infer_state, self.base_model.pre_post_weight)
-        if torch.any(infer_state.finetune_mask):
-                self.save_input_layer_output_to_buffer(input_embs, infer_state)
-
-        FFN_input_vpids = None
-        attention_input_vpids = None
-        for i in range(self.base_model.layers_num):
-            input_embs, q_alt, k_alt, v_alt, o_alt = self._lora_context_forward(i, input_embs, infer_state, no_lora_compute)
-            if torch.any(infer_state.finetune_mask):
-                self.save_ffn_input_to_buffer(i, input_embs, infer_state)
-            self.base_model.layers_infer[i]._context_ffn(input_embs, infer_state, self.base_model.trans_layers_weight[i])
-            if torch.any(infer_state.finetune_mask):
-                self.save_finetune_activations_to_buffer(i, input_embs, infer_state)
-        # Post processing      
-        if infer_state.ref_mask is not None:
-            predict_logics, finetune_logits_per_request, ref_logits_per_request = self.base_model.post_infer.token_forward_alignment(
-                    input_embs, infer_state, self.base_model.pre_post_weight)
-            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-            infer_state.mem_manager.reference_logits_per_request.extend(ref_logits_per_request)
-        else:
-            predict_logics, finetune_logits_per_request = self.base_model.post_infer.token_forward_with_finetune_outputs(
-                    input_embs, infer_state, self.base_model.pre_post_weight)
-            infer_state.mem_manager.finetune_logits_per_request.extend(finetune_logits_per_request)
-        if self.enable_unified_mem_manager and torch.any(infer_state.finetune_mask):
-            infer_state.alt_mem_manager.update_request_token_info(infer_state)
+                infer_state.alt_mem_manager.write_to_logit_tensor(finetune_logits_per_request, FFN_input_vpids, attention_input_vpids)
+        #print(f"Embedding time: {input_embs_layer_end_time - start:.3f}s")
+        #print(f"Transformer layer time: {transformer_layer_end_time - input_embs_layer_end_time:.3f}s")
+        #print(f"Output layer time: {output_layer_end_time - transformer_layer_end_time:.3f}s")
+        #self.check_invalid_probs(predict_logics)
         return predict_logics
 
     @final
     def _lora_context_forward(self, layer_id, input_embs, infer_state, no_lora_compute=False):
-        q_alt, k_alt, v_alt, o = self._lora_context_attention(layer_id, input_embs, infer_state, no_lora_compute)
-        return input_embs, q_alt, k_alt, v_alt, o
+        self._lora_context_attention(layer_id, input_embs, infer_state, no_lora_compute)
+        return input_embs
     
     # @mark_cost_time("trans context flash forward time cost")  # dont to remove this, will make performence down, did not know why
     def _lora_context_attention(self, layer_id, input_embs, infer_state, no_lora_compute=False):
@@ -327,12 +285,20 @@ class LoraUnorderedBatchMixed:
         cache_k, cache_v = layer_infer._pre_cache_kv(infer_state, layer_weight)
         # gen new q, k, v (batch different adapters)
         if self.enable_unified_mem_manager:
-            q, k, v = self._lora_get_qkv_alt(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
+            start = time.time()
+            q = self._lora_get_qkv_alt(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
+            #if layer_id==16: print(f"\tLayer {layer_id} get qkv time: {time.time() - start:.4f}s")
             input1 = None
+            start = time.time()
             layer_infer._post_cache_kv(cache_k, cache_v, infer_state, layer_weight)
+            #if layer_id==16: print(f"\tLayer {layer_id} post cache kv time: {time.time() - start:.4f}s")
             # compute attention
+            start = time.time()
             o = layer_infer._context_attention_kernel(q, cache_k, cache_v, infer_state, layer_weight)
+            #if layer_id==16: print(f"\tLayer {layer_id} attention kernel time: {time.time() - start:.4f}s")
+            start = time.time()
             o = self._lora_get_o_alt(layer_id, o, infer_state, no_lora_compute)
+            #if layer_id==16: print(f"\tLayer {layer_id} get o time: {time.time() - start:.4f}s")
         else:
             q, k, v = self._lora_get_qkv(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
             input1 = None
@@ -341,7 +307,7 @@ class LoraUnorderedBatchMixed:
             o = self._lora_get_o(layer_id, o, infer_state, no_lora_compute)
 
         input_embs.add_(o.view(-1, layer_infer.embed_dim_))
-        return q, k, v, o
+        return
 
     def _lora_get_qkv(self, layer_id, input_embs, cache_k, cache_v, infer_state, no_lora_compute=False)->torch.Tensor:
         base_model = self.base_model
@@ -560,16 +526,18 @@ class LoraUnorderedBatchMixed:
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
-        self.infer_adapter_alt.pin_adapters_pages()
+        # if layer_id==0:
+        #     self.infer_adapter_alt.pin_adapters_pages()
+        #if layer_id==16: print(f"\t\t\tLayer {layer_id} pin adapter pages time: {time.time() - start:.5f}s")
         # q (S, H)
         q = torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_),
                      base_layer_weight.q_weight_)
-        
+        buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
+                    self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
+        #if layer_id==16: print(f"\t\t\tLayer {layer_id} address conversion time: {time.time() - start:.5f}s")
         assert(len(q)==len(self.batch_req_bins))
         if not no_lora_compute:
             # fix me: @TODO we need to filter out requests querying only base model
-            buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
-                    self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
             if self.max_b_seq_len >= 200 and self.max_lora_dim >= 64  and len(infer_state.b_seq_len) >= 2:
             # if 1 == 0:
                 lora_get_qkvo_fwd_shrink(input_embs.view(-1, base_layer_infer.embed_dim_), 
@@ -657,7 +625,6 @@ class LoraUnorderedBatchMixed:
                 )
                
         rotary_emb_fwd(cache_k, infer_state.position_cos, infer_state.position_sin)
-        k = cache_k.clone()
 
         # v (S, H)
         torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.v_weight_,
@@ -703,9 +670,7 @@ class LoraUnorderedBatchMixed:
                     2,
                     a_scaling,
                 )
-        v = cache_v.clone()
-        self.infer_adapter_alt.unpin_adapters_pages()
-        return q, k, v
+        return q
 
     def _lora_get_o(self, layer_id, input, infer_state, no_lora_compute=False)->torch.Tensor:
         base_model = self.base_model
@@ -747,7 +712,6 @@ class LoraUnorderedBatchMixed:
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
-        self.infer_adapter_alt.pin_adapters_pages()
 
         o = torch.mm(input.view(-1, base_layer_infer.embed_dim_),
                           base_layer_weight.o_weight_)
@@ -778,8 +742,7 @@ class LoraUnorderedBatchMixed:
 
                 dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
                             a_len_lora, gpu_a_loc_lora_b, 
-                            self.batch_req_bins, 3, a_scaling)     
-        self.infer_adapter_alt.unpin_adapters_pages()     
+                            self.batch_req_bins, 3, a_scaling)   
         return o
 
     # Decoding functions for inference
@@ -800,16 +763,34 @@ class LoraUnorderedBatchMixed:
             infer_state.alt_mem_manager = self.base_model.alt_mem_manager
             infer_state.b_loc_key = b_loc_key
             infer_state.b_loc_value = b_loc_value
-            infer_state.decode_mem_index_key = torch.tensor(self.base_model.alt_mem_manager.alloc(batch_size, PageType.KV_CACHE))
-            infer_state.decode_mem_index_value = torch.tensor(self.base_model.alt_mem_manager.alloc(batch_size, PageType.KV_CACHE))
-            infer_state.decode_key_buffer = torch.empty(
-                        (batch_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
-                        dtype=torch.float16, device="cuda")
-            infer_state.decode_value_buffer = torch.empty(
-                        (batch_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
-                        dtype=torch.float16, device="cuda")
-            b_loc_key[:, max_len_in_batch - 1] = infer_state.decode_mem_index_key
-            b_loc_value[:, max_len_in_batch - 1] = infer_state.decode_mem_index_value
+            #start = time.time()
+            alloc_mem = self.base_model.alt_mem_manager.alloc_contiguous_kv(batch_size, PageType.KV_CACHE)
+            #print(f"[decode] alloc_contiguous_kv time: {time.time() - start:.5f}s")
+            if alloc_mem is not None:
+                infer_state.decode_is_contiguous = True
+                infer_state.decode_mem_index_key = alloc_mem[0]
+                infer_state.decode_mem_start_key = alloc_mem[1]
+                infer_state.decode_mem_end_key = alloc_mem[2]
+                infer_state.decode_mem_index_value = alloc_mem[3]
+                infer_state.decode_mem_start_value = alloc_mem[4]
+                infer_state.decode_mem_end_value = alloc_mem[5]
+                b_loc_key[:, max_len_in_batch - 1] = infer_state.decode_mem_index_key
+                b_loc_value[:, max_len_in_batch - 1] = infer_state.decode_mem_index_value
+                self.base_model.alt_mem_manager.reset_b_loc_kv(b_loc_key, b_loc_value)
+            else:    
+                infer_state.decode_is_contiguous = False
+                infer_state.decode_mem_index_key = self.base_model.alt_mem_manager.alloc(batch_size, PageType.KV_CACHE)
+                infer_state.decode_mem_index_value = self.base_model.alt_mem_manager.alloc(batch_size, PageType.KV_CACHE)
+                infer_state.decode_mem_index_cat = torch.cat([infer_state.decode_mem_index_key, infer_state.decode_mem_index_value], dim=0)
+                infer_state.decode_key_buffer = torch.empty(
+                            (batch_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
+                            dtype=torch.float16, device="cuda")
+                infer_state.decode_value_buffer = torch.empty(
+                            (batch_size, self.base_model.tp_k_head_num_, self.base_model.head_dim_),
+                            dtype=torch.float16, device="cuda")
+                b_loc_key[:, max_len_in_batch - 1] = infer_state.decode_mem_index_key
+                b_loc_value[:, max_len_in_batch - 1] = infer_state.decode_mem_index_value
+                self.base_model.alt_mem_manager.reset_b_loc_kv(b_loc_key, b_loc_value)
         else:
             infer_state.b_loc = b_loc
             infer_state.mem_manager = self.base_model.mem_manager
@@ -835,8 +816,8 @@ class LoraUnorderedBatchMixed:
         infer_state.init_some_extra_state(self.base_model, batch_size, total_token_num, max_len_in_batch,
                                           input_ids, b_loc, b_start_loc, b_seq_len, False)
         predict_logics = self._token_forward(input_ids, infer_state, no_lora_compute, no_lora_copy, print_time_profile=print_time_profile)
-        if print_time_profile:
-            print(f"[forward engine]:total decode time {(time.time() - start):.3f}\n")
+        # if print_time_profile:
+        #     print(f"[forward engine]:total decode time {(time.time() - start):.5f}\n")
         return predict_logics
     
     @final
@@ -844,97 +825,42 @@ class LoraUnorderedBatchMixed:
         cuda_input_ids = input_ids
         input_embs = self.base_model.pre_infer.token_forward(
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
-        embed_time = time.time()
-        attention_time = 0.0
-        total_norm_time = 0.0
-        total_pre_cache_time = 0.0
-        total_get_qkv_time = 0.0
-        total_post_cache_time = 0.0
-        total_atten_kernel_time = 0.0
-        total_get_o_time = 0.0
-        total_pin_adapter_time = 0.0
-        total_export_lora_param_time = 0.0
-        total_o_kernel_time = 0.0
-        total_unpin_adapter_time = 0.0
         for i in range(self.base_model.layers_num):
-            #input_embs = self._lora_token_forward(i, input_embs, infer_state, no_lora_compute, no_lora_copy)
-            input_embs, attn_time, norm_time, pre_cache_time, get_qkv_time, post_cache_time, atten_kernel_time, get_o_time, \
-                pin_adapter_time, export_lora_param_time, o_kernel_time, unpin_adapter_time = \
-                    self._lora_token_forward(i, input_embs, infer_state, no_lora_compute, no_lora_copy)
-            attention_time += attn_time
-            total_norm_time += norm_time
-            total_pre_cache_time += pre_cache_time
-            total_get_qkv_time += get_qkv_time
-            total_post_cache_time += post_cache_time
-            total_atten_kernel_time += atten_kernel_time
-            total_get_o_time += get_o_time
-            total_pin_adapter_time += pin_adapter_time
-            total_export_lora_param_time += export_lora_param_time
-            total_o_kernel_time += o_kernel_time
-            total_unpin_adapter_time += unpin_adapter_time
-
-        layer_time = time.time()
-        if print_time_profile:
-            print(f"\n[forward engine]:\ttransformer layers time {(layer_time - embed_time):.3f}")
-            print(f"[forward engine]:\t\ttotal attention time {attention_time:.4f}")
-            print(f"[forward engine]:\t\t\tnorm time {total_norm_time:.5f}")
-            print(f"[forward engine]:\t\t\tpre_cache time {total_pre_cache_time:.5f}")
-            print(f"[forward engine]:\t\t\tget_qkv time {total_get_qkv_time:.5f}")
-            print(f"[forward engine]:\t\t\tpost_cache time {total_post_cache_time:.5f}")
-            print(f"[forward engine]:\t\t\tatten_kernel time {total_atten_kernel_time:.5f}")
-            print(f"[forward engine]:\t\t\tget_o time {total_get_o_time:.5f}")
-            print(f"[forward engine]:\t\t\tpin_adapter time {total_pin_adapter_time:.5f}")
-            print(f"[forward engine]:\t\t\texport_lora_param time {total_export_lora_param_time:.5f}")
-            print(f"[forward engine]:\t\t\to kernel time {total_o_kernel_time:.5f}")
-            print(f"[forward engine]:\t\t\tunpin_adapter time {total_unpin_adapter_time:.5f}\n")
-
+            input_embs = self._lora_token_forward(i, input_embs, infer_state, no_lora_compute, no_lora_copy)
+           
         predict_logics = self.base_model.post_infer.token_forward(
                 input_embs, infer_state, self.base_model.pre_post_weight, return_logics=True)
+        #predict_logics = self.sanitize_logits(predict_logics)
         return predict_logics
 
     @final
     # @calculate_time(show=True, min_cost_ms=0)
     def _lora_token_forward(self, layer_id, input_embs, infer_state, no_lora_compute=False, no_lora_copy=False):
-        start = time.time()
-        norm_time, pre_cache_time, get_qkv_time, post_cache_time, atten_kernel_time, get_o_time, \
-            pin_adapter_time, export_lora_param_time, o_kernel_time, unpin_adapter_time = \
-            self._lora_token_attention(layer_id, input_embs, infer_state, no_lora_compute, no_lora_copy)
-        attention_time = time.time()
+        self._lora_token_attention(layer_id, input_embs, infer_state, no_lora_compute, no_lora_copy)
         layer_weight = self.base_model.trans_layers_weight[layer_id]
         layer_infer = self.base_model.layers_infer[layer_id]
         # mark_start("token_ffn")
         layer_infer._token_ffn(input_embs, infer_state, layer_weight)
         # mark_end("token_ffn")
-        return input_embs, attention_time-start, norm_time, pre_cache_time, get_qkv_time, post_cache_time, atten_kernel_time, get_o_time, pin_adapter_time, export_lora_param_time, o_kernel_time, unpin_adapter_time
+        return input_embs
 
     # @calculate_time(show=True, min_cost_ms=0)
     # this impl dont to use @mark_cost_time
     def _lora_token_attention(self, layer_id, input_embs, infer_state, no_lora_compute=False, no_lora_copy=False):
-        start = time.time()
         layer_weight = self.base_model.trans_layers_weight[layer_id]
         layer_infer = self.base_model.layers_infer[layer_id]
         # layer normalization
         input1 = layer_infer._att_norm(input_embs, infer_state, layer_weight)
-        norm_end = time.time()
-        norm_time = norm_end - start
+        #self.check_invalid_probs(input1)
         # fetch k, v
         cache_k, cache_v = layer_infer._pre_cache_kv(infer_state, layer_weight)
-        pre_cache_end = time.time()
-        pre_cache_time = pre_cache_end - norm_end
         if self.enable_unified_mem_manager:
             q = self._batch_lora_get_qkv_alt(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute, no_lora_copy)
-            get_qkv_end = time.time()
-            get_qkv_time = get_qkv_end - pre_cache_end
             input1 = None
             layer_infer._post_cache_kv(cache_k, cache_v, infer_state, layer_weight)
-            post_cache_end = time.time()
-            post_cache_time = post_cache_end - get_qkv_end
             o = layer_infer._token_attention_kernel(q, infer_state, layer_weight, q_alt=q)
-            atten_kernel_end = time.time()
-            atten_kernel_time = atten_kernel_end - post_cache_end
             q = None
-            o, pin_adapter_time, export_lora_param_time, o_kernel_time, unpin_adapter_time = self._batch_lora_get_o_alt(layer_id, o, infer_state, no_lora_compute)
-            get_o_time = time.time() - atten_kernel_end
+            o = self._batch_lora_get_o_alt(layer_id, o, infer_state, no_lora_compute)
         else:
             q = self._batch_lora_get_qkv(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute, no_lora_copy)
             input1 = None
@@ -944,8 +870,8 @@ class LoraUnorderedBatchMixed:
             o = self._batch_lora_get_o(layer_id, o, infer_state, no_lora_compute)
 
         input_embs.add_(o.view(-1, layer_infer.embed_dim_))
-        return norm_time, pre_cache_time, get_qkv_time, post_cache_time, atten_kernel_time, get_o_time, pin_adapter_time, export_lora_param_time, o_kernel_time, unpin_adapter_time
-
+        return
+    
     # @calculate_time(show=True, min_cost_ms=0)
     def _batch_lora_get_qkv(self, layer_id, input_embs, cache_k, cache_v, infer_state, no_lora_compute=False, no_lora_copy=False)->torch.Tensor:
         base_model = self.base_model
@@ -1015,13 +941,13 @@ class LoraUnorderedBatchMixed:
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
-        self.infer_adapter_alt.pin_adapters_pages(no_finetuning=True)
+        if layer_id==0:
+            self.infer_adapter_alt.pin_adapters_pages()
         # q (bs, H)
         q = torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.q_weight_)
         assert(len(q)==len(self.req_bins))
         buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
-                    self.infer_adapter_alt.get_lora_params_at_layer(layer_id, no_finetuning=True)
-
+                    self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
     
         if not no_lora_compute:
             dispatch_bgmv(                                             
@@ -1100,9 +1026,8 @@ class LoraUnorderedBatchMixed:
                 self.req_bins,
                 2,
                 a_scaling,
-            )
-        self.infer_adapter_alt.unpin_adapters_pages(no_finetuning=True)     
-        return q 
+            )  
+        return q
 
     # @calculate_time(show=True, min_cost_ms=0)
     def _batch_lora_get_o(self, layer_id, input, infer_state, no_lora_compute=False)->torch.Tensor:
@@ -1120,6 +1045,7 @@ class LoraUnorderedBatchMixed:
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
                           self.infer_adapter.a_loc, self.req_bins, 3, self.infer_adapter.a_scaling)
+            
             dispatch_bgmv(o, delta_oA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                           self.req_bins, 3, self.infer_adapter.a_scaling)
@@ -1131,31 +1057,26 @@ class LoraUnorderedBatchMixed:
         base_model = self.base_model
         base_layer_weight = base_model.trans_layers_weight[layer_id]
         base_layer_infer = base_model.layers_infer[layer_id]
-        start = time.time()
-        self.infer_adapter_alt.pin_adapters_pages(no_finetuning=True)
-        pin_adapter_end = time.time()
-        pin_adater_time = pin_adapter_end - start
 
         o = torch.mm(input.view(-1, base_layer_infer.embed_dim_),
                           base_layer_weight.o_weight_)
-        
+        #self.check_invalid_probs(o)
         if not no_lora_compute:
             # mark_start("get_o")
             buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
-                self.infer_adapter_alt.get_lora_params_at_layer(layer_id, no_finetuning=True)
-            export_lora_param_end = time.time()
-            export_lora_param_time = export_lora_param_end - pin_adapter_end
+                self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
             delta_oA = self.delta[0]
             dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
                             buffer_address, 
                             a_start_lora, a_len_lora, 
                             gpu_a_loc_lora_a, self.req_bins, 3, a_scaling)
+            #self.check_invalid_probs(delta_oA)
             dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
                             a_len_lora, gpu_a_loc_lora_b, 
                             self.req_bins, 3, a_scaling) 
 
-        o_kernel_end = time.time()
-        o_kernel_time = o_kernel_end - export_lora_param_end
-        self.infer_adapter_alt.unpin_adapters_pages(no_finetuning=True)     
-        unpin_adapter_time = time.time() - o_kernel_end
-        return o, pin_adater_time, export_lora_param_time, o_kernel_time, unpin_adapter_time
+
+        if layer_id==self.base_model.layers_num-1:
+            self.infer_adapter_alt.unpin_adapters_pages() 
+   
+        return o

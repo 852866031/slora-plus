@@ -37,15 +37,16 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         # decode cache_k cache_v
         else:
             if infer_state.alt_mem_manager is not None:
-                cache_k = infer_state.decode_key_buffer
-                cache_v = infer_state.decode_value_buffer
+                if infer_state.decode_is_contiguous:
+                    cache_k = infer_state.alt_mem_manager.gpu_pools[self.layer_num_][infer_state.decode_mem_start_key:infer_state.decode_mem_end_key, :, :]
+                    cache_v = infer_state.alt_mem_manager.gpu_pools[self.layer_num_][infer_state.decode_mem_start_value:infer_state.decode_mem_end_value, :, :]
+                else:
+                    cache_k = infer_state.decode_key_buffer
+                    cache_v = infer_state.decode_value_buffer
                 return cache_k, cache_v
-            # decode not contiguous
             if infer_state.decode_is_contiguous:
                 cache_k = infer_state.mem_manager.key_buffer[self.layer_num_][infer_state.decode_mem_start:infer_state.decode_mem_end, :, :]
-                #print("Access key buffer from TransformerLayerInferTpl")
                 cache_v = infer_state.mem_manager.value_buffer[self.layer_num_][infer_state.decode_mem_start:infer_state.decode_mem_end, :, :]
-                #print("Access value buffer from TransformerLayerInferTpl")
             else:
                 cache_k = infer_state.decode_key_buffer
                 cache_v = infer_state.decode_value_buffer

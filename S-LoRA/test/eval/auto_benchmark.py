@@ -28,7 +28,7 @@ import pandas as pd
 # ---------------- Defaults ----------------
 DEFAULTS = {
     "server": "http://localhost:8000",
-    "timeline_csv": "timeline.csv",  # NEW — use timeline.csv
+    "timeline_csv": "timeline1.csv",  
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
     "ft_max_wait": 60.0,
@@ -43,7 +43,7 @@ def generate_random_sentence(length: int) -> str:
     """Generate a random sentence of `length` words."""
     words = []
     for _ in range(max(1, length)):
-        word = "".join(random.choices(string.ascii_lowercase, k=random.randint(3, 8)))
+        word = "".join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))
         words.append(word)
     return " ".join(words).capitalize() + "."
 

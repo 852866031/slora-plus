@@ -175,17 +175,14 @@ class ModelRpcServer(rpyc.Service):
                 self.rpc_recv = rpc_recv
                 self.rpc_send = rpc_send
                 self.backward_service = Process(target=backward_service_obj.start_service, daemon=True)
-                os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "30"
+                os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "20"
+                os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
                 self.backward_service.start()
                 os.environ.pop("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", None)
+                os.environ.pop("CUDA_DEVICE_MAX_CONNECTIONS", None)
                 self.rpc_send.send(self.finetuning_adapter.load_gpu_fp32_dict())
                 self.rpc_send.send(self.model.alt_mem_manager.share_activation_dict())
                 self.rpc_recv.recv()
-
-            # if input_params.finetuning_params.optimizer_threading:
-            #     from slora.server.router.model_infer.optimizer_worker import OptimizerWorker
-            #     self.finetuning_optimizer_worker = OptimizerWorker(self.finetuning_optimizer, self.finetuning_adapter, self.finetuning_adapter_tracker)
-            #     self.finetuning_optimizer_worker.start()
 
             if self.input_params.finetuning_params.finetuning_type == "Alignment" or self.input_params.finetuning_params.finetuning_type == "Alignment Live":
                 ref_adapter_path = input_params.finetuning_params.reference_lora_path
@@ -275,8 +272,8 @@ class ModelRpcServer(rpyc.Service):
 
     # @calculate_time(show=True, min_cost_ms=200)
     # @calculate_time(show=True, min_cost_ms=0)
-    def exposed_decode_batch(self, batch_id):
-        return self.forward(batch_id, is_prefill=False)
+    def exposed_decode_batch(self, batch_id, decode_count=-1):
+        return self.forward(batch_id, is_prefill=False, decode_count=decode_count)
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def exposed_filter_batch(self, batch_id, req_id_list):
@@ -306,7 +303,7 @@ class ModelRpcServer(rpyc.Service):
         # torch.cuda.empty_cache()
         return
 
-    def forward(self, batch_id, is_prefill, prefill_interrupt_event=None):
+    def forward(self, batch_id, is_prefill, prefill_interrupt_event=None, decode_count=-1):
         batch: InferBatch = self.cache.pop(batch_id)
         # print(batch.requests)
         # print([req["request_id"] for req in batch.requests])
@@ -365,30 +362,17 @@ class ModelRpcServer(rpyc.Service):
 
             kwargs["no_lora_compute"] = self.input_params.no_lora_compute
             # kwargs["no_lora_copy"] = self.input_params.no_lora_copy 
-
+        if not is_prefill and decode_count == 2:
+            kwargs["print_time_profile"] = True
+        start = time.time()
         logits = engine.forward(**kwargs)
+        #print(f"Engine execution time: {time.time() - start:.3f}s")
 
         if logits is None:
             batch.nopad_max_len_in_batch += 1
             batch.nopad_b_seq_len += 1
             self.cache[batch.batch_id] = batch
             return None
-        
-        with torch.no_grad():
-            # numerically-stable soft-max in fp32
-            logits_fp32 = logits.float()
-            logits_fp32 -= logits_fp32.amax(dim=-1, keepdim=True)   # subtract row-wise max
-            probs_fp32   = torch.softmax(logits_fp32, dim=-1)
-
-            bad = torch.isnan(probs_fp32) | torch.isinf(probs_fp32) | (probs_fp32 < 0)
-            if bad.any():
-                rows = torch.unique(bad.nonzero(as_tuple=False)[:, 0]).tolist()
-                print(f"\n🚨  Invalid probabilities detected in rows {rows}")
-                for r in rows[:3]:                                   # print a few rows
-                    print("  logits sample :", logits[r, :10].cpu().tolist())
-                    print("  probs  sample :", probs_fp32[r, :10].cpu().tolist())
-                raise RuntimeError("Sampling aborted - NaN / Inf / negative probabilities")
-            
 
         next_token_ids, next_token_probs = sample(logits, batch)
         next_token_ids = next_token_ids.detach().cpu().numpy()
@@ -472,6 +456,7 @@ class ModelRpcServer(rpyc.Service):
             finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
         if finished:
             if self.enable_unified_mem_manager:
+                print("reset activation pool in alt mem manager")
                 self.model.alt_mem_manager.reset_activation_pool()
             else:
                 self.model.mem_manager.reset_activation_pool()
@@ -640,8 +625,8 @@ class ModelRpcClient:
             self.model.model.mem_manager.reset_activation_pool()
         return
 
-    async def decode_batch(self, batch_id):
-        ans = self._decode_batch(batch_id)
+    async def decode_batch(self, batch_id, decode_count=-1):
+        ans = self._decode_batch(batch_id, decode_count=decode_count)
         if self.use_rpc:
             return await ans
         else:

@@ -1,167 +1,184 @@
-from enum import Enum, auto
-import hashlib
-import queue
-from anyio import sleep
-import numpy as np
-from slora.common.activation_writer import ActivationWriter
-from slora.common.mem_triton import triton_copy_rows
 import torch
-from collections import deque
-
-import triton
-import triton.language as tl
-import datetime, os, errno
 import threading
-import nvtx 
-import time
+from enum import Enum, auto
 
 
-def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
-    h = hashlib.new(algo)
-    h.update(t.detach().cpu().numpy().tobytes())
-    return h.hexdigest()
-    
 def get_tensor_size_kb(numel: int, dtype: torch.dtype) -> float:
-        dtype_size_map = {
-            torch.float32: 4,
-            torch.float16: 2,
-            torch.bfloat16: 2,
-            torch.float64: 8,
-            torch.int8: 1,
-            torch.int16: 2,
-            torch.int32: 4,
-            torch.int64: 8,
-            torch.bool: 1,
-        }
-        bytes_per_element = dtype_size_map[dtype]
-        return (numel * bytes_per_element) / 1024
+    """Helper to compute tensor element size in KB."""
+    dtype_size_map = {
+        torch.float32: 4,
+        torch.float16: 2,
+        torch.bfloat16: 2,
+        torch.float64: 8,
+        torch.int8: 1,
+        torch.int16: 2,
+        torch.int32: 4,
+        torch.int64: 8,
+        torch.bool: 1,
+    }
+    bytes_per_element = dtype_size_map[dtype]
+    return (numel * bytes_per_element) / 1024
 
 
 class PageType(Enum):
-    KV_CACHE        = auto()
-    ADAPTER_WEIGHT  = auto()
-    ATTENTION_INPUT_ACTIVATION     = auto() 
-    FFN_INPUT_ACTIVATION      = auto()
+    FREE = 0
+    KV_CACHE = auto()
+    ADAPTER_WEIGHT = auto()
+    ATTENTION_INPUT_ACTIVATION = auto()
+    FFN_INPUT_ACTIVATION = auto()
     EMBEDDING = auto()
 
-class PageTable:
-    def __init__(self, max_gpu_slots: int):
-        self.vpid_counter      = 5
-        self.vpid_to_phys      = {}                 # vpid → ('gpu'|'cpu', idx)
-        self.vpid_to_type      = {}                 # vpid → PageType
-        self.gpu_slot_to_vpid  = [None] * max_gpu_slots
-        self.free_phys_pages_queue = queue.Queue(maxsize=max_gpu_slots)
-        for i in range(max_gpu_slots):
-            self.free_phys_pages_queue.put(i)
-
-    def get_next_vpid(self) -> int:
-        vpid = self.vpid_counter
-        self.vpid_counter += 1
-        return vpid
-
-    def set_type(self, vpid: int, ptype: PageType):
-        self.vpid_to_type[vpid] = ptype
-
-    def get_type(self, vpid: int) -> PageType:
-        return self.vpid_to_type[vpid]
-
-    def set_gpu_mapping(self, vpid: int, gpu_idx: int):
-        self.vpid_to_phys[vpid]  = ('gpu', gpu_idx)
-        self.gpu_slot_to_vpid[gpu_idx] = vpid
-
-    def set_cpu_mapping(self, vpid: int):
-        self.vpid_to_phys[vpid] = ('cpu', vpid)
-
-    def get_location_index(self, vpid: int):
-        return self.vpid_to_phys[vpid]
-
-    def remove(self, vpid: int):
-        loc, idx = self.vpid_to_phys[vpid]
-        if loc == 'gpu':
-            self.gpu_slot_to_vpid[idx] = None
-        del self.vpid_to_phys[vpid]
-        del self.vpid_to_type[vpid]
-    
-    def vpids_to_types(self, vpids):
-        """
-        Returns a list of unique PageType for the given vpids.
-        """
-        types = set()
-        for vpid in vpids:
-            types.add(self.get_type(vpid))
-        return list(types)
-
-    def evictable_gpu_slots(self):
-        """
-        Yields (gpu_idx, vpid, page_type) for every page resident on GPU.
-        """
-        for idx, vpid in enumerate(self.gpu_slot_to_vpid):
-            if vpid is not None:
-                yield idx, vpid, self.get_type(vpid)
-
-# 14000 pages
-# decode: 14500 pages
-# inference only: where is the mem heavy load: decode
-# decode kernel take all kv cache in the batch
-# adapter, kv cache
-# two way to go: 1. separate a decode batch to several smaller batches
-#              2. change the mem manager from 32 pools to one pool (swap in layer by layer)
 
 class UnifiedMemoryAllocator:
-    def __init__(self, head_num, head_dim, vocab_size, layer_num: int, max_pool_size: int, dtype=torch.float16, device='cuda', log_path=None):
+    """
+    Simplified allocator assuming everything fits in GPU memory.
+    Uses global free bitmap and page_type_map shared by all layers.
+    All layers allocate/free the same physical pages together.
+    """
+
+    def __init__(self, head_num, head_dim, vocab_size, layer_num: int,
+                 max_pool_size: int, dtype=torch.float16, device="cuda", log_path=None):
         self.head_dim = head_dim
         self.head_num = head_num
-        self.hidden_dim  = head_num * head_dim
-        self.layer_num   = layer_num
-        self.device      = device
-        self.dtype      = dtype
+        self.hidden_dim = head_num * head_dim
+        self.layer_num = layer_num
+        self.device = device
+        self.dtype = dtype
         self.vocab_size = vocab_size
-        self.tot_size = int(max_pool_size * 1024 * 1024 / self.layer_num / get_tensor_size_kb(self.head_num * self.head_dim, self.dtype))
+
+        # total number of slots per layer
+        self.tot_size = int(
+            max_pool_size * 1024 * 1024
+            / self.layer_num
+            / get_tensor_size_kb(self.head_num * self.head_dim, self.dtype)
+        )
+
+        # contiguous tensor pool for each layer
         self.gpu_pools = [
             torch.empty((self.tot_size, self.head_num, self.head_dim),
                         device=self.device, dtype=self.dtype)
             for _ in range(self.layer_num)
         ]
-        self.cpu_pools = [{} for _ in range(self.layer_num)]
-        
-        # mem_state[i] == 0 → free, 1 → occupied (GPU only)
-        # self.mem_state = torch.zeros(self.tot_size,
-        #                              dtype=torch.int8, device='cpu')
 
-        self.pinned_pages = set()
+        # bitmaps shared by all layers
+        self.page_type_map = torch.zeros(self.tot_size, dtype=torch.long, device=self.device)
+        self.free_bitmap = torch.ones(self.tot_size, dtype=torch.bool, device=self.device)  # True=free
 
-        # Central page table
-        self.page_table = PageTable(max_gpu_slots=self.tot_size)
-        # Finetune task parameters
-        self.request_token_info = []    # request_token_info = [num_finetune_tokens_request_1, ...]
+        self.page_table_lock = threading.RLock()
+
+        # bookkeeping
+        self.request_token_info = []
+        self.activation_page_indices = []  # list of tuples: (FFN_input_phys_ids, ATTENTION_input_phys_ids)
         self.finetune_input_ids = []
-        self.alignment_completion_masks = []
-        self.alignment_labels= []
         self.finetune_logits_per_request = []
         self.reference_logits_per_request = []
-        # Logging
-        self.log_path = log_path
-        #self.logging_enabled = log_path is not None
-        self.logging_enabled = False
-        self.accessed_layers = None
-        self.last_accessed_vpids = None
-        # Thread-safety
-        self.page_table_lock = threading.RLock()  # serialize page table accesses
-        self.log_lock = threading.RLock()  # serialize file writes (optional)
-        self.thread_pool_dict = {}
-        self.thread_count = 0
-        if self.logging_enabled:
-            self.t0_ns = time.perf_counter_ns()
-            if os.path.exists(self.log_path):
-                os.remove(self.log_path)
         self.shared_transformer_out_activations = None
         self.shared_attention_out_activations = None
         self.embedding_output = None
         self.max_finetuning_tokens = 512
         self.init_shared_activation_memory()
-        #self.activation_writer = ActivationWriter(self)
-        self.saved_layer_0_activations = None
 
+    def _num_free_gpu_slots(self) -> int:
+        """
+        Return the number of currently free GPU slots (global across all layers).
+        """
+        with self.page_table_lock:
+            return int(self.free_bitmap.sum().item())
+    
+    def alloc(self, num_pages: int, page_type: PageType) -> torch.Tensor:
+        """
+        Allocate `num_pages` GPU slots globally across all layers.
+        Returns tensor of physical indices shared by all layers.
+        """
+        with self.page_table_lock:
+            free_idx = torch.nonzero(self.free_bitmap, as_tuple=False).flatten()
+            if free_idx.numel() < num_pages:
+                raise RuntimeError(
+                    f"Not enough free pages: need {num_pages}, have {free_idx.numel()}."
+                )
+
+            alloc_ids = free_idx[:num_pages]
+            self.free_bitmap[alloc_ids] = False
+            self.page_type_map[alloc_ids] = int(page_type.value)
+            return alloc_ids
+
+    def free(self, phys_ids: torch.Tensor):
+        """
+        Free pages globally for all layers.
+        """
+        with self.page_table_lock:
+            if not isinstance(phys_ids, torch.Tensor):
+                phys_ids = torch.as_tensor(phys_ids, dtype=torch.long, device=self.device)
+
+            self.page_type_map[phys_ids] = int(PageType.FREE.value)
+            self.free_bitmap[phys_ids] = True
+
+    def alloc_contiguous_kv(self, need_size: int, page_type: PageType):
+        with self.page_table_lock:
+            free_mask = self.free_bitmap
+            free_idx = torch.nonzero(free_mask, as_tuple=False).flatten()
+            if free_idx.numel() < 2 * need_size:
+                return None  # not enough total free slots
+            # find contiguous free runs
+            diffs = free_idx[1:] - free_idx[:-1]
+            # gaps = 1 means contiguous, 0 means break
+            # create run IDs for consecutive groups
+            run_starts = torch.cat((
+                torch.tensor([0], device=self.device),
+                torch.nonzero(diffs != 1, as_tuple=False).flatten() + 1
+            ))
+            run_ends = torch.cat((run_starts[1:], torch.tensor([free_idx.numel()], device=self.device)))
+            # scan for a contiguous run of at least 2 * need_size
+            start_idx = None
+            for s, e in zip(run_starts.tolist(), run_ends.tolist()):
+                run_len = e - s
+                if run_len >= 2 * need_size:
+                    start_idx = free_idx[s].item()
+                    break
+
+            if start_idx is None:
+                return None  # no large enough contiguous segment found
+
+            end_idx = start_idx + 2 * need_size
+            phys_all = torch.arange(start_idx, end_idx, dtype=torch.long, device=self.device)
+
+            # mark them as used
+            self.free_bitmap[phys_all] = False
+            self.page_type_map[phys_all] = int(page_type.value)
+
+            # split into K/V halves
+            phys_k = phys_all[:need_size]
+            phys_v = phys_all[need_size:]
+            return phys_k, start_idx, start_idx + need_size, phys_v, start_idx + need_size, end_idx
+
+
+    def reset_activation_pool(self):
+        """
+        Clears activation-related states and frees activation pages globally.
+        """
+        with self.page_table_lock:
+            self.request_token_info.clear()
+            self.finetune_input_ids.clear()
+            self.finetune_logits_per_request.clear()
+            self.reference_logits_per_request.clear()
+            self.activation_page_indices.clear()
+
+            mask = (self.page_type_map == int(PageType.ATTENTION_INPUT_ACTIVATION.value)) | (
+                self.page_type_map == int(PageType.FFN_INPUT_ACTIVATION.value)
+            )
+            idx = torch.nonzero(mask, as_tuple=False).flatten()
+            if idx.numel() > 0:
+                for pool in self.gpu_pools:
+                    pool[idx].zero_()
+                self.page_type_map[idx] = int(PageType.FREE.value)
+                self.free_bitmap[idx] = True
+
+
+    def page_size_kb(self) -> float:
+        t = self.gpu_pools[0][0]
+        s_kb = t.numel() * t.element_size() / 1024.0
+        return s_kb * self.layer_num
+    
     def init_shared_activation_memory(self):
         self.shared_transformer_out_activations = [
             torch.zeros((self.max_finetuning_tokens, self.head_num * self.head_dim),
@@ -187,7 +204,65 @@ class UnifiedMemoryAllocator:
             "attention_out_activations": self.shared_attention_out_activations,
             "input_layer_output": self.embedding_output
         }
+
+    def get_concatenated_finetune_input_ids(self):
+        if not self.finetune_input_ids:
+            return self.concat_input_ids[:0]
+        cat_ids = torch.cat(self.finetune_input_ids, dim=0).to(self.concat_input_ids.device)
+        n = cat_ids.numel()
+        if n > self.concat_input_ids.numel():
+            raise ValueError(f"concat_input_ids capacity {self.concat_input_ids.numel()} < needed {n}")
+        self.concat_input_ids[:n].copy_(cat_ids)
+        return self.concat_input_ids[:n]
     
+    def copy_rows_to_layer(self, layer_id: int, phys_ids, rows: torch.Tensor):
+        """
+        Copy `rows` into self.gpu_pools[layer_id][vpids], paging-in any CPU pages first.
+        """
+        assert rows.dim() == 2 or rows.dim() == 3, \
+            f"Expected 2D or 3D tensor for rows, got shape {rows.shape}"
+        assert layer_id < self.layer_num, f"Invalid layer_id {layer_id}"
+        if rows.device != self.device or rows.dtype != self.gpu_pools[layer_id].dtype:
+            rows = rows.to(device=self.device, dtype=self.gpu_pools[layer_id].dtype,non_blocking=True)
+        # ensure shape consistency
+        rows_reshaped = rows.view(-1, self.head_num, self.head_dim)
+        self.gpu_pools[layer_id][phys_ids] = rows_reshaped
+
+
+    def save_activations_by_layer(self, layer_id, input_embs, infer_state, page_type, phys_ids=None):
+        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
+        #finetune_activations = input_embs[finetune_mask].clone()
+        finetune_activations = input_embs[finetune_mask]
+        num_new_tokens = finetune_activations.shape[0]
+        if phys_ids is None:
+            phys_ids = self.alloc(num_new_tokens, page_type)
+        else:
+            if len(phys_ids) != num_new_tokens:
+                raise ValueError(f"Expected {num_new_tokens} phys_ids, got {len(phys_ids)}")
+        self.gpu_pools[layer_id][phys_ids] = finetune_activations.view(-1, self.head_num, self.head_dim)
+        return phys_ids
+        
+    def save_embedding_output(self, input_embs, infer_state):
+        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
+        finetune_activations = input_embs[finetune_mask]
+        prev_total = sum(self.request_token_info)
+        num_new_tokens = finetune_activations.shape[0]
+        self.embedding_output[prev_total : prev_total + num_new_tokens] = finetune_activations
+    
+    def write_to_logit_tensor(self, logits, FFN_input_pids, attention_input_pids):
+        #self.finetune_logits_per_request.extend(logits)
+        accumlate_len = sum(self.request_token_info)
+        for logit in logits:
+            n = logit.size(0)
+            accumlate_len += n
+            self.request_token_info.append(n)
+        self.activation_page_indices.append((FFN_input_pids, attention_input_pids))
+        flat_logits = torch.cat(logits, dim=0)
+        total_tokens = flat_logits.size(0)
+        end_pos = min(accumlate_len, self.logit_tensor.size(0))
+        self.logit_tensor[accumlate_len - total_tokens:end_pos].copy_(flat_logits, non_blocking=True)
+    
+
     def export_requests_info(self):
         self.get_concatenated_finetune_input_ids()
         self.saved_layer_0_activations = None
@@ -198,673 +273,74 @@ class UnifiedMemoryAllocator:
                                          self.shared_transformer_out_activations[layer_id])
         requests_info_dict = {
             "request_token_info": self.request_token_info,
-            "finetuning_logits_per_request": self.finetune_logits_per_request,
+            #"finetuning_logits_per_request": self.finetune_logits_per_request,
         }
         return requests_info_dict
 
-    def get_concatenated_finetune_input_ids(self):
-        cat_ids = torch.cat(self.finetune_input_ids, dim=0)
-        n = cat_ids.numel()
-        self.concat_input_ids[:n].copy_(cat_ids)
-        return self.concat_input_ids
-    
-    def write_to_logit_tensor(self, logits):
-        self.finetune_logits_per_request.extend(logits)
-        accumlate_len = sum(self.request_token_info)
-        for logit in logits:
-            n = logit.size(0)
-            #self.logit_tensor[accumlate_len:accumlate_len + n, :].copy_(logit)
-            accumlate_len += n
-            self.request_token_info.append(n)
-        #print(f"Logit tensor hash: {tensor_hash(self.logit_tensor[:accumlate_len])}", flush=True)
-
     def fill_activations_by_layer(self, layer_id, page_type, dest):
-        if len(self.request_token_info) == 0:
+        """
+        Gather activations of the given PageType for a specific layer, in the same
+        order as requests were recorded in self.activation_page_indices.
+
+        Args:
+            layer_id (int): Which layer's pool to read from.
+            page_type (PageType): Which activation type to export (FFN_INPUT_ACTIVATION or ATTENTION_INPUT_ACTIVATION).
+            dest (torch.Tensor): Destination tensor to fill with shape [max_finetuning_tokens, hidden_dim].
+
+        Returns:
+            dest (torch.Tensor): Filled up to total_tokens rows.
+        """
+        if not self.activation_page_indices or len(self.request_token_info) == 0:
             return None
+
         total_tokens = sum(self.request_token_info)
-        # 1. Filter vpids by type
-        matching_vpids = [
-            vpid for vpid, typ in self.page_table.vpid_to_type.items()
-            if typ == page_type
-        ]
+        layer_pool = self.gpu_pools[layer_id]
+        collected = []
+        # Map PageType → index position in the tuple
+        # (FFN_INPUT_ACTIVATION, ATTENTION_INPUT_ACTIVATION)
+        idx_pos = 0 if page_type == PageType.FFN_INPUT_ACTIVATION else 1
 
-        # 2. Collect unique valid vpids for this layer
-        seen = set()
-        present_vpids = []
-        cpu_layer_pool = self.cpu_pools[layer_id]
+        # Collect activation tensors per request
+        for ffn_phys_ids, attn_phys_ids in self.activation_page_indices:
+            phys_ids = ffn_phys_ids if idx_pos == 0 else attn_phys_ids
+            if phys_ids is not None and len(phys_ids) > 0:
+                collected.append(layer_pool.index_select(0, phys_ids))
 
-        for vpid in matching_vpids:
-            loc, idx = self.page_table.get_location_index(vpid)
-            if vpid in seen:
-                continue
-            if loc == 'gpu' and idx is not None and 0 <= idx < self.tot_size:
-                present_vpids.append(vpid)
-                seen.add(vpid)
-            elif loc == 'cpu' and vpid in cpu_layer_pool:
-                present_vpids.append(vpid)
-                seen.add(vpid)
+        if not collected:
+            raise ValueError(f"No activations found for {page_type.name} in layer {layer_id}.")
 
-        if len(present_vpids) != total_tokens:
-            raise ValueError(
-                f"Expected {total_tokens} unique pages for layer {layer_id}, "
-                f"but found {len(present_vpids)} with type {page_type.name}"
-            )
-        present_vpids.sort() 
-        self.pin_pages(present_vpids)  # Ensure all are resident on GPU
-        # 3. Page in CPU-resident pages (non-destructive)
-        cpu_vpids = [v for v in present_vpids if self.page_table.get_location_index(v)[0] == "cpu"]
+        # Concatenate in request order and flatten to [total_tokens, hidden_dim]
+        flat = torch.cat(collected, dim=0).reshape(total_tokens, -1)
 
-        if cpu_vpids:
-            if page_type == PageType.FFN_INPUT_ACTIVATION:
-                priority = {
-                    PageType.KV_CACHE:  0,
-                    PageType.ADAPTER_WEIGHT: 1,
-                    PageType.ATTENTION_INPUT_ACTIVATION: 2,  
-                    PageType.FFN_INPUT_ACTIVATION: 3,
-                }
-            else:
-                priority = {
-                    PageType.KV_CACHE:  0,
-                    PageType.ADAPTER_WEIGHT: 1,
-                    PageType.FFN_INPUT_ACTIVATION: 2,  
-                    PageType.ATTENTION_INPUT_ACTIVATION: 3,
-                }
-            self._pages_in(cpu_vpids, priority=priority)
+        # Copy into destination tensor
+        if dest.device != flat.device or dest.dtype != flat.dtype:
+            dest = dest.to(device=flat.device, dtype=flat.dtype)
+        dest[:total_tokens].copy_(flat, non_blocking=True)
 
-        # 4. Extract GPU slot indices
-        self.assert_vpid_on_gpu(present_vpids)
-        gpu_indices = [self.page_table.get_location_index(v)[1] for v in present_vpids]
-        dest[:total_tokens].copy_(self.gpu_pools[layer_id][gpu_indices].view(total_tokens, -1))
-
-        # activation = dest[:total_tokens]
-        # if page_type == PageType.FFN_INPUT_ACTIVATION and layer_id==0:
-        #     self.saved_layer_0_activations = activation.clone()
-        self.unpin_pages(present_vpids) 
-    
-    def get_thread_id(self, id):
-        if id in self.thread_pool_dict.keys():
-            return self.thread_pool_dict[id]
-        else:
-            self.thread_pool_dict[id] = self.thread_count
-            self.thread_count += 1
-            return self.thread_pool_dict[id] 
-
-    def _now_ns(self) -> int:
-        """Nanoseconds since mem-manager start (monotonic, high resolution)."""
-        return time.perf_counter_ns() - self.t0_ns
-    
-    def page_size_kb(self) -> float:
-        t = self.gpu_pools[0][0]
-        s_kb = t.numel() * t.element_size() / 1024.0
-        return s_kb*self.layer_num
-    
-    def assert_vpid_on_gpu(self, vpids):
-        if isinstance(vpids, torch.Tensor):
-            vpids = vpids.tolist()
-
-        non_gpu = [vpid for vpid in vpids if self.page_table.get_location_index(vpid)[0] != 'gpu']
-        if non_gpu:
-            raise RuntimeError(f"These vpids are not on GPU: {non_gpu}")
-    
-    def _log(self, msg: str, print_count=True):
-        if not self.logging_enabled:
-            return
-        # compute live statistics
-        used_gpu = self.tot_size - self._num_free_gpu_slots()
-        cpu_pages = sum(
-            1 for loc, _ in self.page_table.vpid_to_phys.values()
-            if loc == 'cpu'
-        )
-        ts_ns = self._now_ns()
-        line = f"[{ts_ns}] {msg.ljust(25)} "
-        if print_count:
-            line += (f"\t|GPU {used_gpu}/{self.tot_size:<4} "
-                    f"CPU {cpu_pages}| Page Size {self.page_size_kb():.2f} KB |")
-            line += f"(Pinned pages: {len(self.pinned_pages)})"
-            line += f"(Thread ID: {self.get_thread_id(threading.get_ident())})"
-        # make parent dir once
-        try:
-            os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
-        with self.log_lock:
-            with open(self.log_path, "a") as f:
-                f.write(line + "\n")
-
-    def layer_accum_log(self, layer_id: int, vpids, msg: str, ignore_vpid_changes: bool = False):
-        if not self.logging_enabled:
-            return
-        if self.accessed_layers is None or self.last_accessed_vpids is None:
-            self.accessed_layers = [layer_id]
-            self.last_accessed_vpids = vpids.copy()
-            return
-
-        is_disjoint = abs(layer_id - self.accessed_layers[-1]) != 1
-        is_vpid_changed = not ignore_vpid_changes and vpids != self.last_accessed_vpids
-        is_last_layer = len(self.accessed_layers) != 1 and (layer_id == self.layer_num - 1 or layer_id == 0)
-
-        self.accessed_layers.append(layer_id)
-        self.last_accessed_vpids = vpids.copy()
-
-        if is_disjoint or is_vpid_changed or is_last_layer:
-            msg += f" accessed layers {self.accessed_layers}"
-            if vpids!=None:
-                msg += f" | vpids={len(vpids)}"
-            msg += f"(Pinned pages: {len(self.pinned_pages)})"
-            msg += f"(Thread ID: {self.get_thread_id(threading.get_ident())})"
-            self._log(msg)
-            self.accessed_layers = None
-            self.last_accessed_vpids = None
-
-    def _num_free_gpu_slots(self) -> int:
-        # mem_state is on CPU, so .sum() is cheap
-        with self.page_table_lock:
-            #free_slots = int(self.tot_size - self.mem_state.sum().item())
-            free_slots_1 = self.page_table.free_phys_pages_queue.qsize()
-            return free_slots_1
-
-    def _get_free_gpu_slots(self, num_needed: int) -> list[int]:
-        """
-        Return a list of `num_needed` free GPU slot indices.
-        Raise RuntimeError if not enough slots are available.
-        """
-        with self.page_table_lock:
-            # free_slots = [i for i, state in enumerate(self.mem_state) if state == 0]
-            # if len(free_slots) < num_needed:
-            #     raise RuntimeError(f"Requested {num_needed} free slots, but only found {len(free_slots)}")
-            free_slots = [self.page_table.free_phys_pages_queue.get() for _ in range(num_needed)]
-            return free_slots
-
-    def alloc(self, num_pages: int, page_type: PageType):
-        with self.page_table_lock:
-            free_now   = self._num_free_gpu_slots()
-            shortfall  = max(0, num_pages - free_now)
-            if shortfall:                                  
-                self._pages_out(self._find_victim_pages(shortfall))
-            
-            free_slots = [self.page_table.free_phys_pages_queue.get() for _ in range(num_pages)]
-            #time.sleep(0.1)
-            vpids = []
-            for gpu_idx in free_slots:
-                vpid = self.page_table.get_next_vpid()
-                self.page_table.set_type(vpid, page_type)
-                self.page_table.set_gpu_mapping(vpid, gpu_idx)
-                #self.mem_state[gpu_idx] = 1
-                vpids.append(vpid)
-            self._log(f"ALLOC: #pages={num_pages}, type={page_type.name}, {vpids}")
-            return vpids
-    
-    def free(self, vpids):
-        with self.page_table_lock:
-            if isinstance(vpids, torch.Tensor):
-                vpids = vpids.tolist()
-            num_gpu = 0
-            cpu_layers = self.cpu_pools  # cache reference
-
-            for vpid in vpids:
-                location, idx = self.page_table.get_location_index(vpid)
-                if location == 'gpu':
-                    # Free GPU slot
-                    #self.mem_state[idx] = 0
-                    self.page_table.free_phys_pages_queue.put(idx)
-                    # for layer_pool in self.gpu_pools:
-                    #     layer_pool[idx].zero_()  # optional: clear data
-                    num_gpu += 1
-                    
-                # Remove from all CPU layers if exists
-                for layer_pool in cpu_layers:
-                    layer_pool.pop(vpid, None)  # safe, no KeyError
-
-                self.page_table.remove(vpid)
-
-            self._log(f"FREE: {len(vpids)} pages, {num_gpu} on GPU, vpids: {vpids}")
-
-    def _find_victim_pages(self, num_needed: int, priority: dict = None):
-        with self.page_table_lock:
-            if priority is None:
-                priority = {
-                    PageType.FFN_INPUT_ACTIVATION: 0,
-                    PageType.ATTENTION_INPUT_ACTIVATION: 1,
-                    PageType.KV_CACHE:  2,
-                    PageType.ADAPTER_WEIGHT: 3
-                }
-
-            candidates = []
-            for gpu_idx, vpid, ptype in self.page_table.evictable_gpu_slots():
-                if vpid in self.pinned_pages:
-                    continue
-                candidates.append((priority[ptype], gpu_idx))
-
-            candidates.sort()              # lower priority value → evict first
-            victims = [gpu_idx for _, gpu_idx in candidates[:num_needed]]
-
-            if len(victims) < num_needed:
-                self._log(f"ERROR: Not enough evictable GPU pages. "
-                        f"Needed {num_needed}, found {len(victims)}.")
-                raise RuntimeError("Not enough evictable GPU pages.")
-            else:
-                if self.logging_enabled:
-                    # count victim pages types:
-                    victim_type_counts = {}
-                    for gpu_idx in victims:
-                        vpid = self.page_table.gpu_slot_to_vpid[gpu_idx]
-                        ptype = self.page_table.get_type(vpid)
-                        if ptype in victim_type_counts:
-                            victim_type_counts[ptype] += 1
-                        else:
-                            victim_type_counts[ptype] = 1
-                    self._log(f"_find_victim_pages: Victim pages: {victim_type_counts}")
-                self._pages_out(victims)
-            return victims
-
-
-    def _pages_out(self, gpu_idxs):
-        with self.page_table_lock:
-            self._log(f"PAGING OUT: {len(gpu_idxs)} GPU slots {gpu_idxs} to CPU")
-            for gpu_idx in gpu_idxs:
-                vpid = self.page_table.gpu_slot_to_vpid[gpu_idx]
-
-                for layer in range(self.layer_num):
-                    if vpid not in self.cpu_pools[layer]:
-                        # Copy to CPU only if not already cached
-                        cpu_tensor = self.gpu_pools[layer][gpu_idx].to('cpu').clone()
-                        self.cpu_pools[layer][vpid] = cpu_tensor
-
-                # Book-keeping: release GPU slot
-                self.page_table.set_cpu_mapping(vpid)
-                self.page_table.gpu_slot_to_vpid[gpu_idx] = None
-                self.page_table.free_phys_pages_queue.put(gpu_idx)
-                #self.mem_state[gpu_idx] = 0
-
-    def _pages_in(self, vpids, priority = None):
-        with self.page_table_lock:
-            self._log(f"PAGING IN: {len(vpids)} CPU pages {vpids} to GPU")
-            num_needed = len(vpids) - self._num_free_gpu_slots()
-            if num_needed > 0:
-                self._pages_out(self._find_victim_pages(num_needed, priority))
-
-            free_slots = self._get_free_gpu_slots(len(vpids))
-            for vpid, gpu_idx in zip(vpids, free_slots):
-                for layer in range(self.layer_num):
-                    cpu_tensor = self.cpu_pools[layer][vpid]  # Must exist
-                    self.gpu_pools[layer][gpu_idx].copy_(cpu_tensor)
-
-                self.page_table.set_gpu_mapping(vpid, gpu_idx)
-                #self.mem_state[gpu_idx] = 1
-
-    
-    def alloc_cpu(self, num_pages: int, page_type: PageType):
-        with self.page_table_lock:
-            self._log(f"ALLOC_CPU: size={num_pages}, type={page_type.name}")
-            vpids = []
-            for _ in range(num_pages):
-                vpid = self.page_table.get_next_vpid()
-                self.page_table.set_type(vpid, page_type)
-                self.page_table.set_cpu_mapping(vpid)
-
-                # one row per layer, shape == (head_num, head_dim)
-                for layer in range(self.layer_num):
-                    self.cpu_pools[layer][vpid] = torch.empty(
-                        (self.head_num, self.head_dim),
-                        dtype=torch.float32, device='cpu')
-                vpids.append(vpid)
-            return vpids
-    
-    def pin_pages(self, vpids):
-        with self.page_table_lock:
-            #self._log(f"PIN PAGES: {len(vpids)} pages to GPU")
-            if isinstance(vpids, torch.Tensor):
-                vpids = vpids.tolist()
-            self.pinned_pages.update(vpids)
-
-    def unpin_pages(self, vpids):
-        with self.page_table_lock:
-                #self._log(f"UNPIN PAGES: {len(vpids)} pages from GPU")
-            if isinstance(vpids, torch.Tensor):
-                vpids = vpids.tolist()
-            for vpid in vpids:
-                self.pinned_pages.discard(vpid)
-
-    def copy_rows_to_layer(self,
-                       layer_id: int,
-                       vpids,
-                       rows: torch.Tensor):
-        """
-        Copy `rows` into self.gpu_pools[layer_id][vpids].
-
-        Parameters
-        ----------
-        vpids : List[int] or 1D Tensor[int]
-            Virtual page IDs whose corresponding physical slots will receive the rows.
-
-        rows : Tensor of shape [N, head_dim * head_num] or [N, head_num, head_dim]
-            Data to be copied into the GPU pool.
-        """
-        self.layer_accum_log(layer_id, vpids, "COPY_ROWS: ")
-
-        # Fast path: convert vpids to list if tensor
-        if isinstance(vpids, torch.Tensor):
-            vpids = vpids.tolist()
-
-        N = len(vpids)
-        expected_flat = self.head_num * self.head_dim
-
-        # Normalize input shape to [N, head_num, head_dim]
-        if rows.ndim == 2:
-            if rows.shape[1] != expected_flat:
-                raise ValueError(f"rows.shape[1] must be {expected_flat}, got {rows.shape[1]}")
-            rows = rows.view(N, self.head_num, self.head_dim)
-        elif rows.ndim == 3:
-            if rows.shape != (N, self.head_num, self.head_dim):
-                raise ValueError(f"rows.shape must be [{N}, {self.head_num}, {self.head_dim}], got {list(rows.shape)}")
-        else:
-            raise ValueError("rows must be 2-D or 3-D")
-
-        # Identify which vpids need paging-in
-        page_locations = [self.page_table.get_location_index(vpid) for vpid in vpids]
-        cpu_vpids = [vpid for vpid, (loc, _) in zip(vpids, page_locations) if loc == 'cpu']
-        if cpu_vpids:
-            self._pages_in(cpu_vpids)
-
-        # Ensure all vpids are now on GPU and map to valid indices
-        gpu_indices = [self.page_table.get_location_index(vpid)[1] for vpid in vpids]
-        self.assert_vpid_on_gpu(vpids)
-
-        # Convert gpu_indices once to tensor
-        gpu_idx_tensor = torch.tensor(gpu_indices, dtype=torch.long, device=self.device)
-
-        # Ensure data is on correct device and dtype (avoid unnecessary .to if already correct)
-        if rows.device != self.device or rows.dtype != self.gpu_pools[layer_id].dtype:
-            rows = rows.to(device=self.device, dtype=self.gpu_pools[layer_id].dtype)
-
-        # Write to the correct GPU slots
-        self.gpu_pools[layer_id].index_copy_(0, gpu_idx_tensor, rows)
-    
-    
-    def to_gpu_index(self, vpids) -> torch.Tensor:
-        """
-        !!!! Must be used with pin/unpin to avoid eviction !!!!
-        Given a list / 1-D tensor of virtual page IDs, guarantee they are
-        resident on GPU and return a tensor of *physical* slot indices
-        (same order).
-        Parameters
-        ----------
-        vpids : List[int] | torch.Tensor[int64]
-            Virtual page IDs to translate.
-
-        Returns
-        -------
-        gpu_idx : torch.Tensor[int64]   (device = self.device)
-            Row indices such that
-                gpu_pools[layer_id][gpu_idx[i]]   ←→   vpids[i]
-        """
-        #self._log(f"TO GPU INDEX")
-        if isinstance(vpids, torch.Tensor):
-            vpids = vpids.tolist()
-        cpu_vpids = [v for v in vpids
-                    if self.page_table.get_location_index(v)[0] == "cpu"]
-        if cpu_vpids:
-            self._pages_in(cpu_vpids)        # will evict if space is short
-        self.assert_vpid_on_gpu(vpids)     # ensure all are on GPU
-        gpu_idx = torch.tensor(
-            [self.page_table.get_location_index(v)[1] for v in vpids],
-            dtype=torch.long,
-            device=self.device,
-        )
-        return gpu_idx
-
+        return dest
 
     def prepare_b_locs_for_layer(
         self,
-        b_loc_key:   torch.Tensor,   # [batch, max_len]  (int64 vpids)
-        b_loc_value: torch.Tensor,   # [batch, max_len]  (int64 vpids)
-        b_seq_len:   torch.Tensor,   # [batch]           (int32 lengths)
-        layer_id:    int
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        • Pages-in every VPID that occurs in the *valid* (right-aligned) part
-        of `b_loc_key` + `b_loc_value`.
-        • Translates those VPIDs to physical GPU-slot indices.
-        • Returns:
-            ( gpu_pool_for_layer,  gpu_b_loc_key,  gpu_b_loc_value, vpid_to_unpin )
-
-        gpu_b_loc_* have the same shape as the inputs but contain *physical*
-        row numbers; padding positions are left as-is (0).
-        Important: vpid_to_unpin is a list of VPIDs that should be unpinned after use.
-        """
-        msg = f"PREPARE_B_LOCS: "
-        msg+= f"layer{layer_id}"
-        #self.layer_accum_log(layer_id, [], msg, ignore_vpid_changes=True)
-        self._log(msg)
-        vpids = torch.unique(
-            torch.cat((b_loc_key.flatten(), b_loc_value.flatten()))
-        )
-        vpids = vpids[vpids != 0]          # drop padding zeros
-    
-        if vpids.numel():                  # only if real vpids exist
-            # pages-in & translate → gpu rows
-            self.pin_pages(vpids)
-            gpu_rows = self.to_gpu_index(vpids)   # guarantees residency
-            # fast LUT (size = max_vpid+1)  0 maps to 0 by default
-            lut = torch.zeros(int(vpids.max()) + 1,
-                            dtype=torch.long, device='cuda')
-            lut[vpids] = gpu_rows
-        else:
-            # nothing to map: return zero tensors
-            zero_k = torch.zeros_like(b_loc_key)
-            zero_v = torch.zeros_like(b_loc_value)
-            return self.gpu_pools[layer_id], zero_k, zero_v, []
-
-        # ─────────────────────────────────────────────────────────────
-        # 2. Create zero-filled output tensors and scatter slot indices
-        # ─────────────────────────────────────────────────────────────
-        gpu_b_loc_key   = torch.zeros_like(b_loc_key)
-        gpu_b_loc_value = torch.zeros_like(b_loc_value)
-
-        nz_mask_key   = b_loc_key   != 0
-        nz_mask_value = b_loc_value != 0
-
-        gpu_b_loc_key  [nz_mask_key]   = lut[b_loc_key  [nz_mask_key]]
-        gpu_b_loc_value[nz_mask_value] = lut[b_loc_value[nz_mask_value]]
-
-        vpid_to_unpin = vpids
-
-        return self.gpu_pools[layer_id], gpu_b_loc_key, gpu_b_loc_value, vpid_to_unpin
-    
-    # def save_activations_by_layer(self, layer_id, input_embs, infer_state, vpids):
-    #     finetune_activations = input_embs[infer_state.finetune_mask].clone()  # shape: [N, hidden_size]
-    #     if len(vpids) != finetune_activations.shape[0]:
-    #         raise ValueError(f"Expected {finetune_activations.shape[0]} vpids, got {len(vpids)}")
-    #     self.pin_pages(vpids)  
-    #     self.copy_rows_to_layer(layer_id, vpids, finetune_activations)
-    #     self.unpin_pages(vpids)  
-    #     return vpids
-    
-    def save_activations_by_layer(self, layer_id, input_embs, infer_state, page_type, vpids=None):
-        #self._log(f"SAVE_ACTIVATIONS_BY_LAYER: layer {layer_id}, type {page_type.name}")
-        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
-        #finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
-        finetune_activations = input_embs[finetune_mask].clone()
-        # nonzero = torch.nonzero(finetune_mask, as_tuple=False)
-        # start_idx = nonzero[0].item() if nonzero.numel() > 0 else None
-        # finetune_activations = input_embs[start_idx:]
-        num_new_tokens = finetune_activations.shape[0]
-        if vpids is None:
-            # Allocate new pages
-            vpids = self.alloc(num_new_tokens, page_type)
-        else:
-            # Reuse existing pages
-            if len(vpids) != num_new_tokens:
-                raise ValueError(f"Expected {num_new_tokens} vpids, got {len(vpids)}")
-        self.pin_pages(vpids)  # Ensure pages are resident on GPU
-        self.copy_rows_to_layer(layer_id, vpids, finetune_activations)
-        self.unpin_pages(vpids)  # Unpin after copying
-        return vpids
-    
-    def save_embedding_output(self, input_embs, infer_state):
-        finetune_mask = infer_state.finetune_mask  # shape: [total_token_num]
-        #finetune_activations = input_embs[finetune_mask].clone()  # shape: [N, hidden_size]
-        finetune_activations = input_embs[finetune_mask]
-        prev_total = sum(self.request_token_info)
-        num_new_tokens = finetune_activations.shape[0]
-        self.embedding_output[prev_total : prev_total + num_new_tokens] = finetune_activations
-    
-    def update_request_token_info(self, infer_state):
-        b_start = infer_state.b_start_loc
-        b_len = infer_state.b_seq_len
-        finetune_mask = infer_state.finetune_mask
-        # Preallocate output list
-        request_token_info = []
-        for i in range(infer_state.batch_size):
-            s, l = b_start[i], b_len[i]
-            if l > 0:
-                count = finetune_mask[s:s + l].sum().item()
-                if count > 0:
-                    request_token_info.append(count)
-        self.request_token_info.extend(request_token_info)
-    
-    def rewind_alignment_pool(self, rewind_size):
-        self.finetune_input_ids = self.finetune_input_ids[0:-rewind_size]
-        self.alignment_completion_masks = self.alignment_completion_masks[0:-rewind_size]
-        self.alignment_labels = self.alignment_labels[0:-rewind_size]
-        return
-
-    def get_input_layer_output(self):
-        if not self.request_token_info:
-            return None  # No activations saved
-        total_tokens = sum(self.request_token_info)
-        return self.embedding_output[:total_tokens]
-
-    def get_finetune_activations(self, layer_id):
-        return self.get_activations_by_layer(layer_id, PageType.ATTENTION_INPUT_ACTIVATION)
-    
-    def get_ffn_input(self, layer_id):
-        return self.get_activations_by_layer(layer_id, PageType.FFN_INPUT_ACTIVATION)
-
-
-    def get_activations_by_layer(self, layer_id, page_type):
-        if len(self.request_token_info) == 0:
-            return None
-        total_tokens = sum(self.request_token_info)
-        #self._log(f"GET_ACTIVATIONS_BY_LAYER: layer {layer_id}, type {page_type.name}")
-        # 1. Filter vpids by type
-        matching_vpids = [
-            vpid for vpid, typ in self.page_table.vpid_to_type.items()
-            if typ == page_type
-        ]
-
-        # 2. Collect unique valid vpids for this layer
-        seen = set()
-        present_vpids = []
-        cpu_layer_pool = self.cpu_pools[layer_id]
-
-        for vpid in matching_vpids:
-            loc, idx = self.page_table.get_location_index(vpid)
-            if vpid in seen:
-                continue
-            if loc == 'gpu' and idx is not None and 0 <= idx < self.tot_size:
-                present_vpids.append(vpid)
-                seen.add(vpid)
-            elif loc == 'cpu' and vpid in cpu_layer_pool:
-                present_vpids.append(vpid)
-                seen.add(vpid)
-
-        if len(present_vpids) != total_tokens:
-            raise ValueError(
-                f"Expected {total_tokens} unique pages for layer {layer_id}, "
-                f"but found {len(present_vpids)} with type {page_type.name}"
-            )
-        present_vpids.sort() 
-        self.pin_pages(present_vpids)  # Ensure all are resident on GPU
-        # 3. Page in CPU-resident pages (non-destructive)
-        cpu_vpids = [v for v in present_vpids if self.page_table.get_location_index(v)[0] == "cpu"]
-
-        if cpu_vpids:
-            if page_type == PageType.FFN_INPUT_ACTIVATION:
-                priority = {
-                    PageType.KV_CACHE:  0,
-                    PageType.ADAPTER_WEIGHT: 1,
-                    PageType.ATTENTION_INPUT_ACTIVATION: 2,  
-                    PageType.FFN_INPUT_ACTIVATION: 3,
-                }
-            else:
-                priority = {
-                    PageType.KV_CACHE:  0,
-                    PageType.ADAPTER_WEIGHT: 1,
-                    PageType.FFN_INPUT_ACTIVATION: 2,  
-                    PageType.ATTENTION_INPUT_ACTIVATION: 3,
-                }
-            self._pages_in(cpu_vpids, priority=priority)
-
-        # 4. Extract GPU slot indices
-        self.assert_vpid_on_gpu(present_vpids)
-        gpu_indices = [self.page_table.get_location_index(v)[1] for v in present_vpids]
-        rows = self.gpu_pools[layer_id][gpu_indices].view(total_tokens, -1).clone() # shape: [token_num, head_num * head_dim]
-        self.unpin_pages(present_vpids)
-        return rows  
-
-    def reset_activation_pool(self):
-        """
-        Reset the activation pool by clearing all saved activations.
-        This is useful for starting a new inference or finetuning session.
-        """
-        self._log("RESET ACTIVATION POOL")
+        b_loc_key:   torch.Tensor,
+        b_loc_value: torch.Tensor,
+        b_seq_len:   torch.Tensor,
+        layer_id:    int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         with self.page_table_lock:
-            self.request_token_info = []
-            self.finetune_input_ids = []
-            self.alignment_completion_masks = []
-            self.alignment_labels = []
-            self.finetune_logits_per_request = []
-            self.reference_logits_per_request = []
-            #self.embedding_output = torch.empty((self.max_finetuning_tokens, self.head_num * self.head_dim), 
-            #                                dtype=self.dtype, device=self.device) 
-            target_types = {PageType.ATTENTION_INPUT_ACTIVATION, PageType.FFN_INPUT_ACTIVATION}
-            target_vpids = [
-                vpid for vpid, typ in self.page_table.vpid_to_type.items()
-                if typ in target_types
-            ]
-            if target_vpids:
-                self.unpin_pages(target_vpids)
-                self.free(target_vpids)
-            self._log("RESET ACTIVATION POOL DONE")
+            return self.gpu_pools[layer_id], b_loc_key, b_loc_value
     
-    def report_diff_percent(
-        self,
-        name: str,
-        ours: torch.Tensor,
-        slora: torch.Tensor,
-        eps: float = 1e-4,       # what “near zero” means for the reference
-        thresh: float = 1e-2,     # 1% threshold for “bad” elements
-        layer_id: int = -1
-    ):
-        assert ours.shape == slora.shape, f"shape mismatch: {ours.shape} vs {slora.shape}"
-
-        diff     = ours - slora
-        abs_diff = diff.abs()
-        ref_abs  = slora.abs()
-
-        # L2 relative error
-        rel_l2   = diff.norm() / (slora.norm() + eps)
-
-        # mean and max absolute error
-        mean_abs = abs_diff.mean().item()
-        max_abs  = abs_diff.max().item()
-
-        # fraction of “bad” elements (relative abs error > thresh)
-        bad      = abs_diff > (thresh * (ref_abs + eps))
-        frac_bad = float(bad.sum()) / bad.numel() * 100.0
-
-        # fraction of reference elements that are essentially zero
-        small    = ref_abs <= eps
-        frac_small = float(small.sum()) / small.numel() * 100.0
-        msg = "\n"
-        if layer_id >= 0:
-            msg += f"[{name} at layer {layer_id}] shape={list(ours.shape)}, dtype={ours.dtype}\n"
-        else:
-            msg += f"[{name}] shape={list(ours.shape)}, dtype={ours.dtype}\n"
-        msg += f"  L2-rel err: {rel_l2*100:6.2f}%   mean |Δ|: {mean_abs:.3e}   max |Δ|: {max_abs:.3e}\n"
-        msg += f"  >{thresh*100:.1f}% err: {frac_bad:5.2f}% of elements\n"
-        msg += f"  reference near-zero (<= {eps}): {frac_small:5.2f}%  \n"
-        self._log(msg, print_count=False)
-        return msg
+    def to_gpu_index(self, vpids) -> torch.Tensor:
+        with self.page_table_lock:
+            return vpids
+    
+    def pin_pages(self, vpids):
+        return
+    
+    def unpin_pages(self, vpids):
+        return
+    
+    def alloc_cpu(self, num_pages: int, page_type: PageType) -> torch.Tensor:
+        raise NotImplementedError("UnifiedMemoryAllocator does not support CPU allocation.")
+    
+    def reset_b_loc_kv(self, b_loc_key, b_loc_value):
+        return

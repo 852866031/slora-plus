@@ -6,11 +6,13 @@ import uuid
 import numpy as np
 from typing import List, Optional
 
+from slora.server.router.finetuning_store import FinetuningManager
+
 # Example import if you have a local definition:
 # from ..io_struct import Batch, Req
 from ..io_struct import Batch, Req
 from ..tokenizer import get_tokenizer
-from ..input_params import FinetuneParams
+from ..input_params import FinetuneParams, SLOParams
 from ..sampling_params import SamplingParams
 
 # If using the original time calculation decorator
@@ -85,7 +87,7 @@ def generate_inference_req(adapter_dir: str, length: int, max_new_tokens: int, t
     )
     return req
 
-def generate_dual_inference_req(adapter_dir: str, length: int, max_new_tokens: int, tokenizer):
+def generate_three_inference_req(adapter_dir: str, length: int, max_new_tokens: int, tokenizer):
     prompt_text = generate_random_sentence(length)
     prompt_ids = tokenizer(prompt_text).get('input_ids', [])
     req_1 = Req(
@@ -106,14 +108,26 @@ def generate_dual_inference_req(adapter_dir: str, length: int, max_new_tokens: i
         needs_to_notify_detokenize = True,
         text=copy.deepcopy(prompt_text),  
     )
-    return req_1, req_2
+    req_3 = Req(
+        adapter_dir=adapter_dir,                
+        request_id=uuid.uuid4().hex,     
+        prompt_ids=copy.deepcopy(prompt_ids),
+        sample_params=get_inference_sampling_params(max_new_tokens),
+        is_finetuning=False,              
+        needs_to_notify_detokenize = True,
+        text=copy.deepcopy(prompt_text),  
+    )
+    return req_1, req_2, req_3
 
-class MixedProfile_ReqQueue:
+
+class Profile_ReqQueue:
     """
-    # first wave: warmup   
-    # second wave: inference only
-    # third wave: mixed inference + finetuning
-    # Inference requests in second wave and third wave are identical
+    A queue that handles both inference requests and fine-tuning requests.
+    Key differences from ReqQueue:
+    - We store inference requests in `waiting_req_list`.
+    - We store fine-tuning requests in `finetuning_req_list`.
+    - We only add fine-tuning requests if (and only if) there are no inference
+      requests waiting.
     """
 
     def __init__(self,
@@ -121,34 +135,24 @@ class MixedProfile_ReqQueue:
                  batch_max_tokens: int,
                  running_max_req_size: int,
                  finetune_params: FinetuneParams,
+                 slo_params: SLOParams,
                  inference_adapter_dir: str):
         self.max_total_tokens = max_total_tokens #1024
         self.batch_max_tokens = batch_max_tokens
         self.running_max_req_size = running_max_req_size
         self.inference_adapter_dir = inference_adapter_dir
-        print(f"max_total_tokens: {self.max_total_tokens}")
-        print(f"batch_max_tokens: {self.batch_max_tokens}")
-        print(f"running_max_req_size: {self.running_max_req_size}")
-        print(f"inference_adapter_dir: {inference_adapter_dir}")
         # config parameters
         self.finetuning_data_path = finetune_params.finetuning_data_path
         self.finetuning_prepare_size = finetune_params.finetuning_prepare_size
         self.finetuning_lora_path = finetune_params.finetuning_lora_path  
         self.max_saved_finetuning_tokens = finetune_params.max_saved_finetuning_tokens  #max size of saved activations in memory
-        self.max_finetuning_tokens_in_batch = finetune_params.max_finetuning_tokens_in_batch #max size of finetuning tokens in a forward batch
         self.total_epoch = finetune_params.num_epochs
         self.start_task= finetune_params.start_on_launch
-        # tracker variables
-        self.finetuning_tokens_in_memory = 0 #
-        self.finetuning_tokens_processed = 0
-        self.pending_bwd_tokens = 0
-        self.epoch_avg_loss_list = []
-        self.loss_list =[]
-        self.current_epoch = 0
-        self.sample_index = 0
-        self.last_index = 0
-        self.flag = True
-        
+        self.ttft_slo = slo_params.ttft_slo
+        self.avg_tbt_slo = slo_params.avg_tbt_slo
+        self.max_tbt_slo = slo_params.max_tbt_slo
+        print(f"\033[34m[Forward Batch Constructor]: ttft_slo={self.ttft_slo}, avg_tbt_slo={self.avg_tbt_slo}, max_tbt_slo={self.max_tbt_slo}\033[0m")
+
         try: 
             self.tokenizer = get_tokenizer(finetune_params.model_weightdir, 
                                            finetune_params.tokenizor_mode, 
@@ -156,141 +160,32 @@ class MixedProfile_ReqQueue:
         except:
             print("Could not load tokenizer. Using default.")
             self.tokenizer = get_tokenizer("huggyllama/llama-7b", finetune_params.tokenizor_mode) 
-
-        # Holds waiting inference requests
-        self.waiting_req_list: List[Req] = []
-        # Holds waiting fine-tuning requests
-        self.finetuning_req_list: List[Req] = []
         
-        # Used internally to track concurrency usage when building a batch
+        self.finetuning_manager = FinetuningManager(
+            data_path=self.finetuning_data_path,
+            tokenizer=self.tokenizer,
+            adapter_dir=self.finetuning_lora_path,
+            total_epochs=self.total_epoch,
+            max_prepare=self.finetuning_prepare_size,
+            trust_remote_code=finetune_params.trust_remote_code,
+            max_saved_finetuning_tokens=self.max_saved_finetuning_tokens
+        )
+        self.finetuning_manager.load()
+        self.waiting_req_list: List[Req] = []
         self.cache_len_list = []
         self.adapters = set()
         self.adapter_size = 0
-        print("Initializing Finetuning Settings")
-        print(f"Finetuning data path: {self.finetuning_data_path}")
-        print(f"Finetuning lora path: {self.finetuning_lora_path}")
-        print(f"Finetuning prepare size: {self.finetuning_prepare_size}")
-        print(f"Max saved finetuning tokens: {self.max_saved_finetuning_tokens}")
-        print(f"batch max tokens: {self.batch_max_tokens}")
-        self.prepare_finetuning_requests()
+        #self.prepare_finetuning_requests()
+        self.prefill_estimator = None
+        self.decode_estimator = None
         self.warmup_request_list = self.prepare_warmup_requests()
-        self.first_wave_inf, self.second_wave_inf = self.prepare_inference_requests()
-
-    def prepare_warmup_requests(self):
-        warmup_request_list = []
-        for _ in range(5):
-            req = generate_inference_req(
-                adapter_dir=self.inference_adapter_dir,
-                length=10,
-                max_new_tokens=10,
-                tokenizer=self.tokenizer
-            )
-            warmup_request_list.append(req)
-        return warmup_request_list
-
-    def prepare_inference_requests(self):
-        inference_only_requests_list = []
-        mixed_requests_list = []
-        for _ in range(3):
-            req_1, req_2 = generate_dual_inference_req(
-                adapter_dir=self.inference_adapter_dir,
-                length=inference_requests_length_default,
-                max_new_tokens=max_new_tokens_default,
-                tokenizer=self.tokenizer
-            )
-            inference_only_requests_list.append(req_1)
-            mixed_requests_list.append(req_2)
-        return inference_only_requests_list, mixed_requests_list
-
-    def is_heavy_loading(self):
-        #TODO : implement a better way to check if the queue is heavy loading
-        if len(self.waiting_req_list) > 100:
-            return True
-        else:
-            return False
-
-
-    def update_finetuning_status_after_fwd(self, batch: Batch):
-        for req in batch.reqs:
-            if req.is_finetuning:
-                self.pending_bwd_tokens += req.input_len
-
-    def update_finetuning_status_after_bwd(self, loss_list, num_processed_tokens):
-        self.loss_list.extend(loss_list)
-        self.finetuning_tokens_processed += num_processed_tokens
-        self.pending_bwd_tokens -= num_processed_tokens
-        #print bar
-        bar_width = 50
-        ratio = self.finetuning_tokens_processed / max(self.finetuning_tokens_in_memory, 1)
-        filled_len = int(bar_width * ratio)
-        empty_len = bar_width - filled_len
-        grey = "*"
-        white = " "
-        bar = grey * filled_len + white * empty_len
-        print(f"Epoch: {self.current_epoch+1}/{self.total_epoch} [{bar}] {ratio:.1%} processed", flush=True)
-        if self.finetuning_tokens_processed >= self.finetuning_tokens_in_memory:
-            self.epoch_avg_loss_list.append(np.mean(self.loss_list))
-            print(f"Epoch {self.current_epoch} finished. Average Loss: {self.epoch_avg_loss_list[-1]:.6f}\n")
-            for i, loss in enumerate(self.loss_list):
-                print(f"Epoch {self.current_epoch} Batch {i}: Loss = {loss:.6f}")
-            self.loss_list = []
-            self.current_epoch += 1
-            if self.current_epoch >= self.total_epoch:
-                print("=== Loss List ===")
-                for i, loss in enumerate(self.epoch_avg_loss_list):
-                    print(f"Backward Epoch {i}: Loss = {loss:.6f}")
-                print("=== End of Loss List ===", flush=True)
-            else:
-                self.sample_index = 0
-                self.finetuning_tokens_processed = 0
-        else:
-            print()
-
-    def finetuning_is_finished(self, sender=None):
-        if self.current_epoch >= self.total_epoch:
-            if sender is not None:
-                sender.send_pyobj(True)
-            return True
-        else:
-            return False
-        
+        self.first_wave_inf, self.second_wave_inf, self.third_wave_inf = self.prepare_inference_requests()
+        self.first_wave_decoding_times = []
+        self.second_wave_decoding_times = []
+        self.finished = False
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
-
-    def prepare_finetuning_requests(self):
-        loaded_count = 0
-        try:
-            with open(self.finetuning_data_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    text = line.strip()
-                    if not text:
-                        continue
-                    
-                    # Tokenize the text
-                    tokens = self.tokenizer(text)
-                    prompt_ids = tokens.get('input_ids', [])
-                    
-                    new_req = Req(
-                        adapter_dir=self.finetuning_lora_path,                
-                        request_id=uuid.uuid4().hex,     # Unique request ID
-                        prompt_ids=prompt_ids,
-                        sample_params=get_finetuning_sampling_params(),
-                        is_finetuning=True,               # Mark this request as fine-tuning
-                        text=text,  # Store the original text for reference
-                    )
-                    
-                    # Append to our fine-tuning queue
-                    self.finetuning_req_list.append(new_req)
-                    self.finetuning_tokens_in_memory+=new_req.input_len
-                    loaded_count += 1
-                    if loaded_count >= self.finetuning_prepare_size:
-                        break
-                print(f"Loaded {loaded_count} fine-tuning requests.")
-        except FileNotFoundError:
-            print(f"Could not find finetuning_data_path: {self.finetuning_data_path}")
-        except Exception as e:
-            print(f"Error reading or tokenizing finetuning data: {e}")
 
     def _init_cache_list(self, current_batch: Optional[Batch], lora_ranks: dict[str, int]):
         if current_batch is not None:
@@ -309,7 +204,39 @@ class MixedProfile_ReqQueue:
             self.cache_len_list = []
             self.adapters = set()
             self.adapter_size = 0
-        
+    
+    def prepare_warmup_requests(self):
+        warmup_request_list = []
+        for _ in range(5):
+            req = generate_inference_req(
+                adapter_dir=self.inference_adapter_dir,
+                length=10,
+                max_new_tokens=10,
+                tokenizer=self.tokenizer
+            )
+            warmup_request_list.append(req)
+        return warmup_request_list
+    
+    def prepare_inference_requests(self):
+        inference_only_requests_list = []
+        mixed_requests_list = []
+        bwd_requests_list = []
+        for _ in range(3):
+            req_1, req_2, req_3 = generate_three_inference_req(
+                adapter_dir=self.inference_adapter_dir,
+                length=inference_requests_length_default,
+                max_new_tokens=max_new_tokens_default,
+                tokenizer=self.tokenizer
+            )
+            inference_only_requests_list.append(req_1)
+            mixed_requests_list.append(req_2)
+            bwd_requests_list.append(req_3)
+        return inference_only_requests_list, mixed_requests_list, bwd_requests_list
+    
+    async def check_will_starve(self, current_batch) -> bool:
+        return False
+
+
     def _can_add_new_req(self, req: Req, lora_ranks: dict[str, int]) -> bool:
         self.cache_len_list.append((req.input_len + 1, req.max_output_len - 1))
         self.cache_len_list.sort(key=lambda x: -x[1])
@@ -331,21 +258,8 @@ class MixedProfile_ReqQueue:
         else:
             return False
     
-    def print_new_batch_info(self, can_run_list):
-        if len(can_run_list) > 0:
-            infer_tokens = 0
-            finetune_tokens = 0
-            for req in can_run_list:
-                if req.is_finetuning:
-                    finetune_tokens += req.input_len
-                else:
-                    infer_tokens += req.input_len
-            unused = self.batch_max_tokens - (infer_tokens + finetune_tokens)
-            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune (max: {self.max_finetuning_tokens_in_batch}) / {unused} unused] \033[0m")
-            print(f"\033[34mPending BWD token count: {self.pending_bwd_tokens}\033[0m")
-        
 
-    def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int]) -> Optional[Batch]:
+    def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
         if current_batch is not None:
             return None
         
@@ -353,13 +267,13 @@ class MixedProfile_ReqQueue:
         new_batch_total_tokens = 0
         can_run_list = []
         aborted_count = 0
-        # 1) If the warmup requests are not finished, run them first
         if len(self.warmup_request_list) > 0:
             for req in self.warmup_request_list:
                 if req.aborted:
                     print("Request aborted")
                     aborted_count += 1
                     continue
+                req.arrival_time = time.time()
                 if (self._can_add_new_req(req, lora_ranks) and
                     (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
                     can_run_list.append(req)
@@ -370,14 +284,14 @@ class MixedProfile_ReqQueue:
                 self.warmup_request_list = self.warmup_request_list[len(can_run_list) + aborted_count:]
             self.print_new_batch_info(can_run_list)
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
-            print(f"\033[32mWarmup Batch Created with {len(can_run_list)} requests\033[0m")
             return new_batch
-        elif len(self.first_wave_inf) > 0:
+        if len(self.first_wave_inf) > 0:
             for req in self.first_wave_inf:
                 if req.aborted:
                     print("Request aborted")
                     aborted_count += 1
                     continue
+                req.arrival_time = time.time()
                 if (self._can_add_new_req(req, lora_ranks) and
                     (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
                     can_run_list.append(req)
@@ -386,9 +300,7 @@ class MixedProfile_ReqQueue:
                     break
             if len(can_run_list) > 0:
                 self.first_wave_inf = self.first_wave_inf[len(can_run_list) + aborted_count:]
-
-            #self.add_finetuning_req(new_batch_total_tokens, can_run_list)
-
+            self.add_finetuning_req(new_batch_total_tokens, can_run_list, lora_ranks)
             self.print_new_batch_info(can_run_list)
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             print(f"\033[32mFirst Wave Inference Batch Created with {len(can_run_list)} requests\033[0m")
@@ -399,6 +311,7 @@ class MixedProfile_ReqQueue:
                     print("Request aborted")
                     aborted_count += 1
                     continue
+                req.arrival_time = time.time()
                 if (self._can_add_new_req(req, lora_ranks) and
                     (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
                     can_run_list.append(req)
@@ -407,47 +320,88 @@ class MixedProfile_ReqQueue:
                     break
             if len(can_run_list) > 0:
                 self.second_wave_inf = self.second_wave_inf[len(can_run_list) + aborted_count:]
-
-                
-            self.add_finetuning_req(new_batch_total_tokens, can_run_list)
+            #self.add_finetuning_req(new_batch_total_tokens, can_run_list, lora_ranks)
 
             self.print_new_batch_info(can_run_list)
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             print(f"\033[32mSecond Wave Mixed Batch Created with {len(can_run_list)} requests\033[0m")
             return new_batch
-        elif self.flag:
-            print("All profiling samples done")
-            self.flag = False
-            return None
         else:
+            if self.finished == False:
+                self.finished = True
+                first_wave_avg_decode_time = np.mean(self.first_wave_decoding_times) if len(self.first_wave_decoding_times) > 0 else 0.0
+                second_wave_avg_decode_time = np.mean(self.second_wave_decoding_times) if len(self.second_wave_decoding_times) > 0 else 0.0
+                print(f"\033[34m[Profiling Result] First Wave Avg Decode Time: {first_wave_avg_decode_time:.4f}s, Second Wave Avg Decode Time: {second_wave_avg_decode_time:.4f}s \033[0m")
             return None
 
-    def add_finetuning_req(self, new_batch_total_tokens, can_run_list):
-        new_batch_inference_tokens=new_batch_total_tokens
-        if len(self.finetuning_req_list)> 0:
-            new_batch_finetuning_tokens = 0
-            self.last_index = self.sample_index
-            for i in range(self.sample_index, len(self.finetuning_req_list)):
-                req = self.finetuning_req_list[i]
-                if new_batch_total_tokens + req.input_len > self.batch_max_tokens:
-                    break
-                if new_batch_finetuning_tokens + req.input_len > self.max_finetuning_tokens_in_batch:
-                    break
-                if self.pending_bwd_tokens + new_batch_finetuning_tokens + req.input_len > self.max_saved_finetuning_tokens:
-                    break
-                if new_batch_inference_tokens!= 0 and new_batch_finetuning_tokens + req.input_len > new_batch_inference_tokens*2:
-                    break
-                else:
-                    can_run_list.append(req)
-                    new_batch_total_tokens += req.input_len
-                    new_batch_finetuning_tokens += req.input_len
-                    self.sample_index += 1
-                    break
+    def add_finetuning_req(self, new_batch_total_tokens, can_run_list, lora_ranks):
+        ft_list = []
+        ft_tokens = 0
+        while self.finetuning_manager.has_next():
+            ft_req = self.finetuning_manager.pop_next()
+            if ft_req is None:
+                break
+            elif not self._can_add_new_req(ft_req, lora_ranks):
+                break
+            elif new_batch_total_tokens + ft_req.input_len > self.batch_max_tokens:
+                break
+            elif self.finetuning_manager.pending_bwd_tokens + ft_tokens  + ft_req.input_len > self.max_saved_finetuning_tokens:
+                break
+            else:
+                ft_list.append(ft_req)
+                new_batch_total_tokens += ft_req.input_len
+                ft_tokens += ft_req.input_len
+        can_run_list.extend(ft_list)
 
-    def next_batch(self) -> Optional[Batch]:
-       print("##### NEXT BATCH CALLED #####")
-       return None
     
+    def print_new_batch_info(self, can_run_list):
+        if len(can_run_list) > 0:
+            infer_tokens = 0
+            finetune_tokens = 0
+            for req in can_run_list:
+                if req.is_finetuning:
+                    finetune_tokens += req.input_len
+                else:
+                    infer_tokens += req.input_len
+            unused = self.batch_max_tokens - (infer_tokens + finetune_tokens)
+            print(f"\033[34mForward Batch Token Layout: [{infer_tokens} infer tokens/ {finetune_tokens} finetune / {unused} unused] \033[0m")
+            print(f"\033[34mPending BWD token count: {self.finetuning_manager.pending_bwd_tokens}\033[0m")
+
+    def get_req_timestamps(self, can_run_list):
+        out = []
+        for req in can_run_list:
+            out.append(req.arrival_time)
+        return out
+    
+    def add_to_decode_time_queue(self, decode_time: float):
+        if len(self.second_wave_inf) > 0:
+            self.first_wave_decoding_times.append(decode_time)
+        else:
+            self.second_wave_decoding_times.append(decode_time)
+
+
+    def get_earliest_req_time(self):
+        if len(self.waiting_req_list) == 0:
+            return time.time()
+        return self.waiting_req_list[0].arrival_time
+    
+    def ready_for_bwd(self):
+        return self.finetuning_manager.ready_for_bwd()
+
+    def set_estimators(self, prefill_estimator, decode_estimator):
+        self.prefill_estimator = prefill_estimator
+        self.decode_estimator = decode_estimator
+
+    def update_finetuning_status_after_fwd(self, batch: Batch):
+        return self.finetuning_manager.update_finetuning_status_after_fwd(batch)
+
+    def update_finetuning_status_after_bwd(self, loss_list, num_processed_tokens):
+        return self.finetuning_manager.update_finetuning_status_after_bwd(loss_list, num_processed_tokens)
+
+    def finetuning_is_finished(self):
+        if self.start_task == False:
+            return True
+        return self.finetuning_manager.finetuning_is_finished()        
 
     def update_counter(self, req: Req):
         pass

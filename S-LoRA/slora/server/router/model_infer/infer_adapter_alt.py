@@ -21,13 +21,13 @@ class InferAdapterAlt:
     a_loc_lora_a: torch.Tensor  # a_loc[i] is a list of indices occupied by adapter i lora A
     a_loc_lora_b: torch.Tensor  # a_loc[i] is a list of indices occupied by adapter i lora B
 
-    # new fields (only populated when finetuning adapter exists)
-    a_loc_lora_a_no_finetuning: torch.Tensor
-    a_loc_lora_b_no_finetuning: torch.Tensor 
+    a_loc_cat: torch.Tensor  # concatenated a_loc_lora_a and a_loc_lora_b for pinning
 
     a_scaling: torch.Tensor  # a_scaling[i] is the scaling factor of adapter i
     mem_manager: UnifiedMemoryAllocator
     finetuning_adapter_dir: str = None
+    gpu_a_loc_lora_a = None
+    gpu_a_loc_lora_b = None
 
     @classmethod
     def init(cls, mem_manager: UnifiedMemoryAllocator):
@@ -38,8 +38,7 @@ class InferAdapterAlt:
             a_len_lora         = torch.empty(0, dtype=torch.long, device='cuda'),
             a_loc_lora_a       = torch.empty(0, dtype=torch.long, device='cuda'),
             a_loc_lora_b       = torch.empty(0, dtype=torch.long, device='cuda'),
-            a_loc_lora_a_no_finetuning = torch.empty(0, dtype=torch.long, device='cuda'),
-            a_loc_lora_b_no_finetuning = torch.empty(0, dtype=torch.long, device='cuda'),
+            a_loc_cat          = torch.empty(0, dtype=torch.long, device='cuda'),
             a_scaling          = torch.empty(0, dtype=torch.float16, device='cuda'),
             mem_manager        = mem_manager,
             finetuning_adapter_dir = None,
@@ -110,12 +109,22 @@ class InferAdapterAlt:
             gpu_rows = min(rows_needed * 2, free_gpu)      # A+B budget
             cpu_rows = rows_needed * 2 - gpu_rows
 
-            vpids_gpu = (self.mem_manager.alloc(gpu_rows, PageType.ADAPTER_WEIGHT)
-                        if gpu_rows else [])
-            vpids_cpu = (self.mem_manager.alloc_cpu(cpu_rows, PageType.ADAPTER_WEIGHT)
-                        if cpu_rows else [])
-            vpids_total = vpids_gpu + vpids_cpu
-            assert len(vpids_total) == rows_needed * 2
+            # vpids_gpu = (self.mem_manager.alloc(gpu_rows, PageType.ADAPTER_WEIGHT)
+            #             if gpu_rows else [])
+            # vpids_cpu = (self.mem_manager.alloc_cpu(cpu_rows, PageType.ADAPTER_WEIGHT)
+            #             if cpu_rows else [])
+            # vpids_total = vpids_gpu + vpids_cpu
+
+            vpids_gpu = (
+                self.mem_manager.alloc(gpu_rows, PageType.ADAPTER_WEIGHT)
+                if gpu_rows else torch.empty(0, dtype=torch.long, device='cuda')
+            )
+            vpids_cpu = (
+                self.mem_manager.alloc_cpu(cpu_rows, PageType.ADAPTER_WEIGHT)
+                if cpu_rows else torch.empty(0, dtype=torch.long, device='cuda')
+            )
+            vpids_total = torch.cat((vpids_gpu, vpids_cpu), dim=0)
+            assert vpids_total.numel() == rows_needed * 2
 
             vpids_a, vpids_b = vpids_total[:rows_needed], vpids_total[rows_needed:]
 
@@ -125,30 +134,18 @@ class InferAdapterAlt:
             self.a_len_lora[start_base + i]   = rows_needed
 
             self.a_loc_lora_a = torch.cat(
-                (self.a_loc_lora_a,
-                torch.tensor(vpids_a, dtype=torch.long, device='cuda'))
+                (self.a_loc_lora_a, vpids_a)
             )
             self.a_loc_lora_b = torch.cat(
-                (self.a_loc_lora_b,
-                torch.tensor(vpids_b, dtype=torch.long, device='cuda'))
+                (self.a_loc_lora_b, vpids_b)
             )
+            self.a_loc_cat = torch.cat((self.a_loc_lora_a, self.a_loc_lora_b), dim=0)
 
             self.load_lora_A(adapter, vpids_a)
             self.load_lora_B(adapter, vpids_b)
+        self.gpu_a_loc_lora_a = None
+        self.gpu_a_loc_lora_b = None
 
-            # if adapter.is_finetuning:
-            #     self.finetuning_adapter_dir = adapter.lora_dir
-            #     finetune_a_vpids.extend(vpids_a)
-            #     finetune_b_vpids.extend(vpids_b)
-
-        # if finetune_a_vpids or finetune_b_vpids:
-        #     mask_a = ~torch.isin(self.a_loc_lora_a, torch.tensor(finetune_a_vpids, device='cuda'))
-        #     mask_b = ~torch.isin(self.a_loc_lora_b, torch.tensor(finetune_b_vpids, device='cuda'))
-        #     self.a_loc_lora_a_no_finetuning = self.a_loc_lora_a.clone()[mask_a]
-        #     self.a_loc_lora_b_no_finetuning = self.a_loc_lora_b.clone()[mask_b]
-        # else:
-        #     self.a_loc_lora_a_no_finetuning = self.a_loc_lora_a.clone()
-        #     self.a_loc_lora_b_no_finetuning = self.a_loc_lora_b.clone()
 
     def offload_target_adapters(self, remove_adapter_dirs):
         print(f"Offloading adapters: {remove_adapter_dirs}")
@@ -163,10 +160,6 @@ class InferAdapterAlt:
                 d in reserve_adapter_dirs for d in self.adapter_dirs):
             # nothing to remove
             return
-        # if self.finetuning_adapter_dir is not None and self.finetuning_adapter_dir not in reserve_adapter_dirs:
-        #     self.finetuning_adapter_dir = None
-        #     self.a_loc_lora_a_no_finetuning = self.a_loc_lora_a.clone()
-        #     self.a_loc_lora_b_no_finetuning = self.a_loc_lora_b.clone()
 
         if len(reserve_adapter_dirs) == 0:
             # free everything
@@ -178,6 +171,7 @@ class InferAdapterAlt:
             self.idx_map      = {}
             self.a_start_lora = self.a_len_lora = torch.empty(0, dtype=torch.long,  device='cuda')
             self.a_loc_lora_a = self.a_loc_lora_b = torch.empty(0, dtype=torch.long, device='cuda')
+            self.a_loc_cat = torch.empty(0, dtype=torch.long, device='cuda')
             self.a_scaling    = torch.empty(0, dtype=torch.float16, device='cuda')
             return
         
@@ -265,42 +259,29 @@ class InferAdapterAlt:
         self.a_len_lora    = new_a_len
         self.a_loc_lora_a  = new_loc_a
         self.a_loc_lora_b  = new_loc_b
+        self.a_loc_cat     = torch.cat((self.a_loc_lora_a, self.a_loc_lora_b), dim=0)
         self.a_scaling     = new_a_scaling
+        self.gpu_a_loc_lora_a = None
+        self.gpu_a_loc_lora_b = None
     
-    def pin_adapters_pages(self, no_finetuning=False):
-        # if no_finetuning and self.finetuning_adapter_dir is not None:
-        #     self.mem_manager.pin_pages(self.a_loc_lora_a_no_finetuning)
-        #     self.mem_manager.pin_pages(self.a_loc_lora_b_no_finetuning)
-        #     return
-        self.mem_manager.pin_pages(self.a_loc_lora_a)
-        self.mem_manager.pin_pages(self.a_loc_lora_b)
+    def pin_adapters_pages(self):
+        self.mem_manager.pin_pages(self.a_loc_cat)
 
-    def unpin_adapters_pages(self, no_finetuning=False):
-        # if no_finetuning and self.finetuning_adapter_dir is not None:
-        #     torch.cuda.synchronize()
-        #     self.mem_manager.unpin_pages(self.a_loc_lora_a_no_finetuning)
-        #     self.mem_manager.unpin_pages(self.a_loc_lora_b_no_finetuning)
-        #     return
-        self.mem_manager.unpin_pages(self.a_loc_lora_a.detach().contiguous().to('cpu'))
-        self.mem_manager.unpin_pages(self.a_loc_lora_b.detach().contiguous().to('cpu'))
+    def unpin_adapters_pages(self):
+        self.mem_manager.unpin_pages(self.a_loc_cat)
+        self.gpu_a_loc_lora_a = None
+        self.gpu_a_loc_lora_b = None
 
-    def get_lora_params_at_layer(self, layer_id, no_finetuning=False):
-        '''
-        !!! Must be called after pinning the adapter pages !!!
-        !!! Must unpin the adapter pages after use !!!
-        '''
-        # if no_finetuning and self.finetuning_adapter_dir is not None:
-        #     gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a_no_finetuning)
-        #     gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b_no_finetuning)
-        #     buffer_address = self.mem_manager.gpu_pools[layer_id]
-        #     return buffer_address, self.a_start_lora, self.a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, self.a_scaling
-
-        # load adapter here --> prefill --> filter batch --> decode --> filter batch --> decode ... --> offload adapter
-        # first prefill goes longer by 4ms
-        gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a) 
-        gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
-        buffer_address = self.mem_manager.gpu_pools[layer_id]
-        return buffer_address, self.a_start_lora, self.a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, self.a_scaling
+    def get_lora_params_at_layer(self, layer_id):
+        if self.gpu_a_loc_lora_a is None or self.gpu_a_loc_lora_b is None:
+            self.gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a) 
+            self.gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
+        return self.mem_manager.gpu_pools[layer_id], self.a_start_lora, self.a_len_lora, self.gpu_a_loc_lora_a, self.gpu_a_loc_lora_b, self.a_scaling
+    
+    # def get_lora_params_at_layer(self, layer_id):
+    #     gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a) 
+    #     gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
+    #     return self.mem_manager.gpu_pools[layer_id], self.a_start_lora, self.a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, self.a_scaling
 
 
    

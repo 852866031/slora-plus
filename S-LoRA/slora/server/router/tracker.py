@@ -111,29 +111,27 @@ class BatchExecutionTracker():
 @dataclass
 class PrefillParams:
     """Fitted parameters for the prefill execution model."""
-    a: Optional[float] = None  # per-token cost
-    b: Optional[float] = None  # per-request cost
-    d: Optional[float] = None  # fixed overhead per batch
-    c: Optional[float] = None  # extra per-token cost for FT
+    alpha: Optional[float] = None  # coefficient for sum(n_i^2)
+    beta: Optional[float] = None   # coefficient for T_in = sum(n_i)
+    gamma: Optional[float] = None  # extra per-token cost for FT
+    c: Optional[float] = None      # constant overhead per batch
 
 
 class PrefillExecutionEstimator:
     """
     Execution time model (prefill):
-        1) Inference-only:
-            T_inf = a*N_inf + b*B + d
-        2) Co-serving:
-            T_co  = a*(N_inf+N_ft) + b*B + d + c*N_ft
-        a, b, c, d are fitted parameters.
-        N_inf: total inference tokens in batch
-        N_ft: total finetuning tokens in batch
-        B: batch size (number of requests)
+
+        T_prefill ≈ α * Σ n_i² + β * T_in + γ * T_ft + c
+
+    α, β, γ, c are fitted parameters.
+    - Σ n_i² captures quadratic self-attention cost.
+    - T_in = total inference + FT tokens in batch.
+    - T_ft = fine-tuning token count (activation saving overhead).
     """
 
     def __init__(self) -> None:
         self._params = PrefillParams()
-        self.inf_err = None  # fitting error (RMSE)
-        self.co_err = None  # fitting error (RMSE)
+        self.fit_rmse = None
 
     @staticmethod
     def _as_np_1d(x: Iterable[float]) -> np.ndarray:
@@ -153,155 +151,95 @@ class PrefillExecutionEstimator:
         inference_reqs: Sequence[float],
         inference_times: Sequence[float],
         coserving_tokens: Sequence[Tuple[float, float]],  # [(N_inf, N_ft), ...]
-        coserving_reqs: Sequence[float],                 # total reqs in co-serving batches
+        coserving_reqs: Sequence[float],
         coserving_times: Sequence[float],
         enforce_ratio: bool = True,
     ) -> PrefillParams:
         """
-        Fit (a,b,d) using all inference-only points and then fit c using all co-serving points.
+        Fit α, β, γ, c using both inference-only and co-serving batches.
+        For inference-only: T_ft = 0.
         """
         Ni_inf = self._as_np_1d(inference_tokens)
         Bi_inf = self._as_np_1d(inference_reqs)
         Ti_inf = self._as_np_1d(inference_times)
+
         co_pairs = list(coserving_tokens)
         Bi_co = self._as_np_1d(coserving_reqs)
         Ti_co = self._as_np_1d(coserving_times)
 
-        if len(Ni_inf) != len(Ti_inf) or len(Ni_inf) != len(Bi_inf):
-            raise ValueError("inference_tokens/inference_reqs/inference_times lengths mismatch")
-        if len(co_pairs) != len(Ti_co) or len(co_pairs) != len(Bi_co):
-            raise ValueError("coserving_tokens/requnums/times lengths mismatch")
+        # Flatten into joint regression dataset
+        sum_n2_list = []
+        T_in_list = []
+        T_ft_list = []
+        T_measured = []
 
-        # Optional safety: N_inf > 5*N_ft
-        if enforce_ratio and len(co_pairs) > 0:
-            Ni = np.array([p[0] for p in co_pairs], dtype=float)
-            Nf = np.array([p[1] for p in co_pairs], dtype=float)
+        # --- inference-only points ---
+        for Ni, Ti in zip(Ni_inf, Ti_inf):
+            sum_n2_list.append(Ni ** 2 * Bi_inf[0] if Bi_inf.size > 0 else Ni ** 2)
+            T_in_list.append(Ni)
+            T_ft_list.append(0.0)
+            T_measured.append(Ti)
 
-        # --- Stage 1: fit (a,b,d) from inference-only ---
-        a = b = d = c = None
-        if len(Ni_inf) >= 3:  # at least 3 points for rank
-            X_inf = np.column_stack([Ni_inf, Bi_inf, np.ones_like(Ni_inf)])
-            a_b_d = self._linfit(X_inf, Ti_inf)
-            a, b, d = float(a_b_d[0]), float(a_b_d[1]), float(a_b_d[2])
+        # --- co-serving points ---
+        for (N_inf, N_ft), Ti in zip(co_pairs, Ti_co):
+            sum_n2_list.append((N_inf + N_ft) ** 2)
+            T_in_list.append(N_inf + N_ft)
+            T_ft_list.append(N_ft)
+            T_measured.append(Ti)
 
-        # --- Stage 2: fit c using co-serving, or joint fit if needed ---
-        if len(co_pairs) == 0:
-            self._params = PrefillParams(a=a, b=b, d=d, c=None)
-            return self._params
+        # Fit linear model: T = α * Σ n_i² + β * T_in + γ * T_ft + c
+        S = self._as_np_1d(sum_n2_list)
+        Tin = self._as_np_1d(T_in_list)
+        Tft = self._as_np_1d(T_ft_list)
+        T = self._as_np_1d(T_measured)
 
-        Ni = np.array([p[0] for p in co_pairs], dtype=float)
-        Nf = np.array([p[1] for p in co_pairs], dtype=float)
-        Bc = Bi_co
-        Tc = Ti_co
+        X = np.column_stack([S, Tin, Tft, np.ones_like(T)])
+        alpha, beta, gamma, c = self._linfit(X, T)
 
-        if a is not None and b is not None and d is not None:
-            # Two-stage: Y' = T - (a*(Ni+Nf) + b*B + d) = c * Nf
-            y_c = Tc - (a * (Ni + Nf) + b * Bc + d)
-            (c_,) = self._linfit(Nf.reshape(-1, 1), y_c)
-            c = float(c_)
-        else:
-            # Fallback: jointly fit (a,b,d,c) from co-serving only
-            if len(co_pairs) < 4:
-                raise ValueError("Need >=3 inference points or >=4 co-serving points for full fit")
-            S = (Ni + Nf).reshape(-1, 1)
-            X_joint = np.column_stack([S, Bc, np.ones_like(S), Nf])
-            if np.linalg.matrix_rank(X_joint) < 4:
-                raise ValueError("Rank-deficient: vary N_inf+N_ft, B, N_ft")
-            a_, b_, d_, c_ = self._linfit(X_joint, Tc)
-            a, b, d, c = float(a_), float(b_), float(d_), float(c_)
+        self._params = PrefillParams(alpha=float(alpha), beta=float(beta), gamma=float(gamma), c=float(c))
 
-        self._params = PrefillParams(a=a, b=b, d=d, c=c)
-         # --- Error Tracking: max relative error ---
-        if len(Ni_inf) > 0:
-            preds_inf = a * Ni_inf + b * Bi_inf + d
-            rel_errs_inf = (preds_inf - Ti_inf) / Ti_inf
-            self.inf_err = float(np.max(rel_errs_inf))
-        else:
-            self.inf_err = None
-
-        if len(co_pairs) > 0:
-            preds_co = a * (Ni + Nf) + b * Bc + d + c * Nf
-            rel_errs_co = (preds_co - Tc) / Tc
-            self.co_err = float(np.max(rel_errs_co))
-        else:
-            self.co_err = None
+        preds = X @ np.array([alpha, beta, gamma, c])
+        self.fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
         return self._params
-    
-    def data_fit(self, tracker: BatchExecutionTracker) -> PrefillParams:
-        inference_tokens = []
-        inference_reqs = []
-        inference_times = []
-
-        coserving_tokens = []  # list of (N_inf, N_ft)
-        coserving_reqs = []
-        coserving_times = []
-
-        for ft_reqs, inf_reqs, ft_toks, inf_toks, exec_type, duration in zip(
-            tracker.num_ft_reqs_list,
-            tracker.num_inf_reqs_list,
-            tracker.num_ft_tokens_list,
-            tracker.num_inf_tokens_list,
-            tracker.execution_type_list,
-            tracker.execution_duration_list,
-        ):
-            total_reqs = ft_reqs + inf_reqs
-
-            if exec_type == BatchExecutionType.PREFILL:
-                if ft_reqs == 0:
-                    # Inference-only batch
-                    inference_tokens.append(inf_toks)
-                    inference_reqs.append(inf_reqs)
-                    inference_times.append(duration)
-                else:
-                    # Co-serving batch
-                    coserving_tokens.append((inf_toks, ft_toks))
-                    coserving_reqs.append(total_reqs)
-                    coserving_times.append(duration)
-
-        return self.fit(
-            inference_tokens=inference_tokens,
-            inference_reqs=inference_reqs,
-            inference_times=inference_times,
-            coserving_tokens=coserving_tokens,
-            coserving_reqs=coserving_reqs,
-            coserving_times=coserving_times,
-        )
 
     def predict_inference(self, N_inf: float, B: float) -> float:
-        if self._params.a is None or self._params.b is None or self._params.d is None:
+        """Predict prefill time for inference-only batch."""
+        p = self._params
+        if any(v is None for v in (p.alpha, p.beta, p.gamma, p.c)):
             raise ValueError("Model not fitted yet")
-        result = float(self._params.a * N_inf + self._params.b * B + self._params.d)
-        if self.inf_err is not None:
-            result *= (1.0 + 1.5 * self.inf_err)
-        return result
+        S = B * (N_inf ** 2)
+        Tin = B * N_inf
+        pred = p.alpha * S + p.beta * Tin + p.c
+        if self.fit_rmse:
+            pred += 1.2 * self.fit_rmse
+        return float(pred)
 
     def predict_coserving(self, N_inf: float, N_ft: float, B: float) -> float:
-        if self._params.a is None or self._params.b is None or self._params.d is None or self._params.c is None:
+        """Predict prefill time for co-serving batch."""
+        p = self._params
+        if any(v is None for v in (p.alpha, p.beta, p.gamma, p.c)):
             raise ValueError("Model not fitted yet")
-        result = float(self._params.a * (N_inf + N_ft) + self._params.b * B + self._params.d + self._params.c * N_ft)
-        if self.co_err is not None:
-            result *= (1.0 + 1.5 * self.co_err)
-        return result
+        S = B * ((N_inf + N_ft) ** 2)
+        Tin = B * (N_inf + N_ft)
+        Tft = B * N_ft
+        pred = p.alpha * S + p.beta * Tin + p.gamma * Tft + p.c
+        if self.fit_rmse:
+            pred += 1.2 * self.fit_rmse
+        return float(pred)
 
     def verify_inference(self, N_inf: float, B: float, actual_time: float) -> float:
-        pred_time = self.predict_inference(N_inf, B)
-        rel_err = abs(pred_time - actual_time) / actual_time
-        print(f"[verify_inference] N_inf={N_inf}, B={B} => pred {pred_time:.3f}s vs actual {actual_time:.3f}s (err {rel_err:.2%})")
-        if self.inf_err is not None:
-            self.inf_err = max(self.inf_err, rel_err)
-        else:
-            self.inf_err = rel_err
-        return rel_err
+        pred = self.predict_inference(N_inf, B)
+        err = abs(pred - actual_time) / actual_time
+        print(f"[verify_inference] pred {pred:.3f}s vs actual {actual_time:.3f}s (err {err:.2%})")
+        self.fit_rmse = max(self.fit_rmse or 0.0, err)
+        return err
 
     def verify_coserving(self, N_inf: float, N_ft: float, B: float, actual_time: float) -> float:
-        pred_time = self.predict_coserving(N_inf, N_ft, B)
-        rel_err = abs(pred_time - actual_time) / actual_time
-        print(f"[verify_coserving] N_inf={N_inf}, N_ft={N_ft}, B={B} => pred {pred_time:.3f}s vs actual {actual_time:.3f}s (err {rel_err:.2%})")
-        if self.co_err is not None:
-            self.co_err = max(self.co_err, rel_err)
-        else:
-            self.co_err = rel_err
-        return rel_err
+        pred = self.predict_coserving(N_inf, N_ft, B)
+        err = abs(pred - actual_time) / actual_time
+        print(f"[verify_coserving] pred {pred:.3f}s vs actual {actual_time:.3f}s (err {err:.2%})")
+        self.fit_rmse = max(self.fit_rmse or 0.0, err)
+        return err
     
     def can_add_ft(
         self,
@@ -316,11 +254,11 @@ class PrefillExecutionEstimator:
         now: Optional[float] = None,
     ) -> bool:
         # Ensure model is fitted for co-serving prediction
-        if (self._params.a is None or
-            self._params.b is None or
-            self._params.c is None or
-            self._params.d is None):
-            raise ValueError("PrefillExecutionEstimator not fitted (need a,b,c,d).")
+        if (self._params.alpha is None or
+            self._params.beta is None or
+            self._params.gamma is None or
+            self._params.c is None):
+            raise ValueError("PrefillExecutionEstimator not fitted (need alpha,beta,gamma,c).")
 
         if now is None:
             now = time.time()
@@ -359,58 +297,141 @@ class PrefillExecutionEstimator:
         now: Optional[float] = None,
     ) -> int:
         p = self._params
-        if p.a is None or p.b is None or p.c is None or p.d is None:
-            raise ValueError("PrefillExecutionEstimator not fitted (need a,b,c,d).")
+        if p.alpha is None or p.beta is None or p.gamma is None or p.c is None:
+            raise ValueError("PrefillExecutionEstimator not fitted (need alpha,beta,gamma,c).")
+
+        # Handle no SLO case
         if earliest_req_time is None:
             return 10**12
+
         if now is None:
             now = time.time()
+
+        # Normalize TTFT
         if ttft_unit == "s":
             ttft_s = float(ttft)
         elif ttft_unit == "ms":
             ttft_s = float(ttft) / 1000.0
         else:
             raise ValueError(f"Unsupported ttft_unit '{ttft_unit}', use 's' or 'ms'.")
+
         deadline = float(earliest_req_time) + ttft_s
         rem_time = deadline - now
         if rem_time <= 0:
             return 0
-        co_err = float(self.co_err) if self.co_err is not None else 0.0
-        safety = 1.0 + 2.0 * max(0.0, co_err)
+
+        # Safety margin based on RMSE
+        fit_rmse = float(self.fit_rmse) if self.fit_rmse is not None else 0.0
+        safety = 1.0 + 2.0 * max(0.0, fit_rmse)
         adjusted_budget = rem_time / safety
+
+        # Current totals
         N_inf = float(inf_token_num)
         N_ft_curr = float(ft_token_num)
-        Bp = float(current_batch_size + 1)
-        const_term = p.a * (N_inf + N_ft_curr) + p.c * N_ft_curr + p.b * Bp + p.d
-        denom = p.a + p.c
-        if denom <= 0:
-            return 0
-        x_cont = (adjusted_budget - const_term) / denom
-        x_max = math.floor(x_cont)
-        if x_max < 0:
-            x_max = 0
-        return int(x_max)
+        Bp = float(current_batch_size + 1)  # batch size after adding new FT req
 
+        # Approximate current Σn_i² and T_in
+        # Σn_i² ≈ (T_in)² / B  → used as aggregate estimate
+        Tin_curr = N_inf + N_ft_curr
+        S_curr = (Tin_curr ** 2) / max(Bp, 1.0)
+
+        # Constant part before adding new FT tokens
+        const_term = p.alpha * S_curr + p.beta * Tin_curr + p.gamma * N_ft_curr + p.c
+
+        # New request adds x tokens:
+        # ΔT = α x² + (β + γ) x
+        a2 = float(p.alpha)
+        a1 = float(p.beta + p.gamma)
+        rhs = adjusted_budget - const_term
+
+        # If no remaining budget
+        if rhs <= 0:
+            return 0
+
+        # Solve quadratic inequality: a2*x² + a1*x - rhs <= 0
+        if a2 <= 0:
+            # Degenerate to linear
+            x_cont = rhs / max(a1, 1e-12)
+            return max(0, int(math.floor(x_cont)))
+
+        disc = a1 * a1 + 4.0 * a2 * rhs
+        if disc < 0:
+            return 0
+
+        x_root = (-a1 + math.sqrt(disc)) / (2.0 * a2)
+        x_max = max(0, math.floor(x_root))
+        return int(x_max)
+    
+    def data_fit(self, tracker: BatchExecutionTracker) -> PrefillParams:
+        """
+        Fit the prefill estimator from tracked batches.
+
+        For each PREFILL batch:
+          - sum_n2 = Σ n_i²  (approximated from total tokens and number of requests)
+          - T_in   = total input tokens (inf + ft)
+          - T_ft   = total fine-tuning tokens
+
+        Notes:
+          If per-request lengths are not logged, we approximate Σ n_i² ≈
+          (T_in² / B), which holds if all requests are roughly equal length.
+        """
+        sum_n2_list = []
+        T_in_list = []
+        T_ft_list = []
+        times = []
+
+        for ft_reqs, inf_reqs, ft_toks, inf_toks, exec_type, duration in zip(
+            tracker.num_ft_reqs_list,
+            tracker.num_inf_reqs_list,
+            tracker.num_ft_tokens_list,
+            tracker.num_inf_tokens_list,
+            tracker.execution_type_list,
+            tracker.execution_duration_list,
+        ):
+            if exec_type == BatchExecutionType.PREFILL:
+                total_reqs = ft_reqs + inf_reqs
+                total_toks = ft_toks + inf_toks
+                if total_reqs <= 0 or total_toks <= 0:
+                    continue
+
+                # Approximate sum(n_i²) = (Σ n_i)² / B
+                sum_n2 = (total_toks ** 2) / total_reqs
+                sum_n2_list.append(sum_n2)
+                T_in_list.append(total_toks)
+                T_ft_list.append(ft_toks)
+                times.append(duration)
+
+        if len(times) < 3:
+            raise ValueError("Not enough PREFILL batches to fit PrefillExecutionEstimator (need ≥3).")
+
+        S = np.array(sum_n2_list)
+        Tin = np.array(T_in_list)
+        Tft = np.array(T_ft_list)
+        T = np.array(times)
+
+        X = np.column_stack([S, Tin, Tft, np.ones_like(T)])
+        alpha, beta, gamma, c = self._linfit(X, T)
+        self._params = PrefillParams(alpha=float(alpha), beta=float(beta), gamma=float(gamma), c=float(c))
+        preds = X @ np.array([alpha, beta, gamma, c])
+        self.fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))
+        return self._params
 @dataclass
 class DecodeParams:
-    a: float = 0.0   # per (total_tokens * batch_size) cost
-    b: float = 0.0   # per-request cost
-    c: float = 0.0   # fixed overhead
+    delta: float = 0.0   # per-request term
+    epsilon: float = 0.0 # per-KV token term
+    d: float = 0.0       # constant overhead
+
 
 class DecodeExecutionEstimator:
     """
     Execution time model (decode per step):
 
-        T = a * (T_total) + b * B + c
-
-        Where:
-          - T_total = total tokens in batch (KV cache size)
-          - B       = number of requests (new tokens to generate)
+        T_decode ≈ δ * B_t + ε * K_t + d
     """
 
     def __init__(self) -> None:
         self._params = DecodeParams()
-        self.decode_err = None
+        self.fit_rmse = None  # <-- same field name as in PrefillExecutionEstimator
 
     @staticmethod
     def _as_np_1d(x: Iterable[float]) -> np.ndarray:
@@ -426,57 +447,47 @@ class DecodeExecutionEstimator:
 
     def fit(
         self,
-        total_tokens: Sequence[float],  # T_total for each measurement
-        batch_sizes: Sequence[float],   # B for each measurement
+        total_tokens: Sequence[float],  # KV cache size (K_t)
+        batch_sizes: Sequence[float],   # B_t
         times: Sequence[float],         # measured decode times
     ) -> DecodeParams:
-        Ttot = self._as_np_1d(total_tokens)
+        K = self._as_np_1d(total_tokens)
         B = self._as_np_1d(batch_sizes)
         T = self._as_np_1d(times)
 
-        # Model: T = a * (Ttot*B) + b * B + c
-        X = np.column_stack([Ttot * B, B, np.ones_like(B)])
-        a, b, c = self._linfit(X, T)
+        X = np.column_stack([B, K, np.ones_like(B)])
+        delta, epsilon, d = self._linfit(X, T)
 
-        self._params = DecodeParams(a=float(a), b=float(b), c=float(c))
-        # --- compute max relative error ---
-        preds = a * (Ttot * B) + b * B + c
-        rel_errs = (preds - T) / np.maximum(T, 1e-9)
-        self.decode_err = float(np.max(rel_errs))
+        self._params = DecodeParams(delta=float(delta), epsilon=float(epsilon), d=float(d))
+
+        preds = X @ np.array([delta, epsilon, d])
+        self.fit_rmse = float(np.sqrt(np.mean((preds - T) ** 2)))  # <-- consistent naming
         return self._params
 
     def predict(self, total_tokens: float, batch_size: float) -> float:
-        a, b, c = self._params.a, self._params.b, self._params.c
-        result = a * (total_tokens * batch_size) + b * batch_size + c
-        if self.decode_err is not None:
-            result *= (1.0 + 1.5 * self.decode_err)
-        return result
+        p = self._params
+        T_pred = p.delta * batch_size + p.epsilon * total_tokens + p.d
+        if self.fit_rmse:
+            T_pred += 1.5 * self.fit_rmse
+        return float(T_pred)
 
     def verify(self, total_tokens: float, batch_size: float, actual_time: float) -> float:
-        """Compare prediction against actual measurement. Returns relative error."""
-        pred_time = self.predict(total_tokens, batch_size)
-        rel_err = abs(pred_time - actual_time) / max(actual_time, 1e-9)
-        print(f"[verify_decode] total_tokens={total_tokens}, B={batch_size} "
-              f"=> pred {pred_time:.6f}s vs actual {actual_time:.6f}s "
-              f"(error={rel_err:.2%})")
-        if self.decode_err is not None:
-            self.decode_err = max(self.decode_err, rel_err)
-        else:
-            self.decode_err = rel_err
-        return rel_err
-    
+        pred = self.predict(total_tokens, batch_size)
+        err = abs(pred - actual_time) / max(actual_time, 1e-9)
+        print(f"[verify_decode] pred {pred:.6f}s vs actual {actual_time:.6f}s (err={err:.2%})")
+        self.fit_rmse = max(self.fit_rmse or 0.0, err)
+        return err
+
     def data_fit(self, tracker: BatchExecutionTracker) -> DecodeParams:
         """
-        Fit the DecodeExecutionEstimator using data from a BatchExecutionTracker.
-
-        Only batches with execution_type == BatchExecutionType.DECODE are used.
-        The model uses (total_tokens_in_batch, num_requests, execution_time).
+        Fit using decode batches from tracker.
+        For each DECODE batch:
+          - B_t : active requests in batch
+          - K_t : total KV cache size (approximated as total_tokens)
         """
-        total_tokens = []
-        batch_sizes = []
-        times = []
+        B_list, K_list, T_list = [], [], []
 
-        for num_ft_reqs, num_inf_reqs, num_ft_toks, num_inf_toks, exec_type, duration in zip(
+        for ft_reqs, inf_reqs, ft_toks, inf_toks, exec_type, duration in zip(
             tracker.num_ft_reqs_list,
             tracker.num_inf_reqs_list,
             tracker.num_ft_tokens_list,
@@ -485,16 +496,20 @@ class DecodeExecutionEstimator:
             tracker.execution_duration_list,
         ):
             if exec_type == BatchExecutionType.DECODE:
-                # In decode, only inference tokens/reqs matter
-                total_tokens.append(num_inf_toks)
-                batch_sizes.append(num_inf_reqs)
-                times.append(duration)
+                B = inf_reqs
+                K = inf_toks
+                if B > 0 and K > 0:
+                    B_list.append(B)
+                    K_list.append(K)
+                    T_list.append(duration)
 
-        if len(total_tokens) < 3:
-            raise ValueError("Not enough decode batches to fit DecodeExecutionEstimator (need ≥3).")
+        if len(T_list) < 3:
+            raise ValueError("Not enough DECODE batches to fit DecodeExecutionEstimator (need ≥3).")
 
-        return self.fit(
-            total_tokens=total_tokens,
-            batch_sizes=batch_sizes,
-            times=times,
-        )
+        X = np.column_stack([B_list, K_list, np.ones_like(T_list)])
+        delta, epsilon, d = self._linfit(X, T_list)
+
+        self._params = DecodeParams(delta=float(delta), epsilon=float(epsilon), d=float(d))
+        preds = X @ np.array([delta, epsilon, d])
+        self.fit_rmse = float(np.sqrt(np.mean((preds - np.array(T_list)) ** 2)))
+        return self._params

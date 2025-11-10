@@ -18,8 +18,10 @@ class InferStateInfo:
         self.alt_mem_manager = None
         self.decode_mem_index_key = None
         self.decode_mem_index_value = None
+        self.decode_mem_index_cat = None
         self.prefill_mem_index_key = None
         self.prefill_mem_index_value = None
+        self.prefill_mem_index_cat = None
         self.b_loc_key = None
         self.b_loc_value = None
 
@@ -30,6 +32,12 @@ class InferStateInfo:
         self.decode_is_contiguous = None
         self.decode_mem_start = None 
         self.decode_mem_end = None
+
+        self.decode_mem_start_key = None 
+        self.decode_mem_end_key = None
+        self.decode_mem_start_value = None 
+        self.decode_mem_end_value = None
+
         self.decode_mem_index = None
         self.decode_key_buffer = None 
         self.decode_value_buffer = None

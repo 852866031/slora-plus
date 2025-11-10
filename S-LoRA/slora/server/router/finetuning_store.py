@@ -146,6 +146,37 @@ class FinetuningManager:
         self._reset_epoch_structures()
         return True
 
+    def pop_next(self, exclude: Optional[List["Req"]] = None) -> Optional["Req"]:
+        """
+        Pop the next available untrained finetuning request (in order of increasing input length).
+        Does NOT mark the request as trained.
+        Optionally skips any requests in the `exclude` list.
+        """
+        if not self.sorted_lengths:
+            return None
+
+        exclude_ids = {req.request_id for req in exclude} if exclude else set()
+
+        # Iterate over buckets in ascending order of input length
+        for L in self.sorted_lengths:
+            dq = self.len_buckets.get(L)
+            if not dq:
+                continue
+
+            while dq:
+                idx = dq[0]  # peek
+                if self.trained[idx]:
+                    dq.popleft()
+                    continue
+                req_id = self.req_ids[idx]
+                if req_id in exclude_ids:
+                    dq.popleft()
+                    continue
+                # Found valid sample — return it but keep it in deque
+                return self.reqs[idx]
+
+        return None
+
     def pop_best_under(
         self,
         max_tokens: int,

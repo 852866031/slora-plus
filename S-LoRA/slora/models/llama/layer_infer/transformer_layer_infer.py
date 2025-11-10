@@ -1,3 +1,4 @@
+import time
 from slora.common.unified_mem_allocator import UnifiedMemoryAllocator
 import torch
 import torch.functional as F
@@ -85,37 +86,47 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return q
     
     def _post_cache_kv(self, cache_k, cache_v, infer_state:LlamaInferStateInfo, layer_weight:LlamaTransformerLayerWeight):
-        mem_manager = infer_state.mem_manager
+        if not infer_state.is_prefill and infer_state.decode_is_contiguous:
+            return
         if infer_state.is_prefill:
             if infer_state.alt_mem_manager is None:
+                mem_manager = infer_state.mem_manager
                 self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.prefill_mem_index, mem_manager)
             else:
+                start = time.time()
                 alt_mem_manager = infer_state.alt_mem_manager
-                alt_mem_manager.pin_pages(infer_state.prefill_mem_index_key)
-                alt_mem_manager.pin_pages(infer_state.prefill_mem_index_value)
+                alt_mem_manager.pin_pages(infer_state.prefill_mem_index_cat)
+                #if self.layer_num_==16: print(f"\t\tLayer {self.layer_num_} pin pages time: {time.time() - start:.5f}s")
+                start = time.time()
                 key_mem_index = alt_mem_manager.to_gpu_index(infer_state.prefill_mem_index_key)
                 value_mem_index = alt_mem_manager.to_gpu_index(infer_state.prefill_mem_index_value)
+                #if self.layer_num_==16: print(f"\t\tLayer {self.layer_num_} to gpu index time: {time.time() - start:.5f}s")
+                start = time.time()
                 destindex_copy_kv(cache_k, key_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
                 destindex_copy_kv(cache_v, value_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
-                alt_mem_manager.unpin_pages(infer_state.prefill_mem_index_key)
-                alt_mem_manager.unpin_pages(infer_state.prefill_mem_index_value)
+                #if self.layer_num_==16: print(f"\t\tLayer {self.layer_num_} destindex copy time: {time.time() - start:.5f}s")
+                start = time.time()
+                alt_mem_manager.unpin_pages(infer_state.prefill_mem_index_cat)
+                #if self.layer_num_==16: print(f"\t\tLayer {self.layer_num_} unpin pages time: {time.time() - start:.5f}s")
             return
         else:
-            if infer_state.alt_mem_manager!=None:
-                alt_mem_manager = infer_state.alt_mem_manager
-                key_mem_index = alt_mem_manager.to_gpu_index(infer_state.decode_mem_index_key)
-                value_mem_index = alt_mem_manager.to_gpu_index(infer_state.decode_mem_index_value)
-                destindex_copy_kv(cache_k, key_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
-                destindex_copy_kv(cache_v, value_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
-                return
-            elif not infer_state.decode_is_contiguous:
-                self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.decode_mem_index, mem_manager)
+            if not infer_state.decode_is_contiguous:
+                print("Not support non-contiguous decode mem index yet.")
+                if infer_state.alt_mem_manager!=None:
+                    alt_mem_manager = infer_state.alt_mem_manager
+                    alt_mem_manager.pin_pages(infer_state.decode_mem_index_key)
+                    key_mem_index = alt_mem_manager.to_gpu_index(infer_state.decode_mem_index_key)
+                    value_mem_index = alt_mem_manager.to_gpu_index(infer_state.decode_mem_index_value)
+                    destindex_copy_kv(cache_k, key_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
+                    destindex_copy_kv(cache_v, value_mem_index, alt_mem_manager.gpu_pools[self.layer_num_])
+                    return
+                else:
+                    self._copy_kv_to_mem_cache(cache_k, cache_v, infer_state.decode_mem_index, mem_manager)
                 return
         return
     
     def _context_attention_kernel(self, q, k, v, infer_state:LlamaInferStateInfo, layer_weight)->torch.Tensor:
         o_tensor = torch.empty_like(q)
-        '''
         context_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
                               k.view(-1, self.tp_k_head_num_, self.head_dim_),
                               v.view(-1, self.tp_v_head_num_, self.head_dim_),
@@ -123,8 +134,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                               infer_state.b_start_loc,
                               infer_state.b_seq_len,
                               infer_state.max_len_in_batch)
-        '''
-        context_attention_fwd_pytorch(q, k, v, o_tensor, infer_state.b_start_loc, infer_state.b_seq_len, infer_state.max_len_in_batch)
+
+        #context_attention_fwd_pytorch(q, k, v, o_tensor, infer_state.b_start_loc, infer_state.b_seq_len, infer_state.max_len_in_batch)
         return o_tensor
     
     def _token_attention_kernel(self, q, infer_state:LlamaInferStateInfo, layer_weight, q_alt=None)->torch.Tensor:
@@ -167,8 +178,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         batch_size = infer_state.batch_size
         calcu_shape1 = (batch_size, self.tp_q_head_num_, self.head_dim_)
         att_m_tensor = torch.empty((self.tp_q_head_num_, total_token_num), dtype=q.dtype, device="cuda")
-        buffer_address, gpu_b_loc_key, gpu_b_loc_value, vpid_to_unpin = infer_state.alt_mem_manager.prepare_b_locs_for_layer(
-                infer_state.b_loc_key, infer_state.b_loc_value, infer_state.b_seq_len, self.layer_num_)
+        buffer_address, gpu_b_loc_key, gpu_b_loc_value = infer_state.alt_mem_manager.prepare_b_locs_for_layer(
+                infer_state.b_loc_key, infer_state.b_loc_value, infer_state.b_seq_len, self.layer_num_) 
 
         token_att_fwd(q.view(calcu_shape1),
                           buffer_address,
@@ -192,7 +203,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                             infer_state.b_start_loc,
                             infer_state.b_seq_len,
                             infer_state.max_len_in_batch)
-            infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
+            #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
             return o_tensor
         
         elif triton.__version__ >= "2.1.0":
@@ -206,10 +217,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                                           infer_state.b_seq_len,
                                           infer_state.max_len_in_batch,
                                           infer_state.other_kv_index)
-            infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
+            #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
             return o_tensor
         else:
-            infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
+            #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
             raise Exception("not support triton version")
         
     def _token_decode_attention_normal(self, q, infer_state: LlamaInferStateInfo):

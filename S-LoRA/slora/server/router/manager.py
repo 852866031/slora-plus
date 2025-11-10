@@ -1,7 +1,7 @@
 import copy
 from functools import partial
 from slora.server.router.gpu_profiler import GPUProfiler
-from slora.server.router.mixed_profile_req_queue import MixedProfile_ReqQueue
+from slora.server.router.profile_req_queue import Profile_ReqQueue
 from slora.server.router.tracker import BatchExecutionTracker, BatchExecutionType, DecodeExecutionEstimator, PrefillExecutionEstimator
 from slora.server.router.profiling_batch_generator import ProfilingBatchGenerator
 import uvloop
@@ -58,8 +58,8 @@ def get_scheduler(input_params, adapter_dirs):
             return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                                 input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params)
         elif input_params.finetuning_params.finetuning_type == "SFT Profile":
-            return MixedProfile_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
-                                input_params.running_max_req_size, input_params.finetuning_params, adapter_dirs[0])
+            return Profile_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
+                                input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params, adapter_dirs[0])
     else:
         raise Exception("unrecognized scheduler")
 
@@ -221,7 +221,7 @@ class RouterManager:
                 await asyncio.sleep(0.01)  # 10ms
     
     def _check_if_finetuning_scheduler(self):
-        return isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, MixedProfile_ReqQueue)
+        return isinstance(self.req_queue, Mixed_ReqQueue) or isinstance(self.req_queue, Profile_ReqQueue)
 
     def _check_backward_condition(self, printing=False):
         if self._check_if_finetuning_scheduler() \
@@ -236,12 +236,11 @@ class RouterManager:
             self.req_queue.reset_abort_list()
 
     async def _co_serving_step(self):
-        if self.batch_exec_tracker.check_refit():
-            self.prefill_estimator.data_fit(self.batch_exec_tracker)
-            self.decode_estimator.data_fit(self.batch_exec_tracker)
-            router_print(f"Refit prefill and decode time estimators. \
-                         Prefill Err: {self.prefill_estimator.inf_err:.3f}, {self.prefill_estimator.co_err:.3f},\
-                              Decode Err: {self.decode_estimator.decode_err:.3f}")
+        # if self.batch_exec_tracker.check_refit():
+        #     self.prefill_estimator.data_fit(self.batch_exec_tracker)
+        #     self.decode_estimator.data_fit(self.batch_exec_tracker)
+        #     router_print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
+        #     router_print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
         if self.running_batch is None:
             # Prefill new batch
             self._clear_abort_reqs()
@@ -287,22 +286,6 @@ class RouterManager:
         rets = [self.model_rpcs[tp_rank].init_batch(batch.batch_id, reqs) for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
         return
-        
-    async def _start_back_batch(self, current_epoch=None):
-        self.backward_is_running = True
-        rets = [self.model_rpcs[tp_rank].back_batch(current_epoch=current_epoch) for tp_rank in range(self.world_size)]
-        results = await asyncio.gather(*rets)
-        success = True
-        loss_list = []
-        processed_tokens =0
-        for result in results:
-            finished, loss, tokens = result
-            success = success and finished
-            if loss!=None: loss_list.append(loss)
-            if tokens!= None: processed_tokens += tokens
-        if success: self.req_queue.update_finetuning_status_after_bwd(loss_list, processed_tokens)
-        self.backward_is_running = False
-        return
 
     def backward_callback(self, combined_future, job_id=None):
         results = combined_future.result()
@@ -344,14 +327,15 @@ class RouterManager:
         return token_count
 
     async def _prefill_batch(self, batch, minibatch=True):
-        prefill_start_time = time.time()
         num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
         await self.pause_backward()
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation(f"prefill #tokens: {batch.input_tokens()}")
         await self._init_batch(batch)
+        prefill_start_time = time.time()
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id, self.prefill_interrupt_event) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
+        router_print(f"Prefill Duration: {time.time() - prefill_start_time:.3f}")
         if None not in ans:
             if self.world_size != 1:
                 req_to_out_token_id = obtain(ans[0])
@@ -396,13 +380,18 @@ class RouterManager:
         return True
 
     async def _decode_batch(self, batch:Batch):
-        start_time = time.time()
+        
         num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation(f"decode #tokens: {batch.input_tokens()}")
         self.req_queue.update_counter(batch)
-        rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id) for tp_rank in range(self.world_size)]
+        start_time = time.time()
+        rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id, self.decode_step_count) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
+        if isinstance(self.req_queue, Profile_ReqQueue):
+            print(f"Decode Step {self.decode_step_count} Duration: {(time.time() - start_time):.4f}s")  
+            self.req_queue.add_to_decode_time_queue(time.time() - start_time)
+        decode_end_time = time.time()
         if self.world_size != 1:
             req_to_out_token_id = obtain(ans[0])
         else:
@@ -410,7 +399,6 @@ class RouterManager:
         self._add_token_id_to_req(batch, req_to_out_token_id)
         has_new_finished_req = batch.mark_finished_req(self.eos_id)
         self._send_to_detokenization_proc(batch, req_to_out_token_id)
-        decode_end_time = time.time()
         duration = decode_end_time - start_time
         if self.decode_step_count < 8:
             self.batch_exec_tracker.add_batch_stats(
@@ -422,6 +410,7 @@ class RouterManager:
                 execution_duration=duration)
         batch.record_token_time(decode_end_time)
         await self._handle_finish_req(batch, has_new_finished_req)
+        
         if self.gpu_profiler is not None:
             self.gpu_profiler.stop_annotation(job_id)
         return
@@ -615,8 +604,8 @@ class RouterManager:
         #self.batch_exec_tracker.print_batch_stats()
         self.prefill_estimator.data_fit(self.batch_exec_tracker)
         self.decode_estimator.data_fit(self.batch_exec_tracker)
-        print(f"Error for prefill estimator: inf: {self.prefill_estimator.inf_err}, co: {self.prefill_estimator.co_err}")
-        print(f"Error for decode estimator: {self.decode_estimator.decode_err}")
+        print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
+        print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
 
 def start_router_process(args, router_port, detokenization_port, model_rpc_ports, mode, pipe_writer):
     input_params = InputParams(max_req_total_len=args.max_req_total_len,

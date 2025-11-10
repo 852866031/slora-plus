@@ -97,7 +97,6 @@ class HttpServerManager:
 
 
     async def generate(self, adapter_dir, prompt, sampling_params, request_id):
-        self._record_arrival()
         feedback = False
         if self.live_alignment and random.random() <= 0.5:
             self.feedback_collector.submit_update(req_id=request_id, prompt=prompt)
@@ -136,7 +135,11 @@ class HttpServerManager:
             if request_id not in self.req_id_to_out_inf:
                 yield "", {}, -1, False
                 break
-            out_str, metadata, finished, _, perf_metrics = self.req_id_to_out_inf[request_id]
+            out = self.req_id_to_out_inf[request_id]
+            if len(out) != 5:
+                print(out)
+            else:
+                out_str, metadata, finished, event, perf_metrics = out
             if feedback:
                 if out_str == "\n":
                     out_str = "\\n"
@@ -167,7 +170,6 @@ class HttpServerManager:
             recv_ans:Union(BatchStrOut, BatchAbortReq, FinetuneStatusReq) = await self.recv_from_detokenization.recv_pyobj()
             assert isinstance(recv_ans, (BatchStrOut, BatchAbortReq, FinetuneStatusReq)), f"error recv type {type(recv_ans)}"
             if isinstance(recv_ans, BatchStrOut):
-                #print("httpserver: received out batch from detokenization")
                 for req_id, text, metadata, finished, abort, perf_metrics in recv_ans.reqs_infs:
                     try:
                         if not abort:

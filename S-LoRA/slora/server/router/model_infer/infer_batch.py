@@ -249,20 +249,6 @@ class InferBatch:
             self.mem_manager.free(remove_index)
 
 
-        # mark_start("filter free mem manager")
-        # mark_end("filter free mem manager")
-
-        # ''' sort according to adapters '''
-        # # Create a list of tuples containing request_id and its index
-        # request_with_idx = [(self.requests[self.requests_idx_mapping[request_id]], request_id)
-        #                     for request_id in request_ids]
-        # # Sort the list based on the 'adapter' field of the request
-        # request_with_idx.sort(key=lambda x: x[0]["adapter_dir"] if x[0]["adapter_dir"] is not None else "")
-
-        # sorted_request_ids = [item[1] for item in request_with_idx]
-        # request_ids = sorted_request_ids 
-        # ''' end '''
-
         nopad_max_len_in_batch = 0
         for i, request_id in enumerate(request_ids):
             idx = self.requests_idx_mapping[request_id]
