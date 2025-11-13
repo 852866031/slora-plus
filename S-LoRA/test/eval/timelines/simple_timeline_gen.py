@@ -1,4 +1,5 @@
 import csv
+import os
 
 def generate_request_pattern(rps: int, duration: int, prompt_length: int, max_new_tokens: int, output_file: str):
     """
@@ -39,8 +40,10 @@ if __name__ == "__main__":
     duration_seconds = 5
     prompt_length = 30
     max_new_tokens = 30
-    output_filename = "timeline1.csv"
-
+    current_file_path = os.path.abspath(__file__)
+    current_directory = os.path.dirname(current_file_path)
+    suffix = f"{requests_per_second}rps-{duration_seconds}s-{prompt_length}in-{max_new_tokens}gen"
+    output_filename = f"{current_directory}/tl_{suffix}.csv"
     generate_request_pattern(
         requests_per_second,
         duration_seconds,

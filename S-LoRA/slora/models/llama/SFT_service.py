@@ -161,6 +161,7 @@ class LlamaSFTBackwardService():
         self.bwd_stream = None
         self.bwd_pause_event = None
         self.working = False
+        self.total_processed_tokens = 0
 
     def start_service(self):
         bwd_print("Started.")
@@ -204,9 +205,9 @@ class LlamaSFTBackwardService():
                                 self.finetuning_scheduler.step()
                                 self.current_epoch = current_epoch
                             self.send_pipe.send((ok, loss, ntok))
-                        bwd_print(f"Backward completed, duration {time.time()-start:.2f}s")
                         self.working = False
-                    
+                        self.total_processed_tokens += ntok
+                        bwd_print(f"Backward completed, duration {time.time()-start:.2f}s, total tokens processed: {self.total_processed_tokens}")
                     except Exception as e:
                         import traceback
                         tb = traceback.format_exc()

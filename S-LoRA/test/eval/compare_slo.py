@@ -236,9 +236,9 @@ if __name__ == "__main__":
     rps, duration, prompt_len, max_new_tokens = extract_request_params("timeline1.csv")
     suffix = f"{rps}rps-{duration}s-{prompt_len}in-{max_new_tokens}gen"
     plot_two_tbt_files(
-        file1="latency_slora.csv",
+        file1="results/latency_slora.csv",
         label1="slora",
-        file2="latency_inference.csv",
+        file2="results/latency_inference.csv",
         label2="SYS_NAME",
         slo_json=None,
         out_png=f"p-slo-{suffix}.png",

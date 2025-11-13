@@ -559,7 +559,7 @@ class RouterManager:
     async def estimate_finetuning_overhead(self):
         if not self._check_if_finetuning_scheduler():
             return
-        print("Start modeling prefill/decdode time")
+        print("Start modeling prefill/decode time")
         inf_batches = self.profiling_batch_generator.inference_batches
         co_batches = self.profiling_batch_generator.coserving_batches
         # Run inference-only batches

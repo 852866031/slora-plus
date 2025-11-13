@@ -228,12 +228,12 @@ def extract_request_params(csv_path: str) -> Tuple[int, int, int, int]:
 
 # ------------------ Main ------------------ #
 if __name__ == "__main__":
-    rps, duration, prompt_len, max_new_tokens = extract_request_params("timeline1.csv")
+    rps, duration, prompt_len, max_new_tokens = extract_request_params("timelines/timeline_live.csv")
     suffix = f"{rps}rps-{duration}s-{prompt_len}in-{max_new_tokens}gen"
     plot_two_tbt_files(
-        file1="latency_inference.csv",
+        file1="results/latency_inference.csv",
         label1="inf",
-        file2="latency_co-serving.csv",
+        file2="results/latency_co-serving.csv",
         label2="co_serving",
         slo_json=None,
         out_png=f"co-slo-{suffix}.png",

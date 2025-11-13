@@ -159,7 +159,7 @@ class Mixed_ReqQueue:
         else:
             return False
     
-    def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
+    def generate_new_batch_1(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
         if current_batch is not None and len(current_batch.reqs) >= self.running_max_req_size:
             return None
         self._init_cache_list(current_batch, lora_ranks)
@@ -199,7 +199,7 @@ class Mixed_ReqQueue:
                                                          ft_tokens+ft_req.input_len, 
                                                          len(can_run_list)+len(ft_list), 
                                                          earliest_inf_arrival_time, 
-                                                         ft_req.input_len, self.ttft_slo*0.9):
+                                                         ft_req.input_len, self.ttft_slo):
                     break
                 elif current_batch is not None:
                     # check avg tbt slo
@@ -274,62 +274,62 @@ class Mixed_ReqQueue:
     def update_counter(self, req: Req):
         pass
 
-    # def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
-    #     if current_batch is not None and len(current_batch.reqs) >= self.running_max_req_size:
-    #         return None
-    #     self._init_cache_list(current_batch, lora_ranks)
-    #     new_batch_total_tokens = 0
-    #     can_run_list = []
-    #     aborted_count = 0
-    #     earliest_inf_arrival_time = self.waiting_req_list[0].arrival_time if len(self.waiting_req_list) > 0 else time.time()
-    #     if len(self.waiting_req_list) > 0:
-    #         for req in self.waiting_req_list:
-    #             if req.aborted:
-    #                 aborted_count += 1
-    #                 continue
-    #             if (self._can_add_new_req(req, lora_ranks) and
-    #                 (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
-    #                 can_run_list.append(req)
-    #                 new_batch_total_tokens += req.input_len
-    #             else:
-    #                 break
-    #     if len(can_run_list) > 0:
-    #         self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
+    def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
+        if current_batch is not None and len(current_batch.reqs) >= self.running_max_req_size:
+            return None
+        self._init_cache_list(current_batch, lora_ranks)
+        new_batch_total_tokens = 0
+        can_run_list = []
+        aborted_count = 0
+        earliest_inf_arrival_time = self.waiting_req_list[0].arrival_time if len(self.waiting_req_list) > 0 else time.time()
+        if len(self.waiting_req_list) > 0:
+            for req in self.waiting_req_list:
+                if req.aborted:
+                    aborted_count += 1
+                    continue
+                if (self._can_add_new_req(req, lora_ranks) and
+                    (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
+                    can_run_list.append(req)
+                    new_batch_total_tokens += req.input_len
+                else:
+                    break
+        if len(can_run_list) > 0:
+            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
 
-    #     infer_tokens = new_batch_total_tokens
-    #     ft_tokens = 0
-    #     if self.start_task and not self.finetuning_is_finished() and not is_backward_running:
-    #         ft_list = []
-    #         while self.finetuning_manager.has_next():
-    #             restrain_batch_max_tokens = self.batch_max_tokens - new_batch_total_tokens
-    #             restrain_backward_batch_size = self.max_saved_finetuning_tokens - self.finetuning_manager.pending_bwd_tokens - ft_tokens
-    #             restrain_ttft_slo = self.prefill_estimator.max_next_ft_tokens(
-    #                 infer_tokens, ft_tokens, len(can_run_list)+len(ft_list), earliest_inf_arrival_time, self.ttft_slo*0.9)
-    #             restrain = min(restrain_batch_max_tokens, restrain_backward_batch_size, restrain_ttft_slo)
-    #             req = self.finetuning_manager.pop_best_under(restrain, exclude=ft_list)
-    #             if req is not None and current_batch is not None:
-    #                 # check avg tbt slo
-    #                 worst_req_last_batch = current_batch.get_req_with_worst_avg_tbt()
-    #                 predicted_next_prefill_time = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens+req.input_len, len(can_run_list)+1)
-    #                 predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
-    #                 next_token_time = predicted_next_prefill_time + predicted_next_decode_time
-    #                 if next_token_time > self.max_tbt_slo:
-    #                     print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
-    #                     break
-    #                 worst_avg_tbt_predicted = worst_req_last_batch.avg_tbt_if_next_token(next_token_time)
-    #                 if worst_avg_tbt_predicted > self.avg_tbt_slo:
-    #                     print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
-    #                     break
-    #             if req is None:
-    #                 break
-    #             else:
-    #                 ft_list.append(req)
-    #                 new_batch_total_tokens += req.input_len
-    #                 ft_tokens += req.input_len
-    #         can_run_list.extend(ft_list)
-    #     if len(can_run_list) > 0:
-    #         new_batch = Batch(uuid.uuid4().hex, can_run_list)
-    #         self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
-    #         return new_batch
-    #     else:
-    #         return None
+        infer_tokens = new_batch_total_tokens
+        ft_tokens = 0
+        if self.start_task and not self.finetuning_is_finished() and not is_backward_running:
+            ft_list = []
+            while self.finetuning_manager.has_next():
+                restrain_batch_max_tokens = self.batch_max_tokens - new_batch_total_tokens
+                restrain_backward_batch_size = self.max_saved_finetuning_tokens - self.finetuning_manager.pending_bwd_tokens - ft_tokens
+                restrain_ttft_slo = self.prefill_estimator.max_next_ft_tokens(
+                    infer_tokens, ft_tokens, len(can_run_list)+len(ft_list), earliest_inf_arrival_time, self.ttft_slo*0.9)
+                restrain = min(restrain_batch_max_tokens, restrain_backward_batch_size, restrain_ttft_slo)
+                req = self.finetuning_manager.pop_best_under(restrain, exclude=ft_list)
+                if req is not None and current_batch is not None:
+                    # check avg tbt slo
+                    worst_req_last_batch = current_batch.get_req_with_worst_avg_tbt()
+                    predicted_next_prefill_time = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens+req.input_len, len(can_run_list)+1)
+                    predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
+                    next_token_time = predicted_next_prefill_time + predicted_next_decode_time
+                    if next_token_time > self.max_tbt_slo:
+                        print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
+                        break
+                    worst_avg_tbt_predicted = worst_req_last_batch.avg_tbt_if_next_token(next_token_time)
+                    if worst_avg_tbt_predicted > self.avg_tbt_slo:
+                        print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
+                        break
+                if req is None:
+                    break
+                else:
+                    ft_list.append(req)
+                    new_batch_total_tokens += req.input_len
+                    ft_tokens += req.input_len
+            can_run_list.extend(ft_list)
+        if len(can_run_list) > 0:
+            new_batch = Batch(uuid.uuid4().hex, can_run_list)
+            self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
+            return new_batch
+        else:
+            return None

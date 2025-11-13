@@ -235,10 +235,10 @@ class FinetuningManager:
         return marked
 
     def ready_for_bwd(self):
-        if self.pending_bwd_tokens >= self.max_saved_finetuning_tokens:
+        if self.pop_next() is None:
             return True
-        elif self.pop_best_under(self.max_saved_finetuning_tokens - self.pending_bwd_tokens) is None:
-            return True
+        elif self.pending_bwd_tokens + self.pop_next().input_len >= self.max_saved_finetuning_tokens:
+            return True  
         elif self.pending_bwd_tokens > 0 and not self.len_buckets:
             return True
         else:

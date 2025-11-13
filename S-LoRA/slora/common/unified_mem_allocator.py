@@ -75,7 +75,7 @@ class UnifiedMemoryAllocator:
         self.shared_transformer_out_activations = None
         self.shared_attention_out_activations = None
         self.embedding_output = None
-        self.max_finetuning_tokens = 512
+        self.max_finetuning_tokens = 1024
         self.init_shared_activation_memory()
 
     def _num_free_gpu_slots(self) -> int:

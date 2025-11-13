@@ -211,7 +211,7 @@ class PrefillExecutionEstimator:
         Tin = B * N_inf
         pred = p.alpha * S + p.beta * Tin + p.c
         if self.fit_rmse:
-            pred += 1.2 * self.fit_rmse
+            pred *= 1 + self.fit_rmse
         return float(pred)
 
     def predict_coserving(self, N_inf: float, N_ft: float, B: float) -> float:
@@ -223,8 +223,6 @@ class PrefillExecutionEstimator:
         Tin = B * (N_inf + N_ft)
         Tft = B * N_ft
         pred = p.alpha * S + p.beta * Tin + p.gamma * Tft + p.c
-        if self.fit_rmse:
-            pred += 1.2 * self.fit_rmse
         return float(pred)
 
     def verify_inference(self, N_inf: float, B: float, actual_time: float) -> float:
@@ -322,7 +320,7 @@ class PrefillExecutionEstimator:
 
         # Safety margin based on RMSE
         fit_rmse = float(self.fit_rmse) if self.fit_rmse is not None else 0.0
-        safety = 1.0 + 2.0 * max(0.0, fit_rmse)
+        safety = 1.0
         adjusted_budget = rem_time / safety
 
         # Current totals

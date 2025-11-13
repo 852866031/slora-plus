@@ -198,8 +198,9 @@ class LoraUnorderedBatchMixed:
         """
         Tensor-based version: if interrupted, free all given vpids (on GPU).
         """
+        vpids_to_free = None
         if prefill_interrupt_event is not None and prefill_interrupt_event.is_set():
-            vpids_to_free = None
+            print("Prefill interrupted, cleaning up…")
             if FFN_input_vpids is not None and attention_input_vpids is not None:
                 vpids_to_free = torch.cat((FFN_input_vpids, attention_input_vpids))
             elif FFN_input_vpids is not None:
@@ -212,7 +213,6 @@ class LoraUnorderedBatchMixed:
                 self.infer_adapter_alt.unpin_adapters_pages() 
                 self.base_model.alt_mem_manager.reset_b_loc_kv(None, None)
             return True
-
         return False
     
     @torch.no_grad()

@@ -23,12 +23,13 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import aiohttp
+from matplotlib import pyplot as plt
 import pandas as pd
 
 # ---------------- Defaults ----------------
 DEFAULTS = {
     "server": "http://localhost:8000",
-    "timeline_csv": "timeline1.csv",  
+    "timeline_csv": "timelines/timeline_live.csv",  
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
     "ft_max_wait": 60.0,
@@ -62,6 +63,8 @@ def make_payload(prompt: str, max_new_tokens: int) -> Dict:
         },
     }
 
+import subprocess
+from datetime import datetime
 
 # ---------------- Load schedule from CSV ----------------
 def load_schedule_from_csv(csv_path: str) -> List[Tuple[int, float, Dict]]:
@@ -218,6 +221,8 @@ async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> 
             delay = (t0 + t_off) - time.monotonic()
             if delay > 0:
                 await asyncio.sleep(delay)
+            if idx % 5 == 0:
+                print("[Orchestrator] Request {}/{} fired at server".format(idx + 1, total))
             result = await send_one(session, server, idx, payload, t0)
             async with lock:
                 finished_count += 1
@@ -316,6 +321,83 @@ def write_latency_csv(results, out_stem: str) -> Path:
     return path
 
 
+
+async def monitor_gpu_usage_1(
+    log_path: str = "gpu_usage_log.csv",
+    interval_s: float = 1.0,
+    stop_event: asyncio.Event | None = None,
+):
+    """
+    Periodically record GPU utilization and memory usage until stop_event is set.
+    Writes to CSV: timestamp,gpu_util,memory_used,memory_total
+    """
+    print(f"[monitor] GPU monitoring started → {log_path}")
+    with open(log_path, "w") as f:
+        f.write("timestamp,gpu_util,memory_used_mb,memory_total_mb\n")
+
+    try:
+        while not (stop_event and stop_event.is_set()):
+            try:
+                output = subprocess.check_output([
+                    "nvidia-smi",
+                    "--query-gpu=utilization.gpu,memory.used,memory.total",
+                    "--format=csv,noheader,nounits"
+                ]).decode("utf-8").strip()
+                # Handle multi-GPU setup
+                lines = output.splitlines()
+                now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(log_path, "a") as f:
+                    for line in lines:
+                        util, mem_used, mem_total = line.split(", ")
+                        f.write(f"{now},{util},{mem_used},{mem_total}\n")
+            except subprocess.CalledProcessError:
+                print("[monitor] Failed to read nvidia-smi output (is GPU present?)")
+            await asyncio.sleep(interval_s)
+    finally:
+        print("[monitor] GPU monitoring stopped.")
+
+
+from pynvml import *
+
+async def monitor_gpu_usage(
+    log_path: str = "gpu_usage_log.csv",
+    interval_s: float = 0.2,
+    stop_event: Optional[asyncio.Event] = None,
+):
+    """
+    High-resolution GPU monitor using pynvml.
+    Columns: timestamp,gpu_index,gpu_util,memory_used_mb,memory_total_mb,power_w,temperature_c
+    """
+    nvmlInit()
+    device_count = nvmlDeviceGetCount()
+    print(f"[monitor] GPU monitoring started ({device_count} GPU(s)) → {log_path}")
+
+    buffer: List[str] = []
+    buffer.append("timestamp,gpu_index,gpu_util,memory_used_mb,memory_total_mb,power_w,temperature_c\n")
+
+    try:
+        while not (stop_event and stop_event.is_set()):
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            for i in range(device_count):
+                handle = nvmlDeviceGetHandleByIndex(i)
+                util = nvmlDeviceGetUtilizationRates(handle)
+                mem = nvmlDeviceGetMemoryInfo(handle)
+                power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # W
+                temp = nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)
+                buffer.append(
+                    f"{now},{i},{util.gpu},{mem.used/1024**2:.1f},{mem.total/1024**2:.1f},{power:.1f},{temp}\n"
+                )
+            await asyncio.sleep(interval_s)
+    except asyncio.CancelledError:
+        # Allow graceful cancellation
+        print("[monitor] Task cancelled — flushing buffer...")
+    finally:
+        nvmlShutdown()
+        with open(log_path, "w") as f:
+            f.writelines(buffer)
+        print(f"[monitor] GPU monitoring stopped. {len(buffer)-1} samples written → {log_path}")
+
+
 # ---------------- Main ----------------
 async def main():
     ap = argparse.ArgumentParser(description="Replay requests from timeline.csv against a server.")
@@ -337,15 +419,24 @@ async def main():
 
     proc = launch_server(args.enable_finetuning)
 
+    stop_gpu_event = asyncio.Event()
+    suffix = "co-serving" if args.enable_finetuning else "inference"
+    gpu_log_path = f"results/gpu_usage_{suffix}.csv"
+
+    # Start GPU monitor in background
+    gpu_monitor_task = asyncio.create_task(monitor_gpu_usage(gpu_log_path, interval_s=0.2, stop_event=stop_gpu_event))
+
     try:
         await wait_for_server(args.server, max_wait_s=args.max_wait)
         results = await run_schedule(args.server, schedule)
-        await wait_for_finetuning(args.server)
+        stop_gpu_event.set()
+        await gpu_monitor_task
+        #await wait_for_finetuning(args.server)
     finally:
         print("[orchestrator] Stopping server…")
         kill_server(proc)
         summarize(results)
-        out_stem = "latency_co-serving" if args.enable_finetuning else "latency_inference"
+        out_stem = f"results/latency_{suffix}"
         write_latency_csv(results, out_stem)
         print("[orchestrator] Done.")
 
