@@ -25,6 +25,14 @@ def generate_peak_valley_timeline(
         total_reqs = 0
 
         for cycle in range(total_cycles):
+             # --- Valley Phase ---
+            valley_count = int(valley_duration * valley_rps)
+            for i in range(valley_count):
+                timestamp = time + i / max(1, valley_rps)
+                second = int(timestamp)
+                writer.writerow([round(timestamp, 6), prompt_length, max_new_tokens, second, i % max(1, valley_rps)])
+                total_reqs += 1
+            time += valley_duration
             # --- Peak Phase ---
             peak_count = int(peak_duration * peak_rps)
             for i in range(peak_count):
@@ -34,14 +42,7 @@ def generate_peak_valley_timeline(
                 total_reqs += 1
             time += peak_duration
 
-            # --- Valley Phase ---
-            valley_count = int(valley_duration * valley_rps)
-            for i in range(valley_count):
-                timestamp = time + i / max(1, valley_rps)
-                second = int(timestamp)
-                writer.writerow([round(timestamp, 6), prompt_length, max_new_tokens, second, i % max(1, valley_rps)])
-                total_reqs += 1
-            time += valley_duration
+           
 
     print(f"✅ Generated {output_file} with {total_reqs} requests.")
 
@@ -63,12 +64,12 @@ def generate_peak_valley_timeline(
 
 if __name__ == "__main__":
     # === Example Usage ===
-    peak_duration = 2.0
-    valley_duration = 4.0
-    prompt_length = 40
-    max_new_tokens = 50
-    total_cycles = 9
-    peak_rps = 8
+    peak_duration = 3.0
+    valley_duration = 2.0
+    prompt_length = 200
+    max_new_tokens = 80
+    total_cycles = 4
+    peak_rps = 9
     valley_rps = 1
     initial_idle = 1.0
 
