@@ -61,7 +61,7 @@ setup(
         "safetensors",
         # "torch",
         "transformers",
-        "triton==3.2.0",
+        "triton==2.3.0",
         "uvloop",
         "uvicorn",
         "psutil",

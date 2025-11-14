@@ -98,6 +98,7 @@ class Mixed_ReqQueue:
         self.prefill_estimator = None
         self.decode_estimator = None
         self.check_iter = 0
+        self.last_batch_time = None
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
@@ -121,7 +122,7 @@ class Mixed_ReqQueue:
             self.adapter_size = 0
 
     async def check_will_starve(self, current_batch) -> bool:
-        if len(self.waiting_req_list) == 0 and self.check_iter==2:
+        if len(self.waiting_req_list) == 0:
             self.check_iter=0
             await asyncio.sleep(0.000000001)  # Yield to the request handler loop
         else:
@@ -134,6 +135,9 @@ class Mixed_ReqQueue:
                 total_pending_inf_tokens += req.input_len * 1.2
             predicted_next_prefill_time = self.prefill_estimator.predict_inference(total_pending_inf_tokens, len(self.waiting_req_list))
             time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
+            if time_left < 0 and self.last_batch_time is not None:
+                print(f"Time elapsed from last batch: {time.time() - self.last_batch_time:.3f}s")
+            print(f"Num pending inf reqs: {len(self.waiting_req_list)}")
             return time_left < 0
         return False
 
@@ -222,6 +226,7 @@ class Mixed_ReqQueue:
         if len(can_run_list) > 0:
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
+            self.last_batch_time = time.time()
             return new_batch
         else:
             return None
@@ -295,7 +300,8 @@ class Mixed_ReqQueue:
                     break
         if len(can_run_list) > 0:
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
-
+        if len(self.waiting_req_list)>0:
+            print(f"\033[34m[Forward Batch Constructor]: {len(self.waiting_req_list)} inference requests are waiting in the queue.\033[0m")
         infer_tokens = new_batch_total_tokens
         ft_tokens = 0
         if self.start_task and not self.finetuning_is_finished() and not is_backward_running:
@@ -314,11 +320,11 @@ class Mixed_ReqQueue:
                     predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
                     next_token_time = predicted_next_prefill_time + predicted_next_decode_time
                     if next_token_time > self.max_tbt_slo:
-                        print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
+                        #print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
                         break
                     worst_avg_tbt_predicted = worst_req_last_batch.avg_tbt_if_next_token(next_token_time)
                     if worst_avg_tbt_predicted > self.avg_tbt_slo:
-                        print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
+                        #print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
                         break
                 if req is None:
                     break
@@ -330,6 +336,7 @@ class Mixed_ReqQueue:
         if len(can_run_list) > 0:
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
+            self.last_batch_time = time.time()
             return new_batch
         else:
             return None

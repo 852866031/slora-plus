@@ -16,7 +16,6 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
-import nvtx
 import pynvml
 
 from einops import rearrange
@@ -162,6 +161,8 @@ class LlamaSFTBackwardService():
         self.bwd_pause_event = None
         self.working = False
         self.total_processed_tokens = 0
+        self.backward_tokens_log_path = "/projects/I20240005/jchen/slora-plus/S-LoRA/test/eval/results/bwd_total_tokens.txt"
+        self.backward_tokens_log_path_2 = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/results/bwd_total_tokens.txt"
 
     def start_service(self):
         bwd_print("Started.")
@@ -179,7 +180,7 @@ class LlamaSFTBackwardService():
             step_size=1,      # every epoch
             gamma=self.gamma        # multiply by 0.5
         )
-        self.bwd_stream = torch.cuda.Stream(priority=99)
+        self.bwd_stream = torch.cuda.Stream()
         self.send_pipe.send("READY")
         while True:
             if self.recv_pipe.poll():
@@ -215,7 +216,7 @@ class LlamaSFTBackwardService():
                         bwd_print(f"Backward failed with error: {e}\n{tb}")
             else:
                 time.sleep(0.1)  # yield to CPU, avoid busy wait
-    
+        
     def _maybe_pause(self, drain_stream=True):
         # If bwd_pause_event is missing or set → keep going
         if getattr(self, "bwd_pause_event", None) is None or self.bwd_pause_event.is_set():
