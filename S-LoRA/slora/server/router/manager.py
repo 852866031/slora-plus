@@ -1,6 +1,5 @@
 import copy
 from functools import partial
-from slora.server.router.gpu_profiler import GPUProfiler
 from slora.server.router.profile_req_queue import Profile_ReqQueue
 from slora.server.router.tracker import BatchExecutionTracker, BatchExecutionType, DecodeExecutionEstimator, PrefillExecutionEstimator
 from slora.server.router.profiling_batch_generator import ProfilingBatchGenerator
@@ -139,10 +138,7 @@ class RouterManager:
         self.model_rpc_ports = model_rpc_ports
 
         self.stats_tool = Stats(log_stats, log_stats_interval)
-        if enable_gpu_profile:
-            self.gpu_profiler = GPUProfiler()
-        else:
-            self.gpu_profiler = None
+        self.gpu_profiler = None
         
         self.decode_step_count = 0
         self.backward_is_running = False
@@ -236,11 +232,11 @@ class RouterManager:
             self.req_queue.reset_abort_list()
 
     async def _co_serving_step(self):
-        # if self.batch_exec_tracker.check_refit():
-        #     self.prefill_estimator.data_fit(self.batch_exec_tracker)
-        #     self.decode_estimator.data_fit(self.batch_exec_tracker)
-        #     router_print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
-        #     router_print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
+        if self.prefill_estimator.fit_rmse > 0.1 and self.batch_exec_tracker.check_refit():
+            self.prefill_estimator.data_fit(self.batch_exec_tracker)
+            self.decode_estimator.data_fit(self.batch_exec_tracker)
+            router_print(f"Error for prefill estimator: {self.prefill_estimator.fit_rmse}")
+            router_print(f"Error for decode estimator: {self.decode_estimator.fit_rmse}")
         if self.running_batch is None:
             # Prefill new batch
             self._clear_abort_reqs()
@@ -335,7 +331,6 @@ class RouterManager:
         prefill_start_time = time.time()
         rets = [self.model_rpcs[tp_rank].prefill_batch(batch.batch_id, self.prefill_interrupt_event) for tp_rank in range(self.world_size)]
         ans = await asyncio.gather(*rets)
-        router_print(f"Prefill Duration: {time.time() - prefill_start_time:.3f}")
         if None not in ans:
             if self.world_size != 1:
                 req_to_out_token_id = obtain(ans[0])
@@ -380,8 +375,12 @@ class RouterManager:
         return True
 
     async def _decode_batch(self, batch:Batch):
-        
         num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
+        if num_inf_tokens > 3000:
+            print(f"{num_inf_tokens} ", end='')
+            await self.pause_backward()
+        else:
+            await self.resume_backward()
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation(f"decode #tokens: {batch.input_tokens()}")
         self.req_queue.update_counter(batch)
@@ -391,6 +390,9 @@ class RouterManager:
         if isinstance(self.req_queue, Profile_ReqQueue):
             print(f"Decode Step {self.decode_step_count} Duration: {(time.time() - start_time):.4f}s")  
             self.req_queue.add_to_decode_time_queue(time.time() - start_time)
+        if self.decode_step_count<=4:
+            duration = time.time() - start_time
+            print(f"Decode Step {self.decode_step_count} Duration: {duration:.4f}s, Decode tokens: {num_inf_tokens}, Decode requests: {num_inf_reqs}")  
         decode_end_time = time.time()
         if self.world_size != 1:
             req_to_out_token_id = obtain(ans[0])
@@ -514,10 +516,14 @@ class RouterManager:
         return
     
     async def pause_backward(self):
+        if not self.is_backward_running():
+            return
         rets = [self.model_rpcs[tp_rank].pause_backward() for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
     
     async def resume_backward(self):
+        if not self.is_backward_running():
+            return
         rets = [self.model_rpcs[tp_rank].resume_backward() for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
 

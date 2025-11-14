@@ -36,7 +36,7 @@ def get_lora_config(lora_dir, dummy):
     if dummy:
         return get_lora_config_json(lora_dir), lora_dir
     else:
-        rprint("loading adapter config from", lora_dir)
+        print("loading adapter config from", lora_dir)
         lora_dir = re.sub(r'-(\d+)$', '', lora_dir)
         return hf_load_config(lora_dir)
 

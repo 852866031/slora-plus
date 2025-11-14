@@ -23,22 +23,34 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import aiohttp
-from matplotlib import pyplot as plt
 import pandas as pd
+current_dir = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------- Defaults ----------------
 DEFAULTS = {
     "server": "http://localhost:8000",
-    "timeline_csv": "timelines/timeline_live.csv",  
+    "timeline_csv": f"{current_dir}/timelines/timeline_live.csv",  
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
     "ft_max_wait": 60.0,
 }
+def internet_available(timeout=2):
+    """Check internet by pinging HuggingFace DNS & HTTPS."""
+    try:
+        # DNS check
+        socket.gethostbyname("huggingface.co")
+        # HTTPS check
+        requests.head("https://huggingface.co", timeout=timeout)
+        return True
+    except Exception:
+        return False
 
-base_model = "huggyllama/llama-7b"
-DEFAULT_LORA = "tloen/alpaca-lora-7b"
-
-
+if internet_available():
+    base_model = "huggyllama/llama-7b"
+    DEFAULT_LORA = "tloen/alpaca-lora-7b"
+else:
+    base_model = "/projects/I20240005/jchen/hf_cache/models--huggyllama--llama-7b/snapshots/llama-7b"
+    DEFAULT_LORA = "/projects/I20240005/jchen/hf_cache/hub/models--tloen--alpaca-lora-7b/snapshots/12103d6baae1b320aa60631b38acb6ea094a0539"
 # ---------------- Prompt generation ----------------
 def generate_random_sentence(length: int) -> str:
     """Generate a random sentence of `length` words."""
@@ -237,7 +249,7 @@ async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> 
 # ---------------- Process control ----------------
 def launch_server(enable_finetuning: bool):
     import subprocess
-    cmd = [sys.executable, "launch_server.py"]
+    cmd = [sys.executable, f"{current_dir}/launch_server.py"]
     if enable_finetuning:
         cmd.append("--enable-finetuning")
     print(f"[orchestrator] Launching server:\n  {' '.join(cmd)}")
@@ -374,7 +386,7 @@ async def monitor_gpu_usage(
 
     buffer: List[str] = []
     buffer.append("timestamp,gpu_index,gpu_util,memory_used_mb,memory_total_mb,power_w,temperature_c\n")
-
+    
     try:
         while not (stop_event and stop_event.is_set()):
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -398,6 +410,48 @@ async def monitor_gpu_usage(
         print(f"[monitor] GPU monitoring stopped. {len(buffer)-1} samples written → {log_path}")
 
 
+async def run_warmup(
+    server: str,
+    schedule: List[Tuple[int, float, Dict]],
+    warmup_end: float = 3.0
+) -> List[Tuple[int, float, float, str]]:
+    """
+    Run warmup requests (t_off < warmup_end) using same aiohttp pattern as run_schedule,
+    but without enforcing scheduled delays—warmup fires immediately.
+
+    Returns warmup results.
+    """
+    warmup = [(idx, t_off, payload) for idx, t_off, payload in schedule if t_off < warmup_end]
+    if not warmup:
+        print("[warmup] No warmup requests found.")
+        return []
+
+    print(f"[warmup] Running {len(warmup)} warmup requests…")
+
+    total = len(warmup)
+    finished_count = 0
+    lock = asyncio.Lock()
+    t0 = time.monotonic()  # reference for t_rel
+    print(f"[warmup] total warmup requests: {total}")
+    async with aiohttp.ClientSession(headers={"User-Agent": "OrchestratorLoad"}) as session:
+        async def fire_at(idx: int, t_off: float, payload: Dict):
+            nonlocal finished_count
+            delay = (t0 + t_off) - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if idx % 5 == 0:
+                print("[Orchestrator] Request {}/{} fired at server".format(idx + 1, total))
+            result = await send_one(session, server, idx, payload, t0)
+            async with lock:
+                finished_count += 1
+            return result
+
+        tasks = [asyncio.create_task(fire_at(idx, t_off, payload)) for idx, t_off, payload in warmup]
+        results = await asyncio.gather(*tasks)
+
+    print("[warmup] Warmup complete.")
+    return results
+
 # ---------------- Main ----------------
 async def main():
     ap = argparse.ArgumentParser(description="Replay requests from timeline.csv against a server.")
@@ -419,9 +473,20 @@ async def main():
 
     proc = launch_server(args.enable_finetuning)
 
+    # ---------------- Warmup (first 3 seconds) ----------------
+    WARMUP_END = 5
+
+    await wait_for_server(args.server, max_wait_s=args.max_wait)
+    await asyncio.sleep(1.0)
+    print(f"[orchestrator] Starting warmup phase (first {WARMUP_END}s)…")
+    await run_warmup(args.server, schedule, warmup_end=WARMUP_END)
+    print("[orchestrator] Waiting 3s before starting measured schedule…")
+    await asyncio.sleep(3.0)
+    print(f"[orchestrator] Schedule after warmup: {len(schedule)} requests")
+
     stop_gpu_event = asyncio.Event()
     suffix = "co-serving" if args.enable_finetuning else "inference"
-    gpu_log_path = f"results/gpu_usage_{suffix}.csv"
+    gpu_log_path = f"{current_dir}/results/gpu_usage_{suffix}.csv"
 
     # Start GPU monitor in background
     gpu_monitor_task = asyncio.create_task(monitor_gpu_usage(gpu_log_path, interval_s=0.2, stop_event=stop_gpu_event))
@@ -436,7 +501,7 @@ async def main():
         print("[orchestrator] Stopping server…")
         kill_server(proc)
         summarize(results)
-        out_stem = f"results/latency_{suffix}"
+        out_stem = f"{current_dir}/results/latency_{suffix}"
         write_latency_csv(results, out_stem)
         print("[orchestrator] Done.")
 

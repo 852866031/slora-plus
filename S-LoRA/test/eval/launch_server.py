@@ -4,14 +4,12 @@ import socket
 import sys
 import os, subprocess, time, shutil
 
-import requests
-
 def internet_available(timeout=2):
     """Check internet by pinging HuggingFace DNS & HTTPS."""
     try:
         # DNS check
         socket.gethostbyname("huggingface.co")
-        # HTTPS check``
+        # HTTPS check
         requests.head("https://huggingface.co", timeout=timeout)
         return True
     except Exception:
@@ -42,8 +40,6 @@ else:
     base_model = "huggyllama/llama-7b"
     adapter_dirs = ["tloen/alpaca-lora-7b"]
     adapter_dirs = ["tloen/alpaca-lora-7b", "MBZUAI/bactrian-x-llama-7b-lora"]
-    finetuning_config_path = "config/finetuning_config.json"
-    no_finetuning_config_path = "config/no_finetuning_config.json"
 
 half_model = False
 enable_unified_mem_manager = True
@@ -94,13 +90,15 @@ def is_mps_running():
 
 
 if __name__ == "__main__":
-    if not is_mps_running():
-        print("MPS control daemon is not running. Please start it before running this script:\n sudo nvidia-cuda-mps-control -d")
-        sys.exit(1)
     if internet_available():
         enable_online_mode()
     else:
+        os.system("nvidia-cuda-mps-control -d")
         enable_offline_mode()
+    if not is_mps_running():
+        print("MPS control daemon is not running. Please start it before running this script:\n sudo nvidia-cuda-mps-control -d")
+        sys.exit(1)
+    
     parser = argparse.ArgumentParser()
     parser.add_argument("--nsys-output", type=str, default="my_trace_report")
     parser.add_argument("--num-adapter", type=int)

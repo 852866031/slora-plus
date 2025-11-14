@@ -175,7 +175,8 @@ class ModelRpcServer(rpyc.Service):
                 self.rpc_recv = rpc_recv
                 self.rpc_send = rpc_send
                 self.backward_service = Process(target=backward_service_obj.start_service, daemon=True)
-                os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "20"
+                _ = torch.cuda.current_device()
+                os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "10"
                 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
                 self.backward_service.start()
                 os.environ.pop("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", None)

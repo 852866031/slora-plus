@@ -1,0 +1,209 @@
+2025-11-13T00:44:09,789 Using pip 25.2 from /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip (python 3.9)
+2025-11-13T00:44:09,793 Non-user install because site-packages writeable
+2025-11-13T00:44:09,794 Disabling truststore because Python version isn't 3.10+
+2025-11-13T00:44:09,947 Created temporary directory: /tmp/pip-build-tracker-iwnd_n0r
+2025-11-13T00:44:09,947 Initialized build tracking at /tmp/pip-build-tracker-iwnd_n0r
+2025-11-13T00:44:09,948 Created build tracker: /tmp/pip-build-tracker-iwnd_n0r
+2025-11-13T00:44:09,948 Entered build tracker: /tmp/pip-build-tracker-iwnd_n0r
+2025-11-13T00:44:09,948 Created temporary directory: /tmp/pip-install-eqmkgrbt
+2025-11-13T00:44:09,949 Created temporary directory: /tmp/pip-ephem-wheel-cache-n5t1yt8s
+2025-11-13T00:44:09,967 WARNING: Ignoring invalid distribution -lora (/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages)
+2025-11-13T00:44:09,968 Obtaining file:///projects/I20240005/jchen/slora-plus/S-LoRA
+2025-11-13T00:44:09,968   Added file:///projects/I20240005/jchen/slora-plus/S-LoRA to build tracker '/tmp/pip-build-tracker-iwnd_n0r'
+2025-11-13T00:44:09,969   Running setup.py (path:/projects/I20240005/jchen/slora-plus/S-LoRA/setup.py) egg_info for package from file:///projects/I20240005/jchen/slora-plus/S-LoRA
+2025-11-13T00:44:09,970   Created temporary directory: /tmp/pip-pip-egg-info-mesl0x0v
+2025-11-13T00:44:09,970   Running command python setup.py egg_info
+2025-11-13T00:44:12,088   .
+2025-11-13T00:44:12,089   running egg_info
+2025-11-13T00:44:12,098   creating /tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info
+2025-11-13T00:44:12,098   writing /tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/PKG-INFO
+2025-11-13T00:44:12,099   writing dependency_links to /tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/dependency_links.txt
+2025-11-13T00:44:12,099   writing requirements to /tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/requires.txt
+2025-11-13T00:44:12,099   writing top-level names to /tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/top_level.txt
+2025-11-13T00:44:12,099   writing manifest file '/tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/SOURCES.txt'
+2025-11-13T00:44:12,131   reading manifest file '/tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/SOURCES.txt'
+2025-11-13T00:44:12,131   adding license file 'LICENSE'
+2025-11-13T00:44:12,132   writing manifest file '/tmp/pip-pip-egg-info-mesl0x0v/slora.egg-info/SOURCES.txt'
+2025-11-13T00:44:12,545   Source in /projects/I20240005/jchen/slora-plus/S-LoRA has version 1.0.0, which satisfies requirement slora==1.0.0 from file:///projects/I20240005/jchen/slora-plus/S-LoRA
+2025-11-13T00:44:12,545   Removed slora==1.0.0 from file:///projects/I20240005/jchen/slora-plus/S-LoRA from build tracker '/tmp/pip-build-tracker-iwnd_n0r'
+2025-11-13T00:44:12,546   WARNING: Ignoring invalid distribution -lora (/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages)
+2025-11-13T00:44:12,573 Requirement already satisfied: aiohttp in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (3.11.14)
+2025-11-13T00:44:12,573 Requirement already satisfied: einops in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (0.8.1)
+2025-11-13T00:44:12,574 Requirement already satisfied: fastapi in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (0.115.0)
+2025-11-13T00:44:12,574 Requirement already satisfied: ninja in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (1.11.1.4)
+2025-11-13T00:44:12,575 Requirement already satisfied: packaging in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (24.1)
+2025-11-13T00:44:12,575 Requirement already satisfied: pyzmq in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (26.2.0)
+2025-11-13T00:44:12,575 Requirement already satisfied: rpyc in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (6.0.1)
+2025-11-13T00:44:12,576 Requirement already satisfied: safetensors in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (0.5.3)
+2025-11-13T00:44:12,576 Requirement already satisfied: transformers in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (4.50.0)
+2025-11-13T00:44:12,577 Requirement already satisfied: triton==2.3.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (2.3.0)
+2025-11-13T00:44:12,577 Requirement already satisfied: uvloop in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (0.21.0)
+2025-11-13T00:44:12,577 Requirement already satisfied: uvicorn in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (0.31.0)
+2025-11-13T00:44:12,578 Requirement already satisfied: psutil in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from slora==1.0.0) (7.0.0)
+2025-11-13T00:44:12,581 Requirement already satisfied: filelock in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from triton==2.3.0->slora==1.0.0) (3.19.1)
+2025-11-13T00:44:12,584 Requirement already satisfied: aiohappyeyeballs>=2.3.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (2.6.1)
+2025-11-13T00:44:12,584 Requirement already satisfied: aiosignal>=1.1.2 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (1.4.0)
+2025-11-13T00:44:12,585 Requirement already satisfied: async-timeout<6.0,>=4.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (5.0.1)
+2025-11-13T00:44:12,585 Requirement already satisfied: attrs>=17.3.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (25.4.0)
+2025-11-13T00:44:12,586 Requirement already satisfied: frozenlist>=1.1.1 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (1.8.0)
+2025-11-13T00:44:12,587 Requirement already satisfied: multidict<7.0,>=4.5 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (6.7.0)
+2025-11-13T00:44:12,587 Requirement already satisfied: propcache>=0.2.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (0.4.1)
+2025-11-13T00:44:12,588 Requirement already satisfied: yarl<2.0,>=1.17.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from aiohttp->slora==1.0.0) (1.22.0)
+2025-11-13T00:44:12,590 Requirement already satisfied: typing-extensions>=4.1.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from multidict<7.0,>=4.5->aiohttp->slora==1.0.0) (4.15.0)
+2025-11-13T00:44:12,594 Requirement already satisfied: idna>=2.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from yarl<2.0,>=1.17.0->aiohttp->slora==1.0.0) (3.11)
+2025-11-13T00:44:12,608 Requirement already satisfied: starlette<0.39.0,>=0.37.2 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from fastapi->slora==1.0.0) (0.38.6)
+2025-11-13T00:44:12,609 Requirement already satisfied: pydantic!=1.8,!=1.8.1,!=2.0.0,!=2.0.1,!=2.1.0,<3.0.0,>=1.7.4 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from fastapi->slora==1.0.0) (2.12.3)
+2025-11-13T00:44:12,612 Requirement already satisfied: annotated-types>=0.6.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from pydantic!=1.8,!=1.8.1,!=2.0.0,!=2.0.1,!=2.1.0,<3.0.0,>=1.7.4->fastapi->slora==1.0.0) (0.7.0)
+2025-11-13T00:44:12,613 Requirement already satisfied: pydantic-core==2.41.4 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from pydantic!=1.8,!=1.8.1,!=2.0.0,!=2.0.1,!=2.1.0,<3.0.0,>=1.7.4->fastapi->slora==1.0.0) (2.41.4)
+2025-11-13T00:44:12,613 Requirement already satisfied: typing-inspection>=0.4.2 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from pydantic!=1.8,!=1.8.1,!=2.0.0,!=2.0.1,!=2.1.0,<3.0.0,>=1.7.4->fastapi->slora==1.0.0) (0.4.2)
+2025-11-13T00:44:12,617 Requirement already satisfied: anyio<5,>=3.4.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from starlette<0.39.0,>=0.37.2->fastapi->slora==1.0.0) (4.11.0)
+2025-11-13T00:44:12,620 Requirement already satisfied: exceptiongroup>=1.0.2 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from anyio<5,>=3.4.0->starlette<0.39.0,>=0.37.2->fastapi->slora==1.0.0) (1.3.0)
+2025-11-13T00:44:12,621 Requirement already satisfied: sniffio>=1.1 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from anyio<5,>=3.4.0->starlette<0.39.0,>=0.37.2->fastapi->slora==1.0.0) (1.3.1)
+2025-11-13T00:44:12,636 Requirement already satisfied: plumbum in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from rpyc->slora==1.0.0) (1.9.0)
+2025-11-13T00:44:12,849 Requirement already satisfied: huggingface-hub<1.0,>=0.26.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (0.35.3)
+2025-11-13T00:44:12,850 Requirement already satisfied: numpy>=1.17 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (1.26.3)
+2025-11-13T00:44:12,851 Requirement already satisfied: pyyaml>=5.1 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (6.0.3)
+2025-11-13T00:44:12,851 Requirement already satisfied: regex!=2019.12.17 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (2025.10.23)
+2025-11-13T00:44:12,852 Requirement already satisfied: requests in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (2.32.5)
+2025-11-13T00:44:12,852 Requirement already satisfied: tokenizers<0.22,>=0.21 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (0.21.4)
+2025-11-13T00:44:12,853 Requirement already satisfied: tqdm>=4.27 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from transformers->slora==1.0.0) (4.67.1)
+2025-11-13T00:44:12,886 Requirement already satisfied: fsspec>=2023.5.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from huggingface-hub<1.0,>=0.26.0->transformers->slora==1.0.0) (2025.9.0)
+2025-11-13T00:44:12,888 Requirement already satisfied: hf-xet<2.0.0,>=1.1.3 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from huggingface-hub<1.0,>=0.26.0->transformers->slora==1.0.0) (1.1.10)
+2025-11-13T00:44:12,939 Requirement already satisfied: charset_normalizer<4,>=2 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from requests->transformers->slora==1.0.0) (3.4.4)
+2025-11-13T00:44:12,939 Requirement already satisfied: urllib3<3,>=1.21.1 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from requests->transformers->slora==1.0.0) (2.5.0)
+2025-11-13T00:44:12,940 Requirement already satisfied: certifi>=2017.4.17 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from requests->transformers->slora==1.0.0) (2025.10.5)
+2025-11-13T00:44:12,949 Requirement already satisfied: click>=7.0 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from uvicorn->slora==1.0.0) (8.1.8)
+2025-11-13T00:44:12,949 Requirement already satisfied: h11>=0.8 in /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages (from uvicorn->slora==1.0.0) (0.16.0)
+2025-11-13T00:44:12,956 Created temporary directory: /tmp/pip-unpack-pgl7b646
+2025-11-13T00:44:13,031 WARNING: Ignoring invalid distribution -lora (/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages)
+2025-11-13T00:44:13,033 Installing collected packages: slora
+2025-11-13T00:44:13,034   DEPRECATION: Legacy editable install of slora==1.0.0 from file:///projects/I20240005/jchen/slora-plus/S-LoRA (setup.py develop) is deprecated. pip 25.3 will enforce this behaviour change. A possible replacement is to add a pyproject.toml or enable --use-pep517, and use setuptools >= 64. If the resulting installation is not behaving as expected, try using --config-settings editable_mode=compat. Please consult the setuptools documentation for more information. Discussion can be found at https://github.com/pypa/pip/issues/11457
+2025-11-13T00:44:13,034   Running setup.py develop for slora
+2025-11-13T00:44:13,034     Running command python setup.py develop
+2025-11-13T00:44:15,131     .
+2025-11-13T00:44:15,132     running develop
+2025-11-13T00:44:15,132     /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/setuptools/_distutils/cmd.py:90: DevelopDeprecationWarning: develop command is deprecated.
+2025-11-13T00:44:15,132     !!
+
+2025-11-13T00:44:15,133             ********************************************************************************
+2025-11-13T00:44:15,133             Please avoid running ``setup.py`` and ``develop``.
+2025-11-13T00:44:15,133             Instead, use standards-based tools like pip or uv.
+
+2025-11-13T00:44:15,133             This deprecation is overdue, please update your project and remove deprecated
+2025-11-13T00:44:15,133             calls to avoid build errors in the future.
+
+2025-11-13T00:44:15,134             See https://github.com/pypa/setuptools/issues/917 for details.
+2025-11-13T00:44:15,134             ********************************************************************************
+
+2025-11-13T00:44:15,134     !!
+2025-11-13T00:44:15,134       self.initialize_options()
+2025-11-13T00:44:15,706     WARNING: Ignoring invalid distribution -lora (/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages)
+2025-11-13T00:44:15,707     Obtaining file:///projects/I20240005/jchen/slora-plus/S-LoRA
+2025-11-13T00:44:15,710       Installing build dependencies: started
+2025-11-13T00:44:53,953 Remote version of pip: 25.3
+2025-11-13T00:44:53,953 Local version of pip:  25.2
+2025-11-13T00:44:53,954 Was pip installed by pip? False
+2025-11-13T00:44:53,954 ERROR: Operation cancelled by user
+2025-11-13T00:44:53,955 Exception information:
+2025-11-13T00:44:53,955 Traceback (most recent call last):
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/cli/base_command.py", line 107, in _run_wrapper
+2025-11-13T00:44:53,955     status = _inner_run()
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/cli/base_command.py", line 98, in _inner_run
+2025-11-13T00:44:53,955     return self.run(options, args)
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/cli/req_command.py", line 71, in wrapper
+2025-11-13T00:44:53,955     return func(self, options, args)
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/commands/install.py", line 460, in run
+2025-11-13T00:44:53,955     installed = install_given_reqs(
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/req/__init__.py", line 85, in install_given_reqs
+2025-11-13T00:44:53,955     requirement.install(
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/req/req_install.py", line 853, in install
+2025-11-13T00:44:53,955     install_editable_legacy(
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/operations/install/editable_legacy.py", line 44, in install_editable
+2025-11-13T00:44:53,955     call_subprocess(
+2025-11-13T00:44:53,955   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/utils/subprocess.py", line 154, in call_subprocess
+2025-11-13T00:44:53,955     line: str = proc.stdout.readline()
+2025-11-13T00:44:53,955 KeyboardInterrupt
+2025-11-13T00:44:54,000 Removed build tracker: '/tmp/pip-build-tracker-iwnd_n0r'
+2025-11-13T00:44:56,038 Using pip 25.2 from /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip (python 3.9)
+2025-11-13T00:44:56,041 Non-user install because site-packages writeable
+2025-11-13T00:44:56,041 Disabling truststore because Python version isn't 3.10+
+2025-11-13T00:44:56,182 Ignoring indexes: https://pypi.org/simple
+2025-11-13T00:44:56,183 Created temporary directory: /tmp/pip-build-tracker-ko4quwjx
+2025-11-13T00:44:56,183 Initialized build tracking at /tmp/pip-build-tracker-ko4quwjx
+2025-11-13T00:44:56,184 Created build tracker: /tmp/pip-build-tracker-ko4quwjx
+2025-11-13T00:44:56,184 Entered build tracker: /tmp/pip-build-tracker-ko4quwjx
+2025-11-13T00:44:56,184 Created temporary directory: /tmp/pip-install-1gi8kuts
+2025-11-13T00:44:56,184 Created temporary directory: /tmp/pip-ephem-wheel-cache-6_13im1d
+2025-11-13T00:44:56,203 WARNING: Ignoring invalid distribution -lora (/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages)
+2025-11-13T00:44:56,204 Obtaining file:///projects/I20240005/jchen/slora-plus/S-LoRA
+2025-11-13T00:44:56,205   Added file:///projects/I20240005/jchen/slora-plus/S-LoRA to build tracker '/tmp/pip-build-tracker-ko4quwjx'
+2025-11-13T00:44:56,206   Running command Checking if build backend supports build_editable
+2025-11-13T00:44:56,413   Created temporary directory: /tmp/pip-modern-metadata-06x3scvx
+2025-11-13T00:44:56,414   Running command Preparing editable metadata (pyproject.toml)
+2025-11-13T00:44:58,498   .
+2025-11-13T00:44:58,499   usage: setup.py [global_opts] cmd1 [cmd1_opts] [cmd2 [cmd2_opts] ...]
+2025-11-13T00:44:58,499      or: setup.py --help [cmd1 cmd2 ...]
+2025-11-13T00:44:58,499      or: setup.py --help-commands
+2025-11-13T00:44:58,499      or: setup.py cmd --help
+
+2025-11-13T00:44:58,499   error: option --disable-version-check not recognized
+2025-11-13T00:44:58,894   ERROR: Preparing editable metadata (pyproject.toml) exited with 1
+2025-11-13T00:44:58,898   [bold magenta]full command[/]: [blue]/projects/I20240005/jchen/.conda/envs/slora-plus/bin/python3.9 /projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_vendor/pyproject_hooks/_in_process/_in_process.py prepare_metadata_for_build_editable /tmp/tmpu2c7rnnb[/]
+2025-11-13T00:44:58,898   [bold magenta]cwd[/]: /projects/I20240005/jchen/slora-plus/S-LoRA
+2025-11-13T00:44:58,899 ERROR: metadata generation failed
+2025-11-13T00:44:58,900 Exception information:
+2025-11-13T00:44:58,900 Traceback (most recent call last):
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/operations/build/metadata_editable.py", line 36, in generate_editable_metadata
+2025-11-13T00:44:58,900     distinfo_dir = backend.prepare_metadata_for_build_editable(metadata_dir)
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/utils/misc.py", line 728, in prepare_metadata_for_build_editable
+2025-11-13T00:44:58,900     return super().prepare_metadata_for_build_editable(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_vendor/pyproject_hooks/_impl.py", line 306, in prepare_metadata_for_build_editable
+2025-11-13T00:44:58,900     return self._call_hook(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_vendor/pyproject_hooks/_impl.py", line 392, in _call_hook
+2025-11-13T00:44:58,900     self._subprocess_runner(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/utils/subprocess.py", line 240, in runner
+2025-11-13T00:44:58,900     call_subprocess(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/utils/subprocess.py", line 212, in call_subprocess
+2025-11-13T00:44:58,900     raise error
+2025-11-13T00:44:58,900 pip._internal.exceptions.InstallationSubprocessError: Preparing editable metadata (pyproject.toml) exited with 1
+2025-11-13T00:44:58,900 
+2025-11-13T00:44:58,900 The above exception was the direct cause of the following exception:
+2025-11-13T00:44:58,900 
+2025-11-13T00:44:58,900 Traceback (most recent call last):
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/cli/base_command.py", line 107, in _run_wrapper
+2025-11-13T00:44:58,900     status = _inner_run()
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/cli/base_command.py", line 98, in _inner_run
+2025-11-13T00:44:58,900     return self.run(options, args)
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/cli/req_command.py", line 71, in wrapper
+2025-11-13T00:44:58,900     return func(self, options, args)
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/commands/install.py", line 393, in run
+2025-11-13T00:44:58,900     requirement_set = resolver.resolve(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/resolver.py", line 79, in resolve
+2025-11-13T00:44:58,900     collected = self.factory.collect_root_requirements(root_reqs)
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 538, in collect_root_requirements
+2025-11-13T00:44:58,900     reqs = list(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 494, in _make_requirements_from_install_req
+2025-11-13T00:44:58,900     cand = self._make_base_candidate_from_link(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/factory.py", line 205, in _make_base_candidate_from_link
+2025-11-13T00:44:58,900     self._editable_candidate_cache[link] = EditableCandidate(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 334, in __init__
+2025-11-13T00:44:58,900     super().__init__(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 162, in __init__
+2025-11-13T00:44:58,900     self.dist = self._prepare()
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 239, in _prepare
+2025-11-13T00:44:58,900     dist = self._prepare_distribution()
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/resolution/resolvelib/candidates.py", line 344, in _prepare_distribution
+2025-11-13T00:44:58,900     return self._factory.preparer.prepare_editable_requirement(self._ireq)
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/operations/prepare.py", line 708, in prepare_editable_requirement
+2025-11-13T00:44:58,900     dist = _get_prepared_distribution(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/operations/prepare.py", line 77, in _get_prepared_distribution
+2025-11-13T00:44:58,900     abstract_dist.prepare_distribution_metadata(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/distributions/sdist.py", line 72, in prepare_distribution_metadata
+2025-11-13T00:44:58,900     self.req.prepare_metadata()
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/req/req_install.py", line 572, in prepare_metadata
+2025-11-13T00:44:58,900     self.metadata_directory = generate_editable_metadata(
+2025-11-13T00:44:58,900   File "/projects/I20240005/jchen/.conda/envs/slora-plus/lib/python3.9/site-packages/pip/_internal/operations/build/metadata_editable.py", line 38, in generate_editable_metadata
+2025-11-13T00:44:58,900     raise MetadataGenerationFailed(package_details=details) from error
+2025-11-13T00:44:58,900 pip._internal.exceptions.MetadataGenerationFailed: metadata generation failed
+2025-11-13T00:44:59,017 Removed file:///projects/I20240005/jchen/slora-plus/S-LoRA from build tracker '/tmp/pip-build-tracker-ko4quwjx'
+2025-11-13T00:44:59,017 Removed build tracker: '/tmp/pip-build-tracker-ko4quwjx'

@@ -26,7 +26,7 @@ class BatchExecutionTracker():
         self.last_refit_count = 0
     
     def check_refit(self) -> bool:
-        if self.size()%32 == 0 and self.size() > self.last_refit_count:
+        if self.size()%256 == 0 and self.size() > self.last_refit_count:
             self.last_refit_count = self.size()
             return True
         return False
