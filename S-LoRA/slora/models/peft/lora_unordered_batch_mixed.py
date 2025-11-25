@@ -816,6 +816,7 @@ class LoraUnorderedBatchMixed:
         infer_state.init_some_extra_state(self.base_model, batch_size, total_token_num, max_len_in_batch,
                                           input_ids, b_loc, b_start_loc, b_seq_len, False)
         predict_logics = self._token_forward(input_ids, infer_state, no_lora_compute, no_lora_copy, print_time_profile=print_time_profile)
+        # Wait for GPU to finish this step
         # if print_time_profile:
         #     print(f"[forward engine]:total decode time {(time.time() - start):.5f}\n")
         return predict_logics
@@ -827,7 +828,6 @@ class LoraUnorderedBatchMixed:
                 cuda_input_ids, infer_state, self.base_model.pre_post_weight)
         for i in range(self.base_model.layers_num):
             input_embs = self._lora_token_forward(i, input_embs, infer_state, no_lora_compute, no_lora_copy)
-           
         predict_logics = self.base_model.post_infer.token_forward(
                 input_embs, infer_state, self.base_model.pre_post_weight, return_logics=True)
         #predict_logics = self.sanitize_logits(predict_logics)

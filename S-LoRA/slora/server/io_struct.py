@@ -264,6 +264,10 @@ class FinetuneStatusReq:
     def __init__(self):
         self.finished = False
 
+class FinetuneReq:
+    def __init__(self):
+        pass
+
 class BatchAbortReq:
     def __init__(self, req_ids):
         self.reqs: List[str] = req_ids

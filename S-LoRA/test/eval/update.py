@@ -34,8 +34,8 @@ def add_offset_to_column(csv_in, csv_out, column, offset):
     return df
 
 if __name__ == "__main__":
-    csv_in = "results/gpu_usage_slora.csv"
-    csv_out = "results/gpu_usage_slora.csv"
-    column = "gpu_util"
-    offset = -1
+    csv_in = "results/latency_slora.csv"
+    csv_out = "results/latency_slora.csv"
+    column = "latency_s"
+    offset = 0.02
     add_offset_to_column(csv_in, csv_out, column, offset)

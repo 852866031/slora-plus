@@ -183,6 +183,12 @@ class InferBatch:
             ref_mask = ref_mask
         )
     
+    def count_tokens(self):
+        input_tokens = self.nopad_total_token_num
+        kv_tokens = int(torch.sum(self.nopad_b_seq_len))
+        generated_tokens = kv_tokens - input_tokens
+        return input_tokens, generated_tokens, kv_tokens
+    
     @torch.no_grad()
     def free_self(self):
         if self.alt_mem_manager is not None:

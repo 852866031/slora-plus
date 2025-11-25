@@ -121,6 +121,15 @@ async def finetuning_status(request: Request) -> Response:
             status_code=200,
             media_type="application/json"
         )
+@app.post("/start_finetuning")
+async def finetuning_status(request: Request) -> Response:
+    await httpserver_manager.start_finetuning()
+    return Response(
+        content=json.dumps({"message": "Finetuning started"}),
+        status_code=200,
+        media_type="application/json"
+    )
+
 
 @app.post("/generate")
 async def generate(request: Request) -> Response:

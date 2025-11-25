@@ -8,11 +8,11 @@
   "weight_decay": 0.01,
   "gamma": 0.9,
   "eval_steps": 100,
-  "max_saved_finetuning_tokens": 128,
+  "max_saved_finetuning_tokens": 192,
   "max_finetuning_tokens_in_batch": 128,
   "optimizer_threading": true,
   "start_on_launch": false,
-  "ttft_slo": 0.5,
+  "ttft_slo": 0.2,
   "avg_tbt_slo": 0.15,
   "max_tbt_slo": 0.35
 }

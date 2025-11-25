@@ -24,6 +24,8 @@ from typing import Dict, List, Tuple
 
 import aiohttp
 import pandas as pd
+import socket
+import requests
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------- Defaults ----------------
@@ -106,6 +108,22 @@ async def try_health(session: aiohttp.ClientSession, server: str, timeout_s: flo
     try:
         async with session.get(f"{server.rstrip('/')}/health", timeout=timeout_s) as resp:
             return resp.status == 200
+    except Exception:
+        return False
+
+# ---------------- HTTP helpers ----------------
+async def start_finetuning(session: aiohttp.ClientSession, server: str, timeout_s: float = 1.0) -> bool:
+    """
+    Call POST /start_finetuning on the given server.
+    Returns True on success, False on failure.
+    """
+    url = f"{server.rstrip('/')}/start_finetuning"
+
+    try:
+        async with session.post(url, timeout=timeout_s) as resp:
+            if resp.status == 200:
+                return True
+            return False
     except Exception:
         return False
 
@@ -474,7 +492,7 @@ async def main():
     proc = launch_server(args.enable_finetuning)
 
     # ---------------- Warmup (first 3 seconds) ----------------
-    WARMUP_END = 5
+    WARMUP_END = 10
 
     await wait_for_server(args.server, max_wait_s=args.max_wait)
     await asyncio.sleep(1.0)
@@ -490,9 +508,12 @@ async def main():
 
     # Start GPU monitor in background
     gpu_monitor_task = asyncio.create_task(monitor_gpu_usage(gpu_log_path, interval_s=0.2, stop_event=stop_gpu_event))
-
     try:
         await wait_for_server(args.server, max_wait_s=args.max_wait)
+        results = []
+        if args.enable_finetuning:
+            async with aiohttp.ClientSession() as session:
+                await start_finetuning(session, args.server)
         results = await run_schedule(args.server, schedule)
         stop_gpu_event.set()
         await gpu_monitor_task

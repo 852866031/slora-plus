@@ -143,7 +143,7 @@ def plot_gpu_usage_panel(
     ax,
     file1, label1,
     file2, label2,
-    smooth_window=1,
+    smooth_window=2,
     ft_tokens=None,
     colors=None,
 ):
@@ -214,8 +214,8 @@ def plot_timeline_panel(ax, csv_path="timelines/timeline_live.csv"):
 # Combine All Panels
 # ------------------------------------------------------
 def plot_all_combined(ft_tokens=None, ttft_slo=None):
-    files  = ["results/latency_co-serving.csv", "results/latency_slora.csv"]
-    labels = ["Co-serving", "SLoRA"]
+    files  = ["results/latency_inference.csv", "results/latency_slora.csv"]
+    labels = ["Inference", "SLoRA"]
     colors = ["tab:orange", "tab:green"]
 
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
@@ -225,7 +225,7 @@ def plot_all_combined(ft_tokens=None, ttft_slo=None):
     plot_latency_panels(ax_ttft, ax_latency, files, labels, colors, ttft_slo=ttft_slo)
     plot_gpu_usage_panel(
         ax_gpu,
-        "results/gpu_usage_co-serving.csv", "Co-serving",
+        "results/gpu_usage_inference.csv", "Inference",
         "results/gpu_usage_slora.csv", "SLoRA",
         ft_tokens=ft_tokens,
         colors=colors
@@ -239,4 +239,4 @@ def plot_all_combined(ft_tokens=None, ttft_slo=None):
     print(f"✅ Saved combined 4-panel figure to {out_path}")
 
 if __name__ == "__main__":
-    plot_all_combined(ft_tokens=2476, ttft_slo=0.2)
+    plot_all_combined(ft_tokens=3844, ttft_slo=0.35)

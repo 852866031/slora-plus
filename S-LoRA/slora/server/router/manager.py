@@ -15,7 +15,7 @@ import zmq.asyncio
 from typing import Dict, List, Optional
 
 from ..sampling_params import SamplingParams
-from ..io_struct import FinetuneStatusReq, Req, Batch, BatchAbortReq
+from ..io_struct import FinetuneStatusReq, Req, Batch, BatchAbortReq, FinetuneReq
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
 from .mixed_req_queue import Mixed_ReqQueue
@@ -143,6 +143,7 @@ class RouterManager:
         self.decode_step_count = 0
         self.backward_is_running = False
         self.prefill_interrupt_event = None
+        self.last_req_arrival_time = None
 
     def is_backward_running(self):
         return self.backward_is_running
@@ -255,7 +256,7 @@ class RouterManager:
                 self.prefill_interrupt_event = None
                 await self._filter_runing_batch()
                 return
-        elif await self.req_queue.check_will_starve(self.running_batch):
+        elif await self.req_queue.check_will_starve(self.running_batch, self.decode_step_count):
             router_print(f"Incoming request will starve, prefill new batch after {self.decode_step_count} decoding steps.")
             # Prefill and merge batch
             self._clear_abort_reqs()
@@ -376,8 +377,8 @@ class RouterManager:
 
     async def _decode_batch(self, batch:Batch):
         num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
-        if num_inf_tokens > 3000:
-            print(f"{num_inf_tokens} ", end='')
+        if num_inf_tokens > 2000 or self.decode_step_count > 20:
+            #print(f"{num_inf_tokens} ", end='')
             await self.pause_backward()
         else:
             await self.resume_backward()
@@ -390,9 +391,10 @@ class RouterManager:
         if isinstance(self.req_queue, Profile_ReqQueue):
             print(f"Decode Step {self.decode_step_count} Duration: {(time.time() - start_time):.4f}s")  
             self.req_queue.add_to_decode_time_queue(time.time() - start_time)
-        if self.decode_step_count<=4:
-            duration = time.time() - start_time
-            print(f"Decode Step {self.decode_step_count} Duration: {duration:.4f}s, Decode tokens: {num_inf_tokens}, Decode requests: {num_inf_reqs}")  
+        duration = time.time() - start_time
+        if duration > 0.1:
+            router_print(f"Decode Step {self.decode_step_count} Duration: {duration:.4f}s, Decode tokens: {num_inf_tokens}, Decode requests: {num_inf_reqs}", in_red=True)  
+            
         decode_end_time = time.time()
         if self.world_size != 1:
             req_to_out_token_id = obtain(ans[0])
@@ -493,10 +495,16 @@ class RouterManager:
             recv_req = await self.recv_from_httpserver.recv_pyobj()
             if isinstance(recv_req, tuple) and len(recv_req) == 4:
                 adapter_dir, prompt_ids, sampling_params, request_id = recv_req
+                #print(f"[Router] Received request {request_id}")
                 if self.prefill_interrupt_event is not None:
                     self.prefill_interrupt_event.set()
                 self.add_req(adapter_dir, prompt_ids, sampling_params, request_id)
+                # if self.last_req_arrival_time is not None:
+                #     print(f"Time since last request arrival: {time.time() - self.last_req_arrival_time:.3f}s")
+                # self.last_req_arrival_time = time.time()
                 req_counter += 1
+            elif isinstance(recv_req, FinetuneReq):
+                self.req_queue.start_finetuning()
             elif isinstance(recv_req, FinetuneStatusReq):
                 recv_req.finished = self.req_queue.finetuning_is_finished()
                 self.send_to_detokenization.send_pyobj(recv_req)

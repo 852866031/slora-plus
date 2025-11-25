@@ -102,6 +102,9 @@ class Mixed_ReqQueue:
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
+    
+    def start_finetuning(self):
+        self.start_task = True
 
     def _init_cache_list(self, current_batch: Optional[Batch], lora_ranks: dict[str, int]):
         if current_batch is not None:
@@ -121,23 +124,23 @@ class Mixed_ReqQueue:
             self.adapters = set()
             self.adapter_size = 0
 
-    async def check_will_starve(self, current_batch) -> bool:
+    async def check_will_starve(self, current_batch, decode_step_count) -> bool:
         if len(self.waiting_req_list) == 0:
             self.check_iter=0
             await asyncio.sleep(0.000000001)  # Yield to the request handler loop
-        else:
-            self.check_iter+=1
         if len(self.waiting_req_list) > 0:
+            if decode_step_count >20:
+                return True
             predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens(), len(current_batch.reqs))
-            predicted_next_checking_time = time.time() + predicted_next_decode_time
+            predicted_next_checking_time = time.time() + 1.6 * predicted_next_decode_time
             total_pending_inf_tokens = 0
             for req in self.waiting_req_list:
-                total_pending_inf_tokens += req.input_len * 1.2
+                total_pending_inf_tokens += req.input_len
             predicted_next_prefill_time = self.prefill_estimator.predict_inference(total_pending_inf_tokens, len(self.waiting_req_list))
             time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
-            if time_left < 0 and self.last_batch_time is not None:
-                print(f"Time elapsed from last batch: {time.time() - self.last_batch_time:.3f}s")
-            print(f"Num pending inf reqs: {len(self.waiting_req_list)}")
+            # if time_left < 0 and self.last_batch_time is not None:
+            #     print(f"Time elapsed from last batch: {time.time() - self.last_batch_time:.3f}s")
+            #print(f"Num pending inf reqs: {len(self.waiting_req_list)}")
             return time_left < 0
         return False
 
@@ -320,11 +323,11 @@ class Mixed_ReqQueue:
                     predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
                     next_token_time = predicted_next_prefill_time + predicted_next_decode_time
                     if next_token_time > self.max_tbt_slo:
-                        #print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
+                        print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
                         break
                     worst_avg_tbt_predicted = worst_req_last_batch.avg_tbt_if_next_token(next_token_time)
                     if worst_avg_tbt_predicted > self.avg_tbt_slo:
-                        #print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
+                        print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
                         break
                 if req is None:
                     break

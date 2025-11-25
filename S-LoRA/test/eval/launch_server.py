@@ -2,6 +2,8 @@ import argparse
 import os
 import sys
 import os, subprocess, time, shutil
+import socket
+import requests
 
 def internet_available(timeout=2):
     """Check internet by pinging HuggingFace DNS & HTTPS."""

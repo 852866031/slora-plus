@@ -207,6 +207,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             return o_tensor
         
         elif triton.__version__ >= "2.1.0":
+            start = time.time()
             o_tensor = torch.empty_like(q)
             from slora.models.llama.triton_kernel.token_attention_softmax_and_reducev import token_softmax_reducev_fwd
             token_softmax_reducev_fwd(att_m_tensor, 
@@ -218,6 +219,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                                           infer_state.max_len_in_batch,
                                           infer_state.other_kv_index)
             #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
+            if time.time() - start > 0.1:
+                print(f"Layer {self.layer_num_} _token_decode_attention_normal_alt time: {time.time() - start:.5f}s")
             return o_tensor
         else:
             #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
