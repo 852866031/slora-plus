@@ -99,6 +99,9 @@ class Mixed_ReqQueue:
         self.decode_estimator = None
         self.check_iter = 0
         self.last_batch_time = None
+    
+    def start_finetuning(self):
+        self.start_task = True
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
@@ -135,9 +138,9 @@ class Mixed_ReqQueue:
                 total_pending_inf_tokens += req.input_len * 1.2
             predicted_next_prefill_time = self.prefill_estimator.predict_inference(total_pending_inf_tokens, len(self.waiting_req_list))
             time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
-            if time_left < 0 and self.last_batch_time is not None:
-                print(f"Time elapsed from last batch: {time.time() - self.last_batch_time:.3f}s")
-            print(f"Num pending inf reqs: {len(self.waiting_req_list)}")
+            # if time_left < 0 and self.last_batch_time is not None:
+            #     print(f"Time elapsed from last batch: {time.time() - self.last_batch_time:.3f}s")
+            #print(f"Num pending inf reqs: {len(self.waiting_req_list)}")
             return time_left < 0
         return False
 
@@ -282,6 +285,7 @@ class Mixed_ReqQueue:
     def generate_new_batch(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
         if current_batch is not None and len(current_batch.reqs) >= self.running_max_req_size:
             return None
+        start = time.time()
         self._init_cache_list(current_batch, lora_ranks)
         new_batch_total_tokens = 0
         can_run_list = []
@@ -336,7 +340,8 @@ class Mixed_ReqQueue:
         if len(can_run_list) > 0:
             new_batch = Batch(uuid.uuid4().hex, can_run_list)
             self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
-            self.last_batch_time = time.time()
+            #self.last_batch_time = time.time()
+            #print(f"\033[32m[Batch Generation Time]: {time.time() - start:.4f} seconds\033[0m")
             return new_batch
         else:
             return None

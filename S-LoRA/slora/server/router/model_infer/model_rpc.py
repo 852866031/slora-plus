@@ -139,23 +139,6 @@ class ModelRpcServer(rpyc.Service):
             self.finetuning_adapter.is_finetuning = True
             self.current_epoch = 0
             self.total_epochs = input_params.finetuning_params.num_epochs
-            # lora_params = []
-            # for i, layer in enumerate(self.finetuning_adapter.layers):
-            #     param = getattr(layer, 'w_combined_home_fp32')
-            #     param.requires_grad = True
-            #     lora_params.append(param)
-            #     name = f"layer_{i}.w_combined_home"
-            #     self.original_weights[name] = param.clone().detach().cpu()
-            # self.finetuning_optimizer = torch.optim.AdamW(
-            #     lora_params, 
-            #     lr=input_params.finetuning_params.learning_rate, 
-            #     betas=(0.9,0.999), 
-            #     weight_decay=input_params.finetuning_params.weight_decay)
-            # self.finetuning_scheduler = torch.optim.lr_scheduler.StepLR(
-            #     self.finetuning_optimizer,
-            #     step_size=1,      # every epoch
-            #     gamma=input_params.finetuning_params.gamma        # multiply by 0.5
-            # )
             self.backward_service = None
             self.bwd_pause_event = None
             if True:
@@ -174,10 +157,10 @@ class ModelRpcServer(rpyc.Service):
                 backward_service_obj.receive_model_dict(self.model.export_model_dict())
                 self.rpc_recv = rpc_recv
                 self.rpc_send = rpc_send
-                self.backward_service = Process(target=backward_service_obj.start_service, daemon=True)
                 _ = torch.cuda.current_device()
                 os.environ["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = "10"
                 os.environ["CUDA_DEVICE_MAX_CONNECTIONS"] = "1"
+                self.backward_service = Process(target=backward_service_obj.start_service, daemon=True)
                 self.backward_service.start()
                 os.environ.pop("CUDA_MPS_ACTIVE_THREAD_PERCENTAGE", None)
                 os.environ.pop("CUDA_DEVICE_MAX_CONNECTIONS", None)
@@ -457,7 +440,6 @@ class ModelRpcServer(rpyc.Service):
             finished, loss, total_token_processed = self.model.backward_engine._context_backward(self.model, self.finetuning_adapter)
         if finished:
             if self.enable_unified_mem_manager:
-                print("reset activation pool in alt mem manager")
                 self.model.alt_mem_manager.reset_activation_pool()
             else:
                 self.model.mem_manager.reset_activation_pool()

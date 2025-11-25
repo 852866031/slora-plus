@@ -106,6 +106,15 @@ async def feedback(request: Request) -> Response:
         media_type="application/json"
     )
 
+@app.post("/start_finetuning")
+async def finetuning_status(request: Request) -> Response:
+    await httpserver_manager.start_finetuning()
+    return Response(
+        content=json.dumps({"message": "Finetuning started"}),
+        status_code=200,
+        media_type="application/json"
+    )
+    
 @app.post("/finetuning_status")
 async def finetuning_status(request: Request) -> Response:
     finished = await httpserver_manager.check_finetune_status_once()
@@ -521,6 +530,8 @@ def main():
                         help="the max size for forward requests in the same time")
     parser.add_argument("--tp", type=int, default=1,
                         help="model tp parral size, the default is 1")
+    parser.add_argument("--rank_id", type=int, default=0,
+                        help="GPU rank ID, the default is 0")
     parser.add_argument("--max_req_input_len", type=int, default=512,
                         help="the max value for req input tokens num")
     parser.add_argument("--max_req_total_len", type=int, default=1024,
@@ -570,7 +581,6 @@ def main():
     ''' end of finetune arguments '''
     
     args = parser.parse_args()
-    print("api_server: half_model:", args.half_model)
     args.finetuning_config = {}
     launch_on_start = True
     if args.finetuning_config_path != "":
@@ -639,7 +649,6 @@ def main():
     )
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
     model_rpc_ports = can_use_ports[3:]
-
     global httpserver_manager
     httpserver_manager = HttpServerManager(
         args.model_dir,

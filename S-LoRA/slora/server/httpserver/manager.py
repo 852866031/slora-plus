@@ -10,7 +10,7 @@ import time
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from ..tokenizer import get_tokenizer
-from ..io_struct import BatchStrOut, AbortReq, BatchAbortReq, FinetuneStatusReq
+from ..io_struct import BatchStrOut, AbortReq, BatchAbortReq, FinetuneReq, FinetuneStatusReq
 from .feedback_collector import FeedbackCollector
 
 class HttpServerManager:
@@ -59,6 +59,10 @@ class HttpServerManager:
 
     def update_feedback(self, request_id, label):
         self.feedback_collector.submit_update(req_id=request_id, label=label)
+
+    async def start_finetuning(self):
+        self.send_to_router.send_pyobj(FinetuneReq())
+        return
 
     def _record_arrival(self):
         """
