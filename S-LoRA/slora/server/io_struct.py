@@ -260,6 +260,10 @@ class AbortReq:
     def __init__(self, req_id):
         self.req_id = req_id
 
+class FinetuneReq:
+    def __init__(self):
+        pass
+
 class FinetuneStatusReq:
     def __init__(self):
         self.finished = False

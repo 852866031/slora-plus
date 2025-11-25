@@ -15,7 +15,7 @@ import zmq.asyncio
 from typing import Dict, List, Optional
 
 from ..sampling_params import SamplingParams
-from ..io_struct import FinetuneStatusReq, Req, Batch, BatchAbortReq, FinetuneReq
+from ..io_struct import FinetuneReq, FinetuneStatusReq, Req, Batch, BatchAbortReq
 from .model_infer.model_rpc import start_model_process, ModelRpcClient
 from .req_queue import ReqQueue
 from .mixed_req_queue import Mixed_ReqQueue
@@ -89,11 +89,12 @@ class RouterManager:
                  input_params,
                  mode=[], log_stats=True, log_stats_interval=10, half_model=False, 
                  mem_manager_log_path=None, enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
-                 enable_gpu_profile=False):
+                 enable_gpu_profile=False, rank_id=0):
         self.model_weightdir = weightdir
         self.adapter_dirs = adapter_dirs
         self.world_size = world_size
         self.load_way = load_way
+        self.rank_id = rank_id
         self.mode = mode
         self.input_params = input_params
         self.finetuning_params = input_params.finetuning_params
@@ -143,20 +144,20 @@ class RouterManager:
         self.decode_step_count = 0
         self.backward_is_running = False
         self.prefill_interrupt_event = None
-        self.last_req_arrival_time = None
+        self.pause_printing = True
 
     def is_backward_running(self):
         return self.backward_is_running
 
     async def wait_to_model_ready(self):
         self.model_rpcs: List[ModelRpcClient] = []
-        for rank_id in range(self.world_size):
+        for rank_id in range(self.rank_id, self.world_size):
             rpc_model = await start_model_process(port=self.model_rpc_ports[rank_id], 
                                                   world_size=self.world_size)
             self.model_rpcs.append(rpc_model)
 
         init_model_ret = []
-        for rank_id in range(self.world_size):  # async init model process
+        for rank_id in range(self.rank_id, self.world_size):  # async init model process
             init_model_ret.append(
                 self.model_rpcs[rank_id].init_model(
                     rank_id,
@@ -256,7 +257,9 @@ class RouterManager:
                 self.prefill_interrupt_event = None
                 await self._filter_runing_batch()
                 return
-        elif await self.req_queue.check_will_starve(self.running_batch, self.decode_step_count):
+            else:
+                await self.resume_backward()
+        elif await self.req_queue.check_will_starve(self.running_batch):
             router_print(f"Incoming request will starve, prefill new batch after {self.decode_step_count} decoding steps.")
             # Prefill and merge batch
             self._clear_abort_reqs()
@@ -275,6 +278,8 @@ class RouterManager:
             await self._decode_batch(self.running_batch)
             await self._filter_runing_batch()
             self.decode_step_count += 1
+            # if self.running_batch is None and len(self.req_queue.waiting_req_list)==0:
+            #     await self.resume_backward()
             return
 
             
@@ -360,7 +365,7 @@ class RouterManager:
                     router_print(f"Prefill Duration: {duration:.3f}, worst TTFT: {prefill_end_time - earliest_arrival_time:.3f}")
                 else:
                     router_print(f"Prefill Duration: {duration:.3f}, worst TTFT: {prefill_end_time - earliest_arrival_time:.3f}", in_red=True)
-        await self._handle_finish_req(batch, has_new_finished_req, minibatch=False)
+        await self._handle_finish_req(batch, has_new_finished_req, minibatch=minibatch, has_ft_reqs=num_ft_reqs!=0)
 
         if self._check_if_finetuning_scheduler() and None not in ans:
             if self.is_backward_running():
@@ -377,8 +382,18 @@ class RouterManager:
 
     async def _decode_batch(self, batch:Batch):
         num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
-        if num_inf_tokens > 2000 or self.decode_step_count > 20:
-            #print(f"{num_inf_tokens} ", end='')
+        c1 = num_inf_tokens < 200 and num_ft_tokens !=0
+        c2 = num_inf_tokens > 3000 
+        c3 = self.decode_step_count > 25
+        if c1 or c2 or c3:
+            if self.pause_printing:
+                if c1:
+                    router_print(f"Pause due to small inference tokens {num_inf_tokens}")
+                if c2:
+                    router_print(f"Pause due to large inference tokens {num_inf_tokens}")
+                if c3:
+                    router_print(f"Pause due to long decode steps {self.decode_step_count}")
+                self.pause_printing = False
             await self.pause_backward()
         else:
             await self.resume_backward()
@@ -387,14 +402,19 @@ class RouterManager:
         self.req_queue.update_counter(batch)
         start_time = time.time()
         rets = [self.model_rpcs[tp_rank].decode_batch(batch.batch_id, self.decode_step_count) for tp_rank in range(self.world_size)]
-        ans = await asyncio.gather(*rets)
+        try:
+            ans = await asyncio.gather(*rets)
+        except Exception as e:
+            for adapter_dir in batch.adapter_dirs:
+                router_print(f"{adapter_dir}", in_red=True)
+            print("Current decode step count:", self.decode_step_count)
+            raise e
         if isinstance(self.req_queue, Profile_ReqQueue):
             print(f"Decode Step {self.decode_step_count} Duration: {(time.time() - start_time):.4f}s")  
             self.req_queue.add_to_decode_time_queue(time.time() - start_time)
-        duration = time.time() - start_time
-        if duration > 0.1:
-            router_print(f"Decode Step {self.decode_step_count} Duration: {duration:.4f}s, Decode tokens: {num_inf_tokens}, Decode requests: {num_inf_reqs}", in_red=True)  
-            
+        # if self.decode_step_count<=4:
+        #     duration = time.time() - start_time
+        #     print(f"Decode Step {self.decode_step_count} Duration: {duration:.4f}s, Decode tokens: {num_inf_tokens}, Decode requests: {num_inf_reqs}")  
         decode_end_time = time.time()
         if self.world_size != 1:
             req_to_out_token_id = obtain(ans[0])
@@ -414,7 +434,6 @@ class RouterManager:
                 execution_duration=duration)
         batch.record_token_time(decode_end_time)
         await self._handle_finish_req(batch, has_new_finished_req)
-        
         if self.gpu_profiler is not None:
             self.gpu_profiler.stop_annotation(job_id)
         return
@@ -435,7 +454,12 @@ class RouterManager:
         await asyncio.gather(*rets)
         return
 
-    async def _handle_finish_req(self, batch: Batch, has_new_finished_req, minibatch=False):
+    async def _handle_finish_req(self, batch: Batch, has_new_finished_req, minibatch=False, has_ft_reqs=False):
+        adapter_to_keep = set()
+        if has_ft_reqs:
+            for req in batch.reqs:
+                if req.adapter_dir!=self.req_queue.finetuning_lora_path:
+                    adapter_to_keep.add(req.adapter_dir)
         if has_new_finished_req:
             batch.filter_finished()
             # unmerge adapter from base model
@@ -445,12 +469,17 @@ class RouterManager:
                     ret.append(self.model_rpcs[tp_rank].unmerge_adapter())
                 await asyncio.gather(*ret)
 
-            if not minibatch and not self.input_params.no_lora:
+            if not minibatch and not self.input_params.no_lora and not has_ft_reqs:
+                #print(" _handle_finish_req Offloading adapters...")
                 ret = []
                 for tp_rank in range(self.world_size):
                     ret.append(self.model_rpcs[tp_rank].offload_adapters(batch.adapter_dirs))
                 await asyncio.gather(*ret)
-        
+            elif has_ft_reqs:
+                ret = []
+                for tp_rank in range(self.world_size):
+                    ret.append(self.model_rpcs[tp_rank].offload_adapters(adapter_to_keep))
+                await asyncio.gather(*ret)
             if batch.is_clear():
                 await self._remove_batch(batch)
             else:
@@ -461,6 +490,7 @@ class RouterManager:
         if self.running_batch is not None and self.running_batch.is_clear():
             if not self.input_params.no_lora:
                 # offload model and adapters
+                #print(" _filter_runing_batch Offloading adapters...")
                 ret = []
                 for tp_rank in range(self.world_size):
                     ret.append(self.model_rpcs[tp_rank].offload_adapters())
@@ -495,13 +525,9 @@ class RouterManager:
             recv_req = await self.recv_from_httpserver.recv_pyobj()
             if isinstance(recv_req, tuple) and len(recv_req) == 4:
                 adapter_dir, prompt_ids, sampling_params, request_id = recv_req
-                #print(f"[Router] Received request {request_id}")
                 if self.prefill_interrupt_event is not None:
                     self.prefill_interrupt_event.set()
                 self.add_req(adapter_dir, prompt_ids, sampling_params, request_id)
-                # if self.last_req_arrival_time is not None:
-                #     print(f"Time since last request arrival: {time.time() - self.last_req_arrival_time:.3f}s")
-                # self.last_req_arrival_time = time.time()
                 req_counter += 1
             elif isinstance(recv_req, FinetuneReq):
                 self.req_queue.start_finetuning()
@@ -530,6 +556,7 @@ class RouterManager:
         await asyncio.gather(*rets)
     
     async def resume_backward(self):
+        self.pause_printing = True
         if not self.is_backward_running():
             return
         rets = [self.model_rpcs[tp_rank].resume_backward() for tp_rank in range(self.world_size)]

@@ -160,7 +160,9 @@ class InferAdapterAlt:
                 d in reserve_adapter_dirs for d in self.adapter_dirs):
             # nothing to remove
             return
-
+        # for dir in self.adapter_dirs:
+        #     if dir not in reserve_adapter_dirs:
+        #         print(f"  Removing adapter: {dir}", end=' ')
         if len(reserve_adapter_dirs) == 0:
             # free everything
             all_vpids = torch.cat((self.a_loc_lora_a, self.a_loc_lora_b)).tolist()

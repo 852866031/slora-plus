@@ -40,9 +40,13 @@ def main():
     # === Aggregate manually by the computed bins ===
     tokens_per_sec = df.groupby("second_bin")["total_tokens"].sum().rename("total_tokens_per_sec")
     req_per_sec = df.groupby("second_bin").size().rename("num_requests")
-
     timeline = pd.concat([tokens_per_sec, req_per_sec], axis=1).reset_index()
 
+    all_seconds = pd.RangeIndex(
+        start=timeline["second_bin"].min(),
+        stop=timeline["second_bin"].max() + 1
+    )
+    timeline = timeline.set_index("second_bin").reindex(all_seconds, fill_value=0).rename_axis("second_bin").reset_index()
     # === Plot ===
     fig, ax1 = plt.subplots(figsize=(10, 5))
 
@@ -57,7 +61,8 @@ def main():
     ax1.set_xlabel("Time (s)")
     ax1.set_ylabel("Total tokens per second", color="tab:blue")
     ax1.tick_params(axis="y", labelcolor="tab:blue")
-    ax1.set_ylim(top=timeline["total_tokens_per_sec"].max() * 1.3)
+    ax1.set_ylim(top=timeline["total_tokens_per_sec"].max() * 1.3, bottom=0)
+    ax1.set_xlim(left=0)
 
     # Right Y-axis: number of requests per second
     ax2 = ax1.twinx()
@@ -71,10 +76,12 @@ def main():
     )
     ax2.set_ylabel("Number of requests", color="tab:orange")
     ax2.tick_params(axis="y", labelcolor="tab:orange")
-    ax2.set_ylim(top=timeline["num_requests"].max() * 1.3)
+    ax2.set_ylim(top=timeline["num_requests"].max() * 1.3, bottom=0)
+    ax2.set_xlim(left=0)
 
     # === Aesthetics ===
     fig.suptitle("Inference Request Timeline (Manual Per-Second Binning)")
+    
     fig.tight_layout()
 
     # === Save figure ===

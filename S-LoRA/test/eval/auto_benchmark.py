@@ -16,21 +16,24 @@ import json
 import os
 import random
 import signal
+
 import string
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
-import pandas as pd
 import socket
 import requests
+import pandas as pd
+from tqdm import tqdm
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------- Defaults ----------------
 DEFAULTS = {
-    "server": "http://localhost:8000",
+    "server": "http://localhost:9000",
     "timeline_csv": f"{current_dir}/timelines/timeline_live.csv",  
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
@@ -111,22 +114,6 @@ async def try_health(session: aiohttp.ClientSession, server: str, timeout_s: flo
     except Exception:
         return False
 
-# ---------------- HTTP helpers ----------------
-async def start_finetuning(session: aiohttp.ClientSession, server: str, timeout_s: float = 1.0) -> bool:
-    """
-    Call POST /start_finetuning on the given server.
-    Returns True on success, False on failure.
-    """
-    url = f"{server.rstrip('/')}/start_finetuning"
-
-    try:
-        async with session.post(url, timeout=timeout_s) as resp:
-            if resp.status == 200:
-                return True
-            return False
-    except Exception:
-        return False
-
 
 async def try_generate_probe(session: aiohttp.ClientSession, server: str, timeout_s: float = 2.0) -> bool:
     try:
@@ -145,11 +132,26 @@ async def wait_for_server(server: str, max_wait_s: float = 120.0, poll_period_s:
     async with aiohttp.ClientSession() as session:
         while True:
             if await try_health(session, server) or await try_generate_probe(session, server):
-                print("[orchestrator] Server is up ✅")
+                print("[orchestrator] Server is up ✅ at ", server)
                 return
             if time.time() - t0 > max_wait_s:
                 raise TimeoutError(f"Server didn't become healthy within {max_wait_s:.1f}s")
             await asyncio.sleep(poll_period_s)
+
+async def start_finetuning(session: aiohttp.ClientSession, server: str, timeout_s: float = 1.0) -> bool:
+    """
+    Call POST /start_finetuning on the given server.
+    Returns True on success, False on failure.
+    """
+    url = f"{server.rstrip('/')}/start_finetuning"
+
+    try:
+        async with session.post(url, timeout=timeout_s) as resp:
+            if resp.status == 200:
+                return True
+            return False
+    except Exception:
+        return False
 
 
 # ---------- wait for finetuning finished ----------
@@ -231,39 +233,6 @@ async def send_one(
         return (idx, t_rel, latency, "err", None, None, None)
 
 
-# ---------------- concurrent schedule with exact due-times ----------------
-async def run_schedule(server: str, schedule: List[Tuple[int, float, Dict]]) -> List[Tuple[int, float, float, str]]:
-    """
-    Execute the precomputed schedule with precise arrival times.
-    Each task sleeps until its absolute due time (t0 + t_off) before POSTing.
-    """
-    if not schedule:
-        return []
-
-    total = len(schedule)
-    finished_count = 0
-    lock = asyncio.Lock()
-    t0 = time.monotonic()
-
-    async with aiohttp.ClientSession(headers={"User-Agent": "OrchestratorLoad"}) as session:
-        async def fire_at(idx: int, t_off: float, payload: Dict):
-            nonlocal finished_count
-            delay = (t0 + t_off) - time.monotonic()
-            if delay > 0:
-                await asyncio.sleep(delay)
-            if idx % 5 == 0:
-                print("[Orchestrator] Request {}/{} fired at server".format(idx + 1, total))
-            result = await send_one(session, server, idx, payload, t0)
-            async with lock:
-                finished_count += 1
-            return result
-
-        tasks = [asyncio.create_task(fire_at(idx, t_off, payload)) for idx, t_off, payload in schedule]
-        results = await asyncio.gather(*tasks)
-
-    return results
-
-
 # ---------------- Process control ----------------
 def launch_server(enable_finetuning: bool):
     import subprocess
@@ -289,6 +258,71 @@ def kill_server(proc) -> None:
         proc.wait(timeout=10)
     except Exception:
         pass
+
+async def run_schedule(
+    server: str,
+    schedule: List[Tuple[int, float, Dict]],
+) -> List[Tuple[int, float, float, str, float | None, float | None, float | None]]:
+    """
+    Execute the precomputed schedule with precise arrival times.
+    Each task sleeps until its absolute due time (t0 + t_off) before POSTing.
+    """
+    if not schedule:
+        return []
+
+    total = len(schedule)
+    finished_count = 0
+    lock = asyncio.Lock()
+    time_len = schedule[-1][1]  # last timestamp_s → end of schedule
+    t0 = time.monotonic()
+
+    # tqdm progress bar at the bottom
+    pbar = tqdm(
+        total=total,
+        position=0,
+        leave=True,
+        desc="Requests",
+        unit="req",
+    )
+
+    async with aiohttp.ClientSession(headers={"User-Agent": "OrchestratorLoad"}) as session:
+        async def fire_at(idx: int, t_off: float, payload: Dict):
+            nonlocal finished_count
+
+            # Sleep until scheduled send time
+            delay = (t0 + t_off) - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+
+            # Send request
+            result = await send_one(session, server, idx, payload, t0)
+            if result[3] != "ok":
+                print(f"[orchestrator] Request {idx} failed.")
+                exit(1)
+                
+            # Update progress bar
+            async with lock:
+                finished_count += 1
+                pbar.update(1)
+                remaining = max((t0 + time_len) - time.monotonic(), 0.0)
+                mins = int(remaining // 60)
+                secs = remaining % 60
+                pbar.set_postfix_str(f"{mins}m {secs:04.1f}s remaining")
+
+            return result
+
+        tasks = [
+            asyncio.create_task(fire_at(idx, t_off, payload))
+            for idx, t_off, payload in schedule
+        ]
+        results = await asyncio.gather(*tasks)
+
+    pbar.close()
+    return results
+
+
+
+
 
 
 # ---------------- Summaries ----------------
@@ -387,46 +421,141 @@ async def monitor_gpu_usage_1(
         print("[monitor] GPU monitoring stopped.")
 
 
-from pynvml import *
+from pynvml import (
+    nvmlInit, nvmlShutdown, nvmlDeviceGetCount, nvmlDeviceGetHandleByIndex,
+    nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo,
+    nvmlDeviceGetPowerUsage, nvmlDeviceGetTemperature,
+    NVML_TEMPERATURE_GPU,
+)
+from typing import Optional, List
+from datetime import datetime
+import asyncio
+import math
+
 
 async def monitor_gpu_usage(
     log_path: str = "gpu_usage_log.csv",
     interval_s: float = 0.2,
+    aggregation_period_s: float = 0.5,     # NEW ✓ group samples into windows
     stop_event: Optional[asyncio.Event] = None,
 ):
     """
-    High-resolution GPU monitor using pynvml.
-    Columns: timestamp,gpu_index,gpu_util,memory_used_mb,memory_total_mb,power_w,temperature_c
+    High-resolution GPU monitor:
+      • Samples GPU every interval_s
+      • Aggregates samples into windows of aggregation_period_s
+      • Writes only the peak values (per GPU) for each window
+      • Column name = timestamp (string)
     """
-    nvmlInit()
-    device_count = nvmlDeviceGetCount()
-    print(f"[monitor] GPU monitoring started ({device_count} GPU(s)) → {log_path}")
 
+    print(f"[monitor] Starting GPU monitor → aggregation window = {aggregation_period_s}s")
+
+    # CSV header
     buffer: List[str] = []
-    buffer.append("timestamp,gpu_index,gpu_util,memory_used_mb,memory_total_mb,power_w,temperature_c\n")
-    
+    buffer.append(
+        "timestamp,gpu_index,gpu_util,"
+        "memory_used_mb,memory_total_mb,power_w,temperature_c\n"
+    )
+
     try:
-        while not (stop_event and stop_event.is_set()):
-            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        nvmlInit()
+        device_count = nvmlDeviceGetCount()
+        print(f"[monitor] {device_count} GPU(s) detected → writing to {log_path}")
+
+        # Track window boundaries
+        t0 = datetime.now().timestamp()
+        window_index = 0  # incremented each window
+
+        # Accumulators: gpu_id → dict of peak metrics
+        accumulators = {}
+
+        while True:
+            if stop_event is not None and stop_event.is_set():
+                break
+
+            now = datetime.now()
+            now_ts = now.timestamp()
+
+            # Determine current window index
+            current_window = int((now_ts - t0) // aggregation_period_s)
+
+            # If window changed → flush previous window
+            if current_window != window_index and accumulators:
+                # Window closing → write peaks
+                timestamp_str = datetime.fromtimestamp(
+                    t0 + window_index * aggregation_period_s
+                ).strftime("%Y-%m-%d %H:%M:%S")
+
+                for gpu_id, peak in accumulators.items():
+                    buffer.append(
+                        f"{timestamp_str},{gpu_id},{peak['util']},"
+                        f"{peak['mem_used']:.1f},{peak['mem_total']:.1f},"
+                        f"{peak['power']:.1f},{peak['temp']}\n"
+                    )
+
+                # Reset for next window
+                window_index = current_window
+                accumulators = {}
+
+            # Sample GPUs and record peaks
             for i in range(device_count):
                 handle = nvmlDeviceGetHandleByIndex(i)
-                util = nvmlDeviceGetUtilizationRates(handle)
+                util = nvmlDeviceGetUtilizationRates(handle).gpu
                 mem = nvmlDeviceGetMemoryInfo(handle)
-                power = nvmlDeviceGetPowerUsage(handle) / 1000.0  # W
+                power = nvmlDeviceGetPowerUsage(handle) / 1000.0
                 temp = nvmlDeviceGetTemperature(handle, NVML_TEMPERATURE_GPU)
-                buffer.append(
-                    f"{now},{i},{util.gpu},{mem.used/1024**2:.1f},{mem.total/1024**2:.1f},{power:.1f},{temp}\n"
-                )
-            await asyncio.sleep(interval_s)
-    except asyncio.CancelledError:
-        # Allow graceful cancellation
-        print("[monitor] Task cancelled — flushing buffer...")
-    finally:
-        nvmlShutdown()
-        with open(log_path, "w") as f:
-            f.writelines(buffer)
-        print(f"[monitor] GPU monitoring stopped. {len(buffer)-1} samples written → {log_path}")
 
+                acc = accumulators.setdefault(i, {
+                    "util": 0,
+                    "mem_used": 0,
+                    "mem_total": mem.total / 1024**2,
+                    "power": 0,
+                    "temp": 0,
+                })
+
+                acc["util"] = max(acc["util"], util)
+                acc["mem_used"] = max(acc["mem_used"], mem.used / 1024**2)
+                acc["power"] = max(acc["power"], power)
+                acc["temp"] = max(acc["temp"], temp)
+
+            # Sleep while remaining cancellable
+            try:
+                await asyncio.sleep(interval_s)
+            except asyncio.CancelledError:
+                print("[monitor] Cancelled mid-sleep.")
+                break
+
+    except KeyboardInterrupt:
+        print("[monitor] KeyboardInterrupt → stopping.")
+    finally:
+        try:
+            nvmlShutdown()
+        except:
+            pass
+
+        # Flush last partial window if any
+        try:
+            if accumulators:
+                timestamp_str = datetime.fromtimestamp(
+                    t0 + window_index * aggregation_period_s
+                ).strftime("%Y-%m-%d %H:%M:%S")
+
+                for gpu_id, peak in accumulators.items():
+                    buffer.append(
+                        f"{timestamp_str},{gpu_id},{peak['util']},"
+                        f"{peak['mem_used']:.1f},{peak['mem_total']:.1f},"
+                        f"{peak['power']:.1f},{peak['temp']}\n"
+                    )
+        except:
+            pass
+
+        # Write log file
+        try:
+            with open(log_path, "w") as f:
+                f.writelines(buffer)
+
+            print(f"[monitor] Stopped — wrote {len(buffer)-1} rows → {log_path}")
+        except Exception as e:
+            print(f"[monitor] Failed to write log: {e}")
 
 async def run_warmup(
     server: str,
@@ -492,15 +621,6 @@ async def main():
     proc = launch_server(args.enable_finetuning)
 
     # ---------------- Warmup (first 3 seconds) ----------------
-    WARMUP_END = 10
-
-    await wait_for_server(args.server, max_wait_s=args.max_wait)
-    await asyncio.sleep(1.0)
-    print(f"[orchestrator] Starting warmup phase (first {WARMUP_END}s)…")
-    await run_warmup(args.server, schedule, warmup_end=WARMUP_END)
-    print("[orchestrator] Waiting 3s before starting measured schedule…")
-    await asyncio.sleep(3.0)
-    print(f"[orchestrator] Schedule after warmup: {len(schedule)} requests")
 
     stop_gpu_event = asyncio.Event()
     suffix = "co-serving" if args.enable_finetuning else "inference"
@@ -508,9 +628,9 @@ async def main():
 
     # Start GPU monitor in background
     gpu_monitor_task = asyncio.create_task(monitor_gpu_usage(gpu_log_path, interval_s=0.2, stop_event=stop_gpu_event))
+
     try:
         await wait_for_server(args.server, max_wait_s=args.max_wait)
-        results = []
         if args.enable_finetuning:
             async with aiohttp.ClientSession() as session:
                 await start_finetuning(session, args.server)

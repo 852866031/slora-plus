@@ -400,330 +400,7 @@ class LlamaSFTBackwardService():
         grad_attn_input = self._backpop_attention_fp16(last_layer_input, grad_ffn_input, layer_weight, layer_id, batch_seq_lens)
         return grad_attn_input
     
-
-    def _backprop_ffn(
-        self,
-        ffn_input: torch.Tensor,          # x  (dtype can be fp16/bf16/fp32)
-        output_grad: torch.Tensor,        # ∂L/∂y  with y = x + FFN(...)
-        layer_weight,
-    ):
-        eps = self.eps_
-
-        # --- Keep RMSNorm weights in fp32 for numerical stability ---
-        w_rms = layer_weight.ffn_norm_weight_.float()
-
-        # --- Keep projection weights in fp16 (match model precision) ---
-        w_gate = layer_weight.gate_proj
-        w_up   = layer_weight.up_proj
-        w_down = layer_weight.down_proj
-
-        # --- Forward re-computation ---
-        # RMSNorm must stay in fp32 to avoid loss of precision on small eps values
-        x = ffn_input.to(torch.float32)
-        dy = output_grad.to(torch.float32)
-
-        # RMSNorm forward in fp32
-        x_norm = rmsnorm_forward(x, w_rms, eps=eps)
-
-        # --- Matmuls and activations in bf16/fp16 autocast region ---
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            gate_in = x_norm @ w_gate         # [N, D_gate]
-            gate_out = torch.nn.functional.silu(gate_in)
-            up_out = x_norm @ w_up            # [N, D_up]
-
-            # Backward part
-            grad_ffn_mid = dy @ w_down.T      # [N, D_mid]
-            grad_gate_out = grad_ffn_mid * up_out
-            grad_up_out = grad_ffn_mid * gate_out
-            grad_x_norm_up = grad_up_out @ w_up.T
-
-            # SiLU gradient
-            sig = torch.sigmoid(gate_in)
-            silu_grad = sig * (1 + gate_in * (1 - sig))
-            grad_gate_in = grad_gate_out * silu_grad
-            grad_x_norm_gate = grad_gate_in @ w_gate.T
-
-            grad_x_norm = grad_x_norm_up + grad_x_norm_gate
-
-        # --- Back to fp32 for RMSNorm backward & residual add ---
-        grad_from_norm = rmsnorm_backward(x, grad_x_norm.to(torch.float32), w_rms, eps=eps)
-        grad_ffn_input = grad_from_norm + dy
-        return grad_ffn_input
     
-     # Backprop through the LoRA augmented attention block, only this function uses the autograd of pytorch
-     # backward (20%) <=> decode (80%)
-    def _backpop_attention(self,
-                       last_layer_input: torch.Tensor, 
-                       grad_ffn_input: torch.Tensor, 
-                       layer_weight: LlamaTransformerLayerWeight,
-                       layer_id: int,
-                       batch_seq_lens: torch.Tensor):
-        # https://github.com/benfred/py-spy
-        # Build *flattened* position index for **all** tokens in this micro‑batch
-        device = last_layer_input.device
-        position_ids = torch.cat([
-            torch.arange(0, batch_seq_lens[i], device=device)
-            for i in range(len(batch_seq_lens))
-        ])
-        position_cos = self.model_weights._cos_cached.index_select(0, position_ids)  # [T, D/2]
-        position_sin = self.model_weights._sin_cached.index_select(0, position_ids)  # [T, D/2]
-
-        # ========================  Weight re‑materialisation  =================
-        # Everything is explicitly cast to *float32* for numerical robustness
-        # ---------------------------------------------------------------------
-        w_q = layer_weight.q_weight_.float()
-        w_k = layer_weight.k_weight_.float()
-        w_v = layer_weight.v_weight_.float()
-        w_o = layer_weight.o_weight_.float()
-        w_attn_norm = layer_weight.att_norm_weight_.float()
-
-        # -------------------- 1️⃣  RMSNorm (x → x_norm) -----------------------
-        last_layer_input_leaf = last_layer_input.float().detach().requires_grad_()
-        x_norm = rmsnorm_forward(last_layer_input_leaf, w_attn_norm, eps=self.eps_)
-
-         # -------------------- 2️⃣  LoRA weight materialisation -----------------
-        w_combined = self.adapter_weights.lora_weights[layer_id]
-        r = w_combined.shape[1] // 4 # Derived LoRA hyper‑params
-        H, Hd = w_combined.shape[2], w_combined.shape[3]
-
-        # To use autograd: create *leaf* clones so autograd tracks them separately
-        # w_combined_leaf = w_combined.detach().clone().requires_grad_()
-        w_combined_leaf = w_combined
-        # Unpack the packed [2,4r,H,Hd] tensor into the individual A/B matrices.
-        # Shapes follow the original LoRA paper:  A is [D,r]  and  B is [r,D].
-        qA = w_combined_leaf[0, 0 : r].reshape(r, -1).T
-        qB = w_combined_leaf[1, 0 : r].reshape(-1, r).T
-        kA = w_combined_leaf[0, r : 2 * r].reshape(r, -1).T
-        kB = w_combined_leaf[1, r : 2 * r].reshape(-1, r).T
-        vA = w_combined_leaf[0, 2 * r : 3 * r].reshape(r, -1).T
-        vB = w_combined_leaf[1, 2 * r : 3 * r].reshape(-1, r).T
-        oA = w_combined_leaf[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
-        oB = w_combined_leaf[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
-         # To use autograd: Leaf clone of x_norm so we get ∂L/∂x_norm later 
-        x_norm_leaf = x_norm.detach().requires_grad_()
-
-         # Helper: apply LoRA projection  x · A · B  * α/r ----------------------
-        def proj_lora(x, A, B):
-            output = torch.mm(torch.mm(x, A), B).mul_(self.adapter_weights.scaling)
-            return output
-        
-
-        # -------------------- 3️⃣  Linear projections Q K V --------------------
-        q_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_q)
-        k_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_k)
-        v_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_v)
-
-        q_  = q_base + proj_lora(x_norm_leaf, qA, qB)
-        k_  = k_base + proj_lora(x_norm_leaf, kA, kB)
-        v_  = v_base + proj_lora(x_norm_leaf, vA, vB)
-        rotary_emb_fwd(q_.view(-1, H, Hd), position_cos, position_sin)
-        rotary_emb_fwd(k_.view(-1, H, Hd), position_cos, position_sin)
-        self._maybe_pause()
-        # -------------------- 4️⃣  Masked causal attention --------------------
-        S = x_norm.size(0) 
-        D = x_norm.size(1)  
-        qh, kh, vh = q_.view(S, H, Hd), k_.view(S, H, Hd), v_.view(S, H, Hd)
-        ctx = torch.empty_like(qh)
-        
-        B = batch_seq_lens.shape[0]
-        scale = 1.0 / (Hd ** 0.5)
-
-        b_start_loc = torch.cat([torch.tensor([0], device=device), batch_seq_lens.cumsum(dim=0)[:-1]])
-
-        for i in range(B):
-            st, ln = b_start_loc[i], batch_seq_lens[i]
-            q_blk  = qh[st:st+ln].transpose(0, 1)          # [H,L,D]
-            k_blk  = kh[st:st+ln].transpose(0, 1)
-            v_blk  = vh[st:st+ln].transpose(0, 1)
-
-            att = (q_blk @ k_blk.transpose(-1, -2)) * scale
-            att.masked_fill_(torch.triu(torch.ones_like(att), 1).bool(), float('-inf'))
-            att = torch.softmax(att, dim=-1)
-            ctx_blk = (att @ v_blk).transpose(0, 1)        # [L,H,D]
-            ctx[st:st+ln] = ctx_blk
-
-        # Flatten back to [tokens, D]
-        ctx_flat = ctx.reshape(S, D)
-
-        # -------------------- 5️⃣  Output projection (O) ----------------------
-        o_base_ = torch.mm(ctx_flat, w_o)
-        o_lora_ = proj_lora(ctx_flat, oA, oB)
-        o_total = o_base_ + o_lora_
-
-        # Residual add: x_prev + Attn_out
-        input_embs = last_layer_input_leaf + o_total.view(-1, self.embed_dim_)
-
-        # -------------------- 6️⃣  Backward pass ------------------------------
-        grad_o = grad_ffn_input.float()
-        self._maybe_pause()
-        input_embs.backward(grad_o)
-        
-        # -------------------- 7️⃣  Gradient clipping & copy -------------------
-        g = w_combined_leaf.grad
-        max_norm = 1
-        if g is not None:
-            grad_norm = g.norm()                           # ‖g‖₂   (scalar tensor)
-            if grad_norm > max_norm:                       # scale *in-place*
-                g.mul_(max_norm / (grad_norm + 1e-6))
-
-        return last_layer_input_leaf.grad
-    
-    def _backpop_attention_fp16_1(
-        self,
-        last_layer_input: torch.Tensor,
-        grad_ffn_input: torch.Tensor,
-        layer_weight: LlamaTransformerLayerWeight,
-        layer_id: int,
-        batch_seq_lens: torch.Tensor,
-    ):
-        device = last_layer_input.device
-
-        # ----- Positions -----
-        position_ids = torch.cat([
-            torch.arange(0, batch_seq_lens[i], device=device)
-            for i in range(len(batch_seq_lens))
-        ])
-        position_cos = self.model_weights._cos_cached.index_select(0, position_ids)   # fp16
-        position_sin = self.model_weights._sin_cached.index_select(0, position_ids)
-
-        # ----- Weights (fp16) -----
-        w_q = layer_weight.q_weight_
-        w_k = layer_weight.k_weight_
-        w_v = layer_weight.v_weight_
-        w_o = layer_weight.o_weight_
-        w_attn_norm = layer_weight.att_norm_weight_
-
-        # ----- 1) RMSNorm -----
-        # stays fp16, no casting
-        last_layer_input_leaf = last_layer_input.detach().requires_grad_()
-        x_norm = rmsnorm_forward(last_layer_input_leaf, w_attn_norm, eps=self.eps_)  # fp16
-
-        # ----- 2) LoRA -----
-        w_combined = self.adapter_weights.lora_weights[layer_id]
-        r = w_combined.shape[1] // 4
-        H, Hd = w_combined.shape[2], w_combined.shape[3]
-
-        # do NOT cast; stay fp16
-        w_combined_leaf = w_combined.to(torch.float16)
-
-        # Unpack fp16 LoRA weights
-        qA = w_combined_leaf[0, 0:r].reshape(r, -1).T          # fp16
-        qB = w_combined_leaf[1, 0:r].reshape(-1, r).T
-        kA = w_combined_leaf[0, r:2*r].reshape(r, -1).T
-        kB = w_combined_leaf[1, r:2*r].reshape(-1, r).T
-        vA = w_combined_leaf[0, 2*r:3*r].reshape(r, -1).T
-        vB = w_combined_leaf[1, 2*r:3*r].reshape(-1, r).T
-        oA = w_combined_leaf[0, 3*r:4*r].reshape(r, -1).T
-        oB = w_combined_leaf[1, 3*r:4*r].reshape(-1, r).T
-
-        def proj_lora(X, A, B):
-            return (X @ A @ B) * self.adapter_weights.scaling   # fp16
-
-
-        # ----- 3) Q,K,V projections -----
-        X = x_norm.view(-1, self.embed_dim_)              # fp16
-
-        q_base = X @ w_q
-        k_base = X @ w_k
-        v_base = X @ w_v
-
-        q_ = q_base + proj_lora(X, qA, qB)
-        k_ = k_base + proj_lora(X, kA, kB)
-        v_ = v_base + proj_lora(X, vA, vB)
-
-        qh = q_.view(-1, H, Hd)
-        kh = k_.view(-1, H, Hd)
-        rotary_emb_fwd(qh, position_cos, position_sin)
-        rotary_emb_fwd(kh, position_cos, position_sin)
-
-        vh = v_.view(-1, H, Hd)
-
-        # ----- 4) Masked causal attention -----
-        S = x_norm.shape[0]
-        D = x_norm.shape[1]
-
-        ctx = torch.empty_like(qh)
-        Bn = batch_seq_lens.shape[0]
-        scale = 1.0 / (Hd ** 0.5)
-
-        b_start = torch.cat([
-            torch.tensor([0], device=device),
-            batch_seq_lens.cumsum(dim=0)[:-1],
-        ])
-
-        for i in range(Bn):
-            st = b_start[i]
-            ln = batch_seq_lens[i]
-            q_blk = qh[st:st+ln].transpose(0, 1)    # [H, L, D]
-            k_blk = kh[st:st+ln].transpose(0, 1)
-            v_blk = vh[st:st+ln].transpose(0, 1)
-
-            att = (q_blk @ k_blk.transpose(-1, -2)) * scale
-            att = att.masked_fill(
-                torch.triu(torch.ones_like(att), 1).bool(),
-                float('-inf')
-            )
-            att = torch.softmax(att, dim=-1)
-            ctx_blk = (att @ v_blk).transpose(0, 1)
-            ctx[st:st+ln] = ctx_blk
-
-        ctx_flat = ctx.reshape(S, D)
-
-        # ----- 5) O projection -----
-        o_base = ctx_flat @ w_o
-        o_lora = proj_lora(ctx_flat, oA, oB)
-        o_total = o_base + o_lora
-
-        # ----- 6) Residual + autograd backward -----
-        input_embs = last_layer_input_leaf + o_total.view(-1, self.embed_dim_)   # fp16
-        grad_o = grad_ffn_input.to(device)                                      # fp16
-        self._maybe_pause()
-        input_embs.backward(grad_o)      # autograd
-
-        # ----- 7) LoRA grad clip -----
-        g = w_combined_leaf.grad
-        if g is not None:
-            n = g.norm()
-            if n > 1:
-                g.mul_(1.0 / (n + 1e-6))
-
-        return last_layer_input_leaf.grad
-    
-    @torch.no_grad()
-    def _backprop_ffn_fp16(
-        self,
-        ffn_input: torch.Tensor,          # x  (dtype can be fp16/bf16/fp32)
-        output_grad: torch.Tensor,        # ∂L/∂y  with y = x + FFN(...)
-        layer_weight,
-    ):
-        eps = self.eps_
-        # --- Keep RMSNorm weights in fp32 for numerical stability ---
-        w_rms = layer_weight.ffn_norm_weight_
-        w_gate = layer_weight.gate_proj
-        w_up   = layer_weight.up_proj
-        w_down = layer_weight.down_proj
-        x = ffn_input
-        dy = output_grad.to(torch.float16)
-        x_norm = rmsnorm_forward(x, w_rms, eps=eps)
-        # --- Matmuls and activations in bf16/fp16 autocast region ---
-        gate_in = x_norm @ w_gate         # [N, D_gate]
-        gate_out = torch.nn.functional.silu(gate_in)
-        up_out = x_norm @ w_up            # [N, D_up]
-
-        # Backward part
-        grad_ffn_mid = dy @ w_down.T      # [N, D_mid]
-        grad_gate_out = grad_ffn_mid * up_out
-        grad_up_out = grad_ffn_mid * gate_out
-        grad_x_norm_up = grad_up_out @ w_up.T
-        sig = torch.sigmoid(gate_in)
-        silu_grad = sig * (1 + gate_in * (1 - sig))
-        grad_gate_in = grad_gate_out * silu_grad
-        grad_x_norm_gate = grad_gate_in @ w_gate.T
-        grad_x_norm = grad_x_norm_up + grad_x_norm_gate
-        grad_from_norm = rmsnorm_backward(x, grad_x_norm, w_rms, eps=eps)
-        grad_ffn_input = grad_from_norm + dy
-        return grad_ffn_input
-        
     @torch.no_grad()
     def _backprop_ffn_fp16(
         self,
@@ -1033,3 +710,171 @@ class LlamaSFTBackwardService():
             g.mul_(max_norm / (gn + 1e-6))
         self.adapter_weights.lora_weights[layer_id].grad = g.to(torch.float32)
         return grad_last_layer_input
+    
+
+    def _backprop_ffn(
+        self,
+        ffn_input: torch.Tensor,          # x  (dtype can be fp16/bf16/fp32)
+        output_grad: torch.Tensor,        # ∂L/∂y  with y = x + FFN(...)
+        layer_weight,
+    ):
+        eps = self.eps_
+
+        # --- Keep RMSNorm weights in fp32 for numerical stability ---
+        w_rms = layer_weight.ffn_norm_weight_.float()
+
+        # --- Keep projection weights in fp16 (match model precision) ---
+        w_gate = layer_weight.gate_proj
+        w_up   = layer_weight.up_proj
+        w_down = layer_weight.down_proj
+
+        # --- Forward re-computation ---
+        # RMSNorm must stay in fp32 to avoid loss of precision on small eps values
+        x = ffn_input.to(torch.float32)
+        dy = output_grad.to(torch.float32)
+
+        # RMSNorm forward in fp32
+        x_norm = rmsnorm_forward(x, w_rms, eps=eps)
+
+        # --- Matmuls and activations in bf16/fp16 autocast region ---
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            gate_in = x_norm @ w_gate         # [N, D_gate]
+            gate_out = torch.nn.functional.silu(gate_in)
+            up_out = x_norm @ w_up            # [N, D_up]
+
+            # Backward part
+            grad_ffn_mid = dy @ w_down.T      # [N, D_mid]
+            grad_gate_out = grad_ffn_mid * up_out
+            grad_up_out = grad_ffn_mid * gate_out
+            grad_x_norm_up = grad_up_out @ w_up.T
+
+            # SiLU gradient
+            sig = torch.sigmoid(gate_in)
+            silu_grad = sig * (1 + gate_in * (1 - sig))
+            grad_gate_in = grad_gate_out * silu_grad
+            grad_x_norm_gate = grad_gate_in @ w_gate.T
+
+            grad_x_norm = grad_x_norm_up + grad_x_norm_gate
+
+        # --- Back to fp32 for RMSNorm backward & residual add ---
+        grad_from_norm = rmsnorm_backward(x, grad_x_norm.to(torch.float32), w_rms, eps=eps)
+        grad_ffn_input = grad_from_norm + dy
+        return grad_ffn_input
+    
+     # Backprop through the LoRA augmented attention block, only this function uses the autograd of pytorch
+     # backward (20%) <=> decode (80%)
+    def _backpop_attention(self,
+                       last_layer_input: torch.Tensor, 
+                       grad_ffn_input: torch.Tensor, 
+                       layer_weight: LlamaTransformerLayerWeight,
+                       layer_id: int,
+                       batch_seq_lens: torch.Tensor):
+        # https://github.com/benfred/py-spy
+        # Build *flattened* position index for **all** tokens in this micro‑batch
+        device = last_layer_input.device
+        position_ids = torch.cat([
+            torch.arange(0, batch_seq_lens[i], device=device)
+            for i in range(len(batch_seq_lens))
+        ])
+        position_cos = self.model_weights._cos_cached.index_select(0, position_ids)  # [T, D/2]
+        position_sin = self.model_weights._sin_cached.index_select(0, position_ids)  # [T, D/2]
+
+        # ========================  Weight re‑materialisation  =================
+        # Everything is explicitly cast to *float32* for numerical robustness
+        # ---------------------------------------------------------------------
+        w_q = layer_weight.q_weight_.float()
+        w_k = layer_weight.k_weight_.float()
+        w_v = layer_weight.v_weight_.float()
+        w_o = layer_weight.o_weight_.float()
+        w_attn_norm = layer_weight.att_norm_weight_.float()
+
+        # -------------------- 1️⃣  RMSNorm (x → x_norm) -----------------------
+        last_layer_input_leaf = last_layer_input.float().detach().requires_grad_()
+        x_norm = rmsnorm_forward(last_layer_input_leaf, w_attn_norm, eps=self.eps_)
+
+         # -------------------- 2️⃣  LoRA weight materialisation -----------------
+        w_combined = self.adapter_weights.lora_weights[layer_id]
+        r = w_combined.shape[1] // 4 # Derived LoRA hyper‑params
+        H, Hd = w_combined.shape[2], w_combined.shape[3]
+
+        # To use autograd: create *leaf* clones so autograd tracks them separately
+        # w_combined_leaf = w_combined.detach().clone().requires_grad_()
+        w_combined_leaf = w_combined
+        # Unpack the packed [2,4r,H,Hd] tensor into the individual A/B matrices.
+        # Shapes follow the original LoRA paper:  A is [D,r]  and  B is [r,D].
+        qA = w_combined_leaf[0, 0 : r].reshape(r, -1).T
+        qB = w_combined_leaf[1, 0 : r].reshape(-1, r).T
+        kA = w_combined_leaf[0, r : 2 * r].reshape(r, -1).T
+        kB = w_combined_leaf[1, r : 2 * r].reshape(-1, r).T
+        vA = w_combined_leaf[0, 2 * r : 3 * r].reshape(r, -1).T
+        vB = w_combined_leaf[1, 2 * r : 3 * r].reshape(-1, r).T
+        oA = w_combined_leaf[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
+        oB = w_combined_leaf[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
+         # To use autograd: Leaf clone of x_norm so we get ∂L/∂x_norm later 
+        x_norm_leaf = x_norm.detach().requires_grad_()
+
+         # Helper: apply LoRA projection  x · A · B  * α/r ----------------------
+        def proj_lora(x, A, B):
+            output = torch.mm(torch.mm(x, A), B).mul_(self.adapter_weights.scaling)
+            return output
+        
+
+        # -------------------- 3️⃣  Linear projections Q K V --------------------
+        q_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_q)
+        k_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_k)
+        v_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_v)
+
+        q_  = q_base + proj_lora(x_norm_leaf, qA, qB)
+        k_  = k_base + proj_lora(x_norm_leaf, kA, kB)
+        v_  = v_base + proj_lora(x_norm_leaf, vA, vB)
+        rotary_emb_fwd(q_.view(-1, H, Hd), position_cos, position_sin)
+        rotary_emb_fwd(k_.view(-1, H, Hd), position_cos, position_sin)
+        self._maybe_pause()
+        # -------------------- 4️⃣  Masked causal attention --------------------
+        S = x_norm.size(0) 
+        D = x_norm.size(1)  
+        qh, kh, vh = q_.view(S, H, Hd), k_.view(S, H, Hd), v_.view(S, H, Hd)
+        ctx = torch.empty_like(qh)
+        
+        B = batch_seq_lens.shape[0]
+        scale = 1.0 / (Hd ** 0.5)
+
+        b_start_loc = torch.cat([torch.tensor([0], device=device), batch_seq_lens.cumsum(dim=0)[:-1]])
+
+        for i in range(B):
+            st, ln = b_start_loc[i], batch_seq_lens[i]
+            q_blk  = qh[st:st+ln].transpose(0, 1)          # [H,L,D]
+            k_blk  = kh[st:st+ln].transpose(0, 1)
+            v_blk  = vh[st:st+ln].transpose(0, 1)
+
+            att = (q_blk @ k_blk.transpose(-1, -2)) * scale
+            att.masked_fill_(torch.triu(torch.ones_like(att), 1).bool(), float('-inf'))
+            att = torch.softmax(att, dim=-1)
+            ctx_blk = (att @ v_blk).transpose(0, 1)        # [L,H,D]
+            ctx[st:st+ln] = ctx_blk
+
+        # Flatten back to [tokens, D]
+        ctx_flat = ctx.reshape(S, D)
+
+        # -------------------- 5️⃣  Output projection (O) ----------------------
+        o_base_ = torch.mm(ctx_flat, w_o)
+        o_lora_ = proj_lora(ctx_flat, oA, oB)
+        o_total = o_base_ + o_lora_
+
+        # Residual add: x_prev + Attn_out
+        input_embs = last_layer_input_leaf + o_total.view(-1, self.embed_dim_)
+
+        # -------------------- 6️⃣  Backward pass ------------------------------
+        grad_o = grad_ffn_input.float()
+        self._maybe_pause()
+        input_embs.backward(grad_o)
+        
+        # -------------------- 7️⃣  Gradient clipping & copy -------------------
+        g = w_combined_leaf.grad
+        max_norm = 1
+        if g is not None:
+            grad_norm = g.norm()                           # ‖g‖₂   (scalar tensor)
+            if grad_norm > max_norm:                       # scale *in-place*
+                g.mul_(max_norm / (grad_norm + 1e-6))
+
+        return last_layer_input_leaf.grad
