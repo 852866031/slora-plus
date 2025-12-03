@@ -57,7 +57,6 @@ class LoraTpPartAdapter:
         self.scaling = self.lora_alpha / self.r
         self.is_finetuning = is_finetuning
         
-        rprint("loading adapter from", lora_dir)
         self.layers = [
             LoraLayerWeight(i, tp_rank, world_size, self.lora_config, network_config, torch.float16,
                             no_lora_swap=no_lora_swap, prefetch_stream=prefetch_stream)

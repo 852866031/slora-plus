@@ -141,7 +141,7 @@ def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
 
 
 class LlamaSFTBackwardService():
-    def __init__(self, network_config, recv_pipe, send_pipe, lr=1e-4, weight_decay=0.01, gamma=0.95):
+    def __init__(self, network_config, recv_pipe, send_pipe, lr=1e-4, weight_decay=0.01, gamma=0.95, use_rank_id=0, bwd_log_index=0):
         # Runtime references / constants
         self.eps_ = network_config["rms_norm_eps"]
         self.embed_dim_ = network_config["hidden_size"]
@@ -161,11 +161,13 @@ class LlamaSFTBackwardService():
         self.bwd_pause_event = None
         self.working = False
         self.total_processed_tokens = 0
-        self.backward_tokens_log_path = "/projects/I20240005/jchen/slora-plus/S-LoRA/test/eval/results/bwd_total_tokens.txt"
-        self.backward_tokens_log_path_2 = "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/results/bwd_total_tokens.txt"
+        self.ft_log = []
+        self.log_batch_counter = {}   # epoch → counter
+        self.use_rank_id = use_rank_id
 
     def start_service(self):
-        bwd_print("Started.")
+        torch.cuda.set_device(self.use_rank_id)
+        bwd_print("Started. Using rank id:", self.use_rank_id)
         msg = self.recv_pipe.recv()
         self.receive_adapter(msg)
         msg = self.recv_pipe.recv()

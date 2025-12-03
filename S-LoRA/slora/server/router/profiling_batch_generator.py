@@ -80,8 +80,8 @@ class ProfilingBatchGenerator:
         self.coserving_batches: List[Batch] = []
 
         # Exact targets
-        self._inf_token_targets = [2000, 100, 200, 300, 500, 700, 1000, 1500, 2000, 2200, 2450]
-        self._coserve_pairs = [(1000, 500), (1200, 200), (1500, 100), (2200, 300), (1800, 300), (1200, 200), (2000, 500)]
+        self._inf_token_targets = [2000, 100, 500, 800, 850, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
+        self._coserve_pairs = [(1000, 500), (1500, 100), (800, 100), (900, 100), (2000, 300), (1200, 200), (2000, 500), (3000, 200), (4000, 200)]
 
         # Pre-tokenized pool used to slice exact-length prompts
         self._token_pool: List[int] = []

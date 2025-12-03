@@ -219,6 +219,7 @@ class UnifiedMemoryAllocator:
         """
         Copy `rows` into self.gpu_pools[layer_id][vpids], paging-in any CPU pages first.
         """
+        # print the device of gpu pool and rows:
         assert rows.dim() == 2 or rows.dim() == 3, \
             f"Expected 2D or 3D tensor for rows, got shape {rows.shape}"
         assert layer_id < self.layer_num, f"Invalid layer_id {layer_id}"

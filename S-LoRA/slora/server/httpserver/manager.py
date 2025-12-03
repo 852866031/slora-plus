@@ -61,7 +61,12 @@ class HttpServerManager:
         self.feedback_collector.submit_update(req_id=request_id, label=label)
 
     async def start_finetuning(self):
+        print("httpserver: sending start finetuning request to router")
         self.send_to_router.send_pyobj(FinetuneReq())
+        return
+    
+    async def exit_finetuning(self):
+        self.send_to_router.send_pyobj(FinetuneReq(exit_finetuning=True))
         return
 
     def _record_arrival(self):
@@ -141,7 +146,8 @@ class HttpServerManager:
                 break
             out = self.req_id_to_out_inf[request_id]
             if len(out) != 5:
-                print(out)
+                out_str, metadata, finished, event = out
+                perf_metrics = {}
             else:
                 out_str, metadata, finished, event, perf_metrics = out
             if feedback:

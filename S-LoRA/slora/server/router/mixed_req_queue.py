@@ -56,8 +56,10 @@ class Mixed_ReqQueue:
                  batch_max_tokens: int,
                  running_max_req_size: int,
                  finetune_params: FinetuneParams,
-                 slo_params: SLOParams):
-        self.max_total_tokens = max_total_tokens #1024
+                 slo_params: SLOParams,
+                 bwd_log_index: int = 0,
+                 ) -> None:
+        self.max_total_tokens = max_total_tokens 
         self.batch_max_tokens = batch_max_tokens
         self.running_max_req_size = running_max_req_size
         # config parameters
@@ -87,7 +89,8 @@ class Mixed_ReqQueue:
             total_epochs=self.total_epoch,
             max_prepare=self.finetuning_prepare_size,
             trust_remote_code=finetune_params.trust_remote_code,
-            max_saved_finetuning_tokens=self.max_saved_finetuning_tokens
+            max_saved_finetuning_tokens=self.max_saved_finetuning_tokens,
+            bwd_log_index=bwd_log_index,
         )
         self.finetuning_manager.load()
         self.waiting_req_list: List[Req] = []
@@ -102,12 +105,14 @@ class Mixed_ReqQueue:
     
     def start_finetuning(self):
         self.start_task = True
+        self.max_total_tokens+=2000
+    
+    def stop_finetuning(self):
+        self.start_task = False
+        self.finetuning_manager.write_bwd_logs_csv()
 
     def append(self, req: Req):
         self.waiting_req_list.append(req)
-    
-    def start_finetuning(self):
-        self.start_task = True
 
     def _init_cache_list(self, current_batch: Optional[Batch], lora_ranks: dict[str, int]):
         if current_batch is not None:
@@ -115,6 +120,8 @@ class Mixed_ReqQueue:
             self.adapters = set()
             self.adapter_size = 0
             for req in current_batch.reqs:
+                if req.is_finetuning:
+                    continue
                 used_len = req.input_len + len(req.output_ids)
                 left_len = req.max_output_len - len(req.output_ids) - 1
                 self.cache_len_list.append((used_len, left_len))
@@ -126,28 +133,7 @@ class Mixed_ReqQueue:
             self.cache_len_list = []
             self.adapters = set()
             self.adapter_size = 0
-
-    async def check_will_starve(self, current_batch, decode_step_count) -> bool:
-        if len(self.waiting_req_list) == 0:
-            self.check_iter=0
-            await asyncio.sleep(0.000000001)  # Yield to the request handler loop
-        if len(self.waiting_req_list) > 0:
-            if decode_step_count >20:
-                return True
-            predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens(), len(current_batch.reqs))
-            predicted_next_checking_time = time.time() + 1.6 * predicted_next_decode_time
-            total_pending_inf_tokens = 0
-            for req in self.waiting_req_list:
-                total_pending_inf_tokens += req.input_len
-            predicted_next_prefill_time = self.prefill_estimator.predict_inference(total_pending_inf_tokens, len(self.waiting_req_list))
-            time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
-            # if time_left < 0 and self.last_batch_time is not None:
-            #     print(f"Time elapsed from last batch: {time.time() - self.last_batch_time:.3f}s")
-            #print(f"Num pending inf reqs: {len(self.waiting_req_list)}")
-            return time_left < 0
-        return False
-
-
+    
     def _can_add_new_req(self, req: Req, lora_ranks: dict[str, int]) -> bool:
         self.cache_len_list.append((req.input_len + 1, req.max_output_len - 1))
         self.cache_len_list.sort(key=lambda x: -x[1])
@@ -168,88 +154,44 @@ class Mixed_ReqQueue:
             return True
         else:
             return False
-    
-    def generate_new_batch_1(self, current_batch: Optional[Batch], lora_ranks: dict[str, int], is_backward_running: bool) -> Optional[Batch]:
-        if current_batch is not None and len(current_batch.reqs) >= self.running_max_req_size:
-            return None
-        self._init_cache_list(current_batch, lora_ranks)
-        new_batch_total_tokens = 0
-        can_run_list = []
-        aborted_count = 0
-        earliest_inf_arrival_time = self.waiting_req_list[0].arrival_time if len(self.waiting_req_list) > 0 else time.time()
-        if len(self.waiting_req_list) > 0:
-            for req in self.waiting_req_list:
-                if req.aborted:
-                    aborted_count += 1
-                    continue
-                if (self._can_add_new_req(req, lora_ranks) and
-                    (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
-                    can_run_list.append(req)
-                    new_batch_total_tokens += req.input_len
-                else:
-                    break
-        if len(can_run_list) > 0:
-            self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
 
-        infer_tokens = new_batch_total_tokens
-        ft_tokens = 0
-        if self.start_task and not self.finetuning_is_finished() and not is_backward_running:
-            ft_list = []
-            while self.finetuning_manager.has_next():
-                ft_req = self.finetuning_manager.pop_next()
-                if ft_req is None:
-                    break
-                elif not self._can_add_new_req(ft_req, lora_ranks):
-                    break
-                elif new_batch_total_tokens + ft_req.input_len > self.batch_max_tokens:
-                    break
-                elif self.finetuning_manager.pending_bwd_tokens + ft_tokens  + ft_req.input_len > self.max_saved_finetuning_tokens:
-                    break
-                elif not self.prefill_estimator.can_add_ft(infer_tokens, 
-                                                         ft_tokens+ft_req.input_len, 
-                                                         len(can_run_list)+len(ft_list), 
-                                                         earliest_inf_arrival_time, 
-                                                         ft_req.input_len, self.ttft_slo):
-                    break
-                elif current_batch is not None:
-                    # check avg tbt slo
-                    worst_req_last_batch = current_batch.get_req_with_worst_avg_tbt()
-                    predicted_next_prefill_time = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens+req.input_len, len(can_run_list)+1)
-                    predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
-                    next_token_time = predicted_next_prefill_time + predicted_next_decode_time
-                    if next_token_time > self.max_tbt_slo:
-                        print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
-                        break
-                    worst_avg_tbt_predicted = worst_req_last_batch.avg_tbt_if_next_token(next_token_time)
-                    if worst_avg_tbt_predicted > self.avg_tbt_slo:
-                        print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
-                        break
-                else:
-                    ft_list.append(ft_req)
-                    new_batch_total_tokens += ft_req.input_len
-                    ft_tokens += ft_req.input_len
-            can_run_list.extend(ft_list)
-        if len(can_run_list) > 0:
-            new_batch = Batch(uuid.uuid4().hex, can_run_list)
-            self.print_batch_layout(infer_tokens, ft_tokens, new_batch)
-            self.last_batch_time = time.time()
-            return new_batch
+    async def check_will_starve(self, current_batch, lora_ranks) -> bool:
+        if len(self.waiting_req_list) == 0:
+            self.check_iter=0
+            await asyncio.sleep(0.0000001)  # Yield to the request handler loop
         else:
-            return None
-    
+            self.check_iter+=1
+        if len(self.waiting_req_list) > 0:
+            self._init_cache_list(current_batch, lora_ranks)
+            if not self._can_add_new_req(self.waiting_req_list[0], lora_ranks):
+                print(f"[Router] Queuing UP.")
+                return False
+            predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens(), len(current_batch.reqs))
+            predicted_next_checking_time = time.time() + predicted_next_decode_time
+            pending_inf_token_list = []
+            for req in self.waiting_req_list:
+                pending_inf_token_list.append(req.input_len)
+            predicted_next_prefill_time = self.prefill_estimator.predict_inference(pending_inf_token_list)
+            time_left = self.get_earliest_req_time() + self.ttft_slo - (predicted_next_checking_time + predicted_next_prefill_time)
+            return time_left < 0
+        return False
+
     
     def print_batch_layout(self, infer_tokens, ft_tokens, new_batch):
-        unused = self.batch_max_tokens - (infer_tokens + ft_tokens)
-        predicted_duration = self.prefill_estimator.predict_coserving(N_inf=infer_tokens, N_ft=ft_tokens, B=len(new_batch.reqs))
+        infer_tokens_count = sum(infer_tokens)
+        ft_tokens_count = sum(ft_tokens)
+        unused = self.batch_max_tokens - (infer_tokens_count + ft_tokens_count)
+        predicted_duration = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens)
         earliest_arrival_time = new_batch.get_earliest_arrival_time()   
         text = "\033[34m[Forward Batch Constructor]: "
-        text += f"[{infer_tokens} Infer | {ft_tokens} FT | {unused} unused] "
+        text += f"[{infer_tokens_count} Infer | {ft_tokens_count} FT | {unused} unused] "
         text += f"\n\tT(Predicted Prefill) = {predicted_duration:.3f}s"
         if earliest_arrival_time is not None:
             predicted_longest_ttft = time.time() + predicted_duration - earliest_arrival_time
             text += f" | T(Predicted Worst TTFT) = {predicted_longest_ttft:.3f}s"
         if self.finetuning_manager.pending_bwd_tokens > 0:
             text += f"\n\tPending BWD tokens: {self.finetuning_manager.pending_bwd_tokens}"
+            text += f" Waiting queue size: {len(self.waiting_req_list)} "
         text += "\033[0m"
         print(text)
 
@@ -292,6 +234,7 @@ class Mixed_ReqQueue:
         self._init_cache_list(current_batch, lora_ranks)
         new_batch_total_tokens = 0
         can_run_list = []
+        infer_tokens = []
         aborted_count = 0
         earliest_inf_arrival_time = self.waiting_req_list[0].arrival_time if len(self.waiting_req_list) > 0 else time.time()
         if len(self.waiting_req_list) > 0:
@@ -303,42 +246,42 @@ class Mixed_ReqQueue:
                     (new_batch_total_tokens + req.input_len) <= self.batch_max_tokens):
                     can_run_list.append(req)
                     new_batch_total_tokens += req.input_len
+                    infer_tokens.append(req.input_len)
                 else:
                     break
         if len(can_run_list) > 0:
             self.waiting_req_list = self.waiting_req_list[len(can_run_list) + aborted_count:]
         if len(self.waiting_req_list)>0:
             print(f"\033[34m[Forward Batch Constructor]: {len(self.waiting_req_list)} inference requests are waiting in the queue.\033[0m")
-        infer_tokens = new_batch_total_tokens
-        ft_tokens = 0
+        ft_tokens = []
         if self.start_task and not self.finetuning_is_finished() and not is_backward_running:
             ft_list = []
             while self.finetuning_manager.has_next():
                 restrain_batch_max_tokens = self.batch_max_tokens - new_batch_total_tokens
-                restrain_backward_batch_size = self.max_saved_finetuning_tokens - self.finetuning_manager.pending_bwd_tokens - ft_tokens
+                restrain_backward_batch_size = self.max_saved_finetuning_tokens - self.finetuning_manager.pending_bwd_tokens - sum(ft_tokens)
                 restrain_ttft_slo = self.prefill_estimator.max_next_ft_tokens(
-                    infer_tokens, ft_tokens, len(can_run_list)+len(ft_list), earliest_inf_arrival_time, self.ttft_slo*0.9)
+                    infer_tokens, ft_tokens, earliest_inf_arrival_time, self.ttft_slo*0.9)
                 restrain = min(restrain_batch_max_tokens, restrain_backward_batch_size, restrain_ttft_slo)
                 req = self.finetuning_manager.pop_best_under(restrain, exclude=ft_list)
                 if req is not None and current_batch is not None:
                     # check avg tbt slo
                     worst_req_last_batch = current_batch.get_req_with_worst_avg_tbt()
-                    predicted_next_prefill_time = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens+req.input_len, len(can_run_list)+1)
+                    predicted_next_prefill_time = self.prefill_estimator.predict_coserving(infer_tokens, ft_tokens[:]+[req.input_len])
                     predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens()+req.input_len+new_batch_total_tokens, len(can_run_list)+1)
                     next_token_time = predicted_next_prefill_time + predicted_next_decode_time
                     if next_token_time > self.max_tbt_slo:
-                        print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
+                        #print(f"next predicted token time {next_token_time:.4f} > {self.max_tbt_slo}, stop adding finetuning reqs")
                         break
                     worst_avg_tbt_predicted = worst_req_last_batch.avg_tbt_if_next_token(next_token_time)
                     if worst_avg_tbt_predicted > self.avg_tbt_slo:
-                        print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
+                        #print(f"worst avg tbt {worst_avg_tbt_predicted:.4f} > {self.avg_tbt_slo}, stop adding finetuning reqs")
                         break
                 if req is None:
                     break
                 else:
                     ft_list.append(req)
                     new_batch_total_tokens += req.input_len
-                    ft_tokens += req.input_len
+                    ft_tokens.append(req.input_len)
             can_run_list.extend(ft_list)
         if len(can_run_list) > 0:
             new_batch = Batch(uuid.uuid4().hex, can_run_list)

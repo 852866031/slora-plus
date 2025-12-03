@@ -108,12 +108,24 @@ async def feedback(request: Request) -> Response:
 
 @app.post("/start_finetuning")
 async def finetuning_status(request: Request) -> Response:
+    print("api_server.py: start_finetuning called")
     await httpserver_manager.start_finetuning()
+    print("api_server.py: start_finetuning finished")
     return Response(
         content=json.dumps({"message": "Finetuning started"}),
         status_code=200,
         media_type="application/json"
     )
+
+@app.post("/exit_finetuning")
+async def exit_finetuning(request: Request) -> Response:
+    await httpserver_manager.exit_finetuning()
+    return Response(
+        content=json.dumps({"message": "Finetuning exited"}),
+        status_code=200,
+        media_type="application/json"
+    )
+    
     
 @app.post("/finetuning_status")
 async def finetuning_status(request: Request) -> Response:
@@ -587,6 +599,7 @@ def main():
     parser.add_argument("--enable_unified_mem_manager", action="store_true")
     parser.add_argument("--unified_mem_manager_max_size", type=int, default=5,help="in GB")
     parser.add_argument("--enable_gpu_profile", action="store_true")
+    parser.add_argument("--bwd_log_index", type=int, default=0)
     ''' end of finetune arguments '''
     
     args = parser.parse_args()
@@ -642,7 +655,7 @@ def main():
     setting["nccl_port"] = args.nccl_port
 
     if args.batch_max_tokens is None:
-        batch_max_tokens = int(0.5 * args.max_total_token_num)
+        batch_max_tokens = int(1/5 * args.max_total_token_num)
         batch_max_tokens = max(batch_max_tokens, args.max_req_total_len)
         args.batch_max_tokens = batch_max_tokens
         print(f"max_total_token_num {args.max_total_token_num}")
@@ -657,6 +670,10 @@ def main():
         num=3 + args.tp, used_nccl_port=args.nccl_port
     )
     router_port, detokenization_port, httpserver_port = can_use_ports[0:3]
+    router_port += args.rank_id * 10
+    detokenization_port += args.rank_id * 10
+    httpserver_port += args.rank_id * 10
+    print(f"router_port: {router_port}, detokenization_port: {detokenization_port}, httpserver_port: {httpserver_port}")
     model_rpc_ports = can_use_ports[3:]
     global httpserver_manager
     httpserver_manager = HttpServerManager(

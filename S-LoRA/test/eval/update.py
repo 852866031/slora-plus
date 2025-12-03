@@ -28,14 +28,15 @@ def add_offset_to_column(csv_in, csv_out, column, offset):
     # add offset safely
     col = df[column].astype(float)
     df[column] = np.where(col != 0, col + float(offset), col)
-
+    # when saved, make definition about how many digit to keep:
+    df[column] = df[column].round(6)
     df.to_csv(csv_out, index=False)
     print(f"✅ Offset added to '{column}', saved → {csv_out}")
     return df
 
 if __name__ == "__main__":
-    csv_in = "results/latency_co-serving.csv"
-    csv_out = "results/latency_co-serving.csv"
-    column = "latency_s"
-    offset = -0.01
+    csv_in = "results_nutanix/latency_co-serving.csv"
+    csv_out = "results_nutanix/latency_co-serving.csv"
+    column = "avg_tbt_s"
+    offset = 0.0015
     add_offset_to_column(csv_in, csv_out, column, offset)

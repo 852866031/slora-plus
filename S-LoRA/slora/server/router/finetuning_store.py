@@ -2,7 +2,7 @@ import uuid
 from bisect import bisect_right, bisect_left
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Tuple
-
+import datetime
 import numpy as np
 from slora.server.io_struct import Batch, Req
 from slora.server.sampling_params import SamplingParams
@@ -45,6 +45,7 @@ class FinetuningManager:
         max_saved_finetuning_tokens: int,
         max_prepare: Optional[int] = None,
         trust_remote_code: bool = False,
+        bwd_log_index : int = 0,
     ) -> None:
         self.data_path = data_path
         self.tokenizer = tokenizer
@@ -77,6 +78,11 @@ class FinetuningManager:
         self.epoch_avg_loss_list = []
         self.loss_list =[]
         self.max_saved_finetuning_tokens = max_saved_finetuning_tokens
+
+        self.ft_log_path = f"/projects/I20240005/jchen/slora-plus/S-LoRA/test/eval/results/bwd_log_{bwd_log_index}.csv"
+        self.bwd_logs = []   # list of dicts
+        self.total_processed_tokens_global = 0
+        self._bwd_batch_counter = 0
 
     def load(self) -> int:
         loaded = 0
@@ -144,6 +150,7 @@ class FinetuningManager:
             return False
         self.current_epoch += 1
         self._reset_epoch_structures()
+        self._bwd_batch_counter = 0
         return True
 
     def pop_next(self, exclude: Optional[List["Req"]] = None) -> Optional["Req"]:
@@ -254,6 +261,21 @@ class FinetuningManager:
         self.loss_list.extend(loss_list)
         self.finetuning_tokens_processed += num_processed_tokens
         self.pending_bwd_tokens -= num_processed_tokens
+
+        self.total_processed_tokens_global += num_processed_tokens
+
+        batch_loss = float(np.mean(loss_list)) if loss_list else float("nan")
+        self._bwd_batch_counter += 1
+
+        self.bwd_logs.append({
+            "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+            "epoch": self.current_epoch + 1,
+            "batch_idx": self._bwd_batch_counter,
+            "batch_tokens": num_processed_tokens,
+            "batch_loss": batch_loss,
+            "total_processed_tokens": self.total_processed_tokens_global,
+        })
+
         bar_width = 50
         ratio = self.finetuning_tokens_processed / max(self.total_tokens_in_memory, 1)
         filled_len = int(bar_width * ratio)
@@ -262,6 +284,7 @@ class FinetuningManager:
         white = " "
         bar = grey * filled_len + white * empty_len
         print(f"Epoch: {self.current_epoch+1}/{self.total_epochs} [{bar}] {ratio:.1%} ", end="", flush=True)
+
         if self.finetuning_tokens_processed >= self.total_tokens_in_memory:
             self.epoch_avg_loss_list.append(np.mean(self.loss_list))
             print(f" Average Loss: {self.epoch_avg_loss_list[-1]:.6f}")
@@ -279,3 +302,31 @@ class FinetuningManager:
 
     def finetuning_is_finished(self):
         return self.current_epoch >= self.total_epochs and self.pending_bwd_tokens == 0
+    
+    def write_bwd_logs_csv(self):
+        """
+        Write all backward-pass logs to a CSV file.
+        Columns:
+        timestamp, epoch, batch_idx, batch_tokens, batch_loss, total_processed_tokens
+        """
+        import csv
+        csv_path = self.ft_log_path
+        if not self.bwd_logs:
+            print(f"No backward logs to write.")
+            return
+
+        fieldnames = [
+            "timestamp",
+            "epoch",
+            "batch_idx",
+            "batch_tokens",
+            "batch_loss",
+            "total_processed_tokens",
+        ]
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(self.bwd_logs)
+
+        print(f"Wrote {len(self.bwd_logs)} backward logs to: {csv_path}")

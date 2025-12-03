@@ -133,18 +133,14 @@ class Batch:
         return worst_req
   
     def export_batch_info(self):
-        num_inf_reqs = 0
-        num_ft_reqs = 0
-        num_inf_tokens = 0
-        num_ft_tokens = 0
+        inference_tokens_list = []
+        finetuning_tokens_list = []
         for req in self.reqs:
             if req.is_finetuning:
-                num_ft_reqs += 1
-                num_ft_tokens += req.input_len
+                finetuning_tokens_list.append(req.input_len)
             else:
-                num_inf_reqs += 1
-                num_inf_tokens += req.input_len
-        return num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens
+                inference_tokens_list.append(req.input_len)
+        return inference_tokens_list, finetuning_tokens_list
 
     def input_tokens(self):
         batch_input_tokens = 0
@@ -261,16 +257,13 @@ class AbortReq:
         self.req_id = req_id
 
 class FinetuneReq:
-    def __init__(self):
-        pass
+    def __init__(self, exit_finetuning=False):
+        self.exit_finetuning = exit_finetuning
 
 class FinetuneStatusReq:
     def __init__(self):
         self.finished = False
 
-class FinetuneReq:
-    def __init__(self):
-        pass
 
 class BatchAbortReq:
     def __init__(self, req_ids):

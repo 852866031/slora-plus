@@ -55,7 +55,7 @@ def get_scheduler(input_params, adapter_dirs):
     elif input_params.scheduler == "slora_plus":
         if input_params.finetuning_params.finetuning_type == "SFT":
             return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
-                                input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params)
+                                input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params, input_params.bwd_log_index)
         elif input_params.finetuning_params.finetuning_type == "SFT Profile":
             return Profile_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                                 input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params, adapter_dirs[0])
@@ -119,6 +119,7 @@ class RouterManager:
             self.lora_ranks[lora_dir] = config["r"]
         self.lora_ranks[input_params.finetuning_params.finetuning_lora_path] = get_lora_config(adapter_dirs[-1], input_params.dummy)[0]["r"]
         self.lora_ranks[None] = 0       
+        print(self.lora_ranks)
         self.running_batch: Batch = None
         self.eos_id = eos_id
         
@@ -259,7 +260,7 @@ class RouterManager:
                 return
             else:
                 await self.resume_backward()
-        elif await self.req_queue.check_will_starve(self.running_batch):
+        elif await self.req_queue.check_will_starve(self.running_batch, self.lora_ranks):
             router_print(f"Incoming request will starve, prefill new batch after {self.decode_step_count} decoding steps.")
             # Prefill and merge batch
             self._clear_abort_reqs()
@@ -329,7 +330,7 @@ class RouterManager:
         return token_count
 
     async def _prefill_batch(self, batch, minibatch=True):
-        num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
+        inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
         await self.pause_backward()
         if self.gpu_profiler is not None:
             job_id = self.gpu_profiler.start_annotation(f"prefill #tokens: {batch.input_tokens()}")
@@ -353,19 +354,17 @@ class RouterManager:
             prefill_end_time = time.time()
             duration = prefill_end_time - prefill_start_time
             self.batch_exec_tracker.add_batch_stats(
-                num_ft_reqs=num_ft_reqs,
-                num_inf_reqs=num_inf_reqs,
-                num_ft_tokens=num_ft_tokens,
-                num_inf_tokens=num_inf_tokens,
+                inference_tokens=inference_tokens_list,
+                finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=duration)
             batch.record_time_to_first_token(prefill_end_time)
             if earliest_arrival_time is not None:
-                if prefill_end_time - earliest_arrival_time <= self.req_queue.ttft_slo:
+                if prefill_end_time - earliest_arrival_time <= self.req_queue.ttft_slo * 1.05:
                     router_print(f"Prefill Duration: {duration:.3f}, worst TTFT: {prefill_end_time - earliest_arrival_time:.3f}")
                 else:
                     router_print(f"Prefill Duration: {duration:.3f}, worst TTFT: {prefill_end_time - earliest_arrival_time:.3f}", in_red=True)
-        await self._handle_finish_req(batch, has_new_finished_req, minibatch=minibatch, has_ft_reqs=num_ft_reqs!=0)
+        await self._handle_finish_req(batch, has_new_finished_req, minibatch=minibatch, has_ft_reqs=finetuning_tokens_list!=[])
 
         if self._check_if_finetuning_scheduler() and None not in ans:
             if self.is_backward_running():
@@ -381,9 +380,10 @@ class RouterManager:
         return True
 
     async def _decode_batch(self, batch:Batch):
-        num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
-        c1 = num_inf_tokens < 200 and num_ft_tokens !=0
-        c2 = num_inf_tokens > 3000 
+        inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
+        num_inf_tokens = sum(inference_tokens_list)
+        c1 = num_inf_tokens < 200 and len(finetuning_tokens_list) !=0
+        c2 = num_inf_tokens > 5000 
         c3 = self.decode_step_count > 25
         if c1 or c2 or c3:
             if self.pause_printing:
@@ -426,10 +426,8 @@ class RouterManager:
         duration = decode_end_time - start_time
         if self.decode_step_count < 8:
             self.batch_exec_tracker.add_batch_stats(
-                num_ft_reqs=num_ft_reqs,
-                num_inf_reqs=num_inf_reqs,
-                num_ft_tokens=num_ft_tokens,
-                num_inf_tokens=num_inf_tokens,
+                inference_tokens=inference_tokens_list,
+                finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.DECODE,
                 execution_duration=duration)
         batch.record_token_time(decode_end_time)
@@ -530,7 +528,13 @@ class RouterManager:
                 self.add_req(adapter_dir, prompt_ids, sampling_params, request_id)
                 req_counter += 1
             elif isinstance(recv_req, FinetuneReq):
-                self.req_queue.start_finetuning()
+                #self.req_queue.start_finetuning()
+                if recv_req.exit_finetuning:
+                    router_print("Received exit finetuning request.")
+                    self.req_queue.stop_finetuning()
+                else:
+                    router_print("Received start finetuning request.")
+                    self.req_queue.start_finetuning()
             elif isinstance(recv_req, FinetuneStatusReq):
                 recv_req.finished = self.req_queue.finetuning_is_finished()
                 self.send_to_detokenization.send_pyobj(recv_req)
@@ -560,6 +564,10 @@ class RouterManager:
         if not self.is_backward_running():
             return
         rets = [self.model_rpcs[tp_rank].resume_backward() for tp_rank in range(self.world_size)]
+        await asyncio.gather(*rets)
+    
+    async def shutdown_backward(self):
+        rets = [self.model_rpcs[tp_rank].shutdown_backward() for tp_rank in range(self.world_size)]
         await asyncio.gather(*rets)
 
     async def isolated_prefill(self, batch: Batch):
@@ -605,36 +613,30 @@ class RouterManager:
         co_batches = self.profiling_batch_generator.coserving_batches
         # Run inference-only batches
         for idx, batch in enumerate(inf_batches):
-            num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
+            inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
             prefill_time = await self.isolated_prefill(batch)
             # Log inference-only PREFILL
             self.batch_exec_tracker.add_batch_stats(
-                num_ft_reqs=num_ft_reqs,
-                num_inf_reqs=num_inf_reqs,
-                num_ft_tokens=num_ft_tokens,
-                num_inf_tokens=num_inf_tokens,
+                inference_tokens=inference_tokens_list,
+                finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=prefill_time,
             )
-            num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
+            inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
             decode_time = await self.isolated_decode(batch)
             self.batch_exec_tracker.add_batch_stats(
-                num_ft_reqs=num_ft_reqs,
-                num_inf_reqs=num_inf_reqs,
-                num_ft_tokens=num_ft_tokens,
-                num_inf_tokens=num_inf_tokens,
+                inference_tokens=inference_tokens_list,
+                finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.DECODE,
                 execution_duration=decode_time,
             )
         # Run co-serving batches
         for idx, batch in enumerate(co_batches):
-            num_inf_reqs, num_ft_reqs, num_inf_tokens, num_ft_tokens = batch.export_batch_info()
+            inference_tokens_list, finetuning_tokens_list = batch.export_batch_info()
             prefill_time = await self.isolated_prefill(batch)
             self.batch_exec_tracker.add_batch_stats(
-                num_ft_reqs=num_ft_reqs,
-                num_inf_reqs=num_inf_reqs,
-                num_ft_tokens=num_ft_tokens,
-                num_inf_tokens=num_inf_tokens,
+                inference_tokens=inference_tokens_list,
+                finetuning_tokens=finetuning_tokens_list,
                 execution_type=BatchExecutionType.PREFILL,
                 execution_duration=prefill_time,
             )
@@ -676,6 +678,7 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                tokenizer_mode=args.tokenizer_mode,
                                trust_remote_code=args.trust_remote_code,
                                finetuning_config=args.finetuning_config,
+                               bwd_log_index = args.bwd_log_index,
                               )
 
     try:

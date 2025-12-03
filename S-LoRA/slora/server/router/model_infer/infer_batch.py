@@ -79,8 +79,6 @@ class InferBatch:
     @torch.no_grad()
     def init_batch(cls, batch_id, requests, dtype: torch.dtype, device: torch.device, mem_manager: MemoryManager, vocab_size: int, 
                    alt_mem_manager: UnifiedMemoryAllocator = None):
-        rprint("infer_batch: initing batch")
-
         input_lengths = []
         all_input_ids = []
         requests_idx_mapping = {}

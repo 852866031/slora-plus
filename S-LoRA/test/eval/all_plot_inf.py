@@ -143,11 +143,9 @@ def plot_gpu_usage_panel(
     ax,
     file1, label1,
     file2, label2,
-<<<<<<<< HEAD:S-LoRA/test/eval/all_plot_inf.py
     smooth_window=3,
-========
-    smooth_window=1,
->>>>>>>> 23dde36b87bfb9a10aa6b47c5ac9ad8f5c55b299:S-LoRA/test/eval/all_plot.py
+    threshold=50,         # NEW — threshold for activity detection
+    pre_seconds=0,        # NEW — how many seconds before the activity moment to include
     ft_tokens=None,
     colors=None,
 ):
@@ -155,22 +153,50 @@ def plot_gpu_usage_panel(
         df = pd.read_csv(path)
         df["timestamp"] = pd.to_datetime(df["timestamp"])
         df["time_rel_s"] = (df["timestamp"] - df["timestamp"].iloc[0]).dt.total_seconds()
-        df = df[df["time_rel_s"] >= 10].reset_index(drop=True)
         df["gpu_util_smooth"] = df["gpu_util"].rolling(window=smooth_window, min_periods=1).mean()
         return df
 
     df1 = load_log(file1)
     df2 = load_log(file2)
 
+    # ------------------------------------------------------------
+    # Find the "activity start" — first time GPU util > threshold
+    # ------------------------------------------------------------
+    def find_activity_start(df):
+        idx = np.argmax(df["gpu_util"] > threshold)
+        if df["gpu_util"].iloc[idx] > threshold:
+            return df["time_rel_s"].iloc[idx]
+        else:
+            return df["time_rel_s"].iloc[0]  # fallback if no activity
+
+    t1 = find_activity_start(df1)
+    t2 = find_activity_start(df2)
+
+    # Align both so their activity start = 0
+    df1 = df1[df1["time_rel_s"] >= max(t1 - pre_seconds, 0)].copy()
+    df2 = df2[df2["time_rel_s"] >= max(t2 - pre_seconds, 0)].copy()
+
+    df1["time_rel_s"] -= (t1 - pre_seconds)
+    df2["time_rel_s"] -= (t2 - pre_seconds)
+
+    # ------------------------------------------------------------
+    # Clip to common end for consistent x-axis
+    # ------------------------------------------------------------
     min_end = min(df1["time_rel_s"].iloc[-1], df2["time_rel_s"].iloc[-1])
     df1 = df1[df1["time_rel_s"] <= min_end]
     df2 = df2[df2["time_rel_s"] <= min_end]
 
+    # ------------------------------------------------------------
+    # Compute averages
+    # ------------------------------------------------------------
     avg1 = df1["gpu_util"].mean()
     avg2 = df2["gpu_util"].mean()
 
     color_map = colors if colors is not None else ["tab:orange", "tab:green"]
 
+    # ------------------------------------------------------------
+    # Plot curves
+    # ------------------------------------------------------------
     ax.plot(df1["time_rel_s"], df1["gpu_util_smooth"], color=color_map[0], alpha=0.6)
     ax.plot(df2["time_rel_s"], df2["gpu_util_smooth"], color=color_map[1], alpha=0.6)
 
@@ -180,15 +206,14 @@ def plot_gpu_usage_panel(
                label=f"{label2} avg={avg2:.1f}%")
 
     if ft_tokens is not None:
-        ax.plot([], [], " ", label=f"Total trained fine-tuning tokens: {ft_tokens:,}")
+        ax.plot([], [], " ", label=f"Total fine-tuning tokens: {ft_tokens:,}")
 
     ax.set_title("GPU Compute Utilization", fontsize=11, fontweight="bold")
-    ax.set_xlabel("Time (s, relative)")
+    ax.set_xlabel("Time (s, aligned to first activity)")
     ax.set_ylabel("GPU Utilization (%)")
     ax.set_ylim(0, 100)
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="lower right")
-
 
 # ------------------------------------------------------
 # Timeline plot (unchanged)
@@ -229,11 +254,7 @@ def plot_all_combined(ft_tokens=None, ttft_slo=None):
     plot_latency_panels(ax_ttft, ax_latency, files, labels, colors, ttft_slo=ttft_slo)
     plot_gpu_usage_panel(
         ax_gpu,
-<<<<<<<< HEAD:S-LoRA/test/eval/all_plot_inf.py
-        "results/gpu_usage_inference.csv", "Inference",
-========
-        "results/gpu_usage_co-serving.csv", "Co-serving",
->>>>>>>> 23dde36b87bfb9a10aa6b47c5ac9ad8f5c55b299:S-LoRA/test/eval/all_plot.py
+        "results/gpu_usage_inference.csv", "inference",
         "results/gpu_usage_slora.csv", "SLoRA",
         ft_tokens=ft_tokens,
         colors=colors
@@ -247,8 +268,4 @@ def plot_all_combined(ft_tokens=None, ttft_slo=None):
     print(f"✅ Saved combined 4-panel figure to {out_path}")
 
 if __name__ == "__main__":
-<<<<<<<< HEAD:S-LoRA/test/eval/all_plot_inf.py
-    plot_all_combined(ft_tokens=3844, ttft_slo=0.1)
-========
-    plot_all_combined(ft_tokens=2476, ttft_slo=0.2)
->>>>>>>> 23dde36b87bfb9a10aa6b47c5ac9ad8f5c55b299:S-LoRA/test/eval/all_plot.py
+    plot_all_combined(ft_tokens=267922, ttft_slo=0.1)

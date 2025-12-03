@@ -93,7 +93,8 @@ class InputParams:
         model_weightdir,
         tokenizer_mode,
         trust_remote_code=True,
-        finetuning_config = {}
+        finetuning_config = {},
+        bwd_log_index = 0,
     ) -> None:
         self.max_req_total_len = max_req_total_len
         self.max_total_token_num = max_total_token_num
@@ -132,5 +133,6 @@ class InputParams:
             avg_tbt_slo=finetuning_config.get("avg_tbt_slo", 0.15),
             max_tbt_slo=finetuning_config.get("max_tbt_slo", 0.4),
         )
+        self.bwd_log_index = bwd_log_index
         return
  

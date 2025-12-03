@@ -54,13 +54,15 @@ class ModelRpcServer(rpyc.Service):
                            max_total_token_num, load_way, mode, input_params,
 			   prefetch_stream, 
                half_model=False, mem_manager_log_path=None, 
-               enable_unified_mem_manager=False, gpu_profiler=None, unified_mem_manager_max_size=0):
+               enable_unified_mem_manager=False, gpu_profiler=None, unified_mem_manager_max_size=0, use_rank_id=0):
         import torch
         import torch.distributed as dist
         if world_size != 1:
             trans_list = [obtain(e) for e in (rank_id, world_size, weight_dir, adapter_dirs,
                                               max_total_token_num, load_way, mode)]
             rank_id, world_size, weight_dir, adapter_dirs, max_total_token_num, load_way, mode = trans_list
+        self.use_rank_id = use_rank_id
+        torch.cuda.set_device(self.use_rank_id)
 
         self.tp_rank = rank_id
         self.world_size = world_size
@@ -73,10 +75,8 @@ class ModelRpcServer(rpyc.Service):
         self.original_weights = {}
         self.backward_status = BackwardResumePoint.BEFORE_OPTIMIZER
         self.enable_unified_mem_manager = enable_unified_mem_manager
-
-        dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
-        torch.cuda.set_device(rank_id)
-
+        nccl_port = setting[f"nccl_port_{use_rank_id}"]
+        dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{nccl_port}', rank=rank_id, world_size=world_size)
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
         if half_model:
             model_cfg["num_hidden_layers"] = int(model_cfg["num_hidden_layers"] / 2)
@@ -110,8 +110,6 @@ class ModelRpcServer(rpyc.Service):
             raise e
 
         ''' init adapters '''
-        # TODO support TP for adapters
-        # print("adapter_dirs", adapter_dirs)
         self.adapters = []
         self.adapter_id = {}
         target_adapter_dir = None
@@ -151,7 +149,9 @@ class ModelRpcServer(rpyc.Service):
                     self.model.config, bwd_recv, bwd_send,
                     lr=input_params.finetuning_params.learning_rate,
                     weight_decay=input_params.finetuning_params.weight_decay,
-                    gamma=input_params.finetuning_params.gamma
+                    gamma=input_params.finetuning_params.gamma,
+                    use_rank_id = self.use_rank_id,
+                    bwd_log_index = input_params.bwd_log_index
                 )
                 backward_service_obj.bwd_pause_event = self.bwd_pause_event
                 backward_service_obj.receive_model_dict(self.model.export_model_dict())
@@ -288,6 +288,8 @@ class ModelRpcServer(rpyc.Service):
         return
 
     def forward(self, batch_id, is_prefill, prefill_interrupt_event=None, decode_count=-1):
+        if self.use_rank_id != self.tp_rank:
+            torch.cuda.set_device(self.use_rank_id)
         batch: InferBatch = self.cache.pop(batch_id)
         # print(batch.requests)
         # print([req["request_id"] for req in batch.requests])
@@ -430,7 +432,6 @@ class ModelRpcServer(rpyc.Service):
         return result
     
     def backward(self):
-        start = time.time()
         if self.backward_service is not None:
             requests_info_dict = self.model.alt_mem_manager.export_requests_info()
             requests_info_dict["current_epoch"] = self.current_epoch
@@ -446,6 +447,11 @@ class ModelRpcServer(rpyc.Service):
             return True, loss, total_token_processed
         else:
             return False, None, None
+    
+    def exposed_shutdown_backward(self):
+        if self.backward_service is not None:
+            self.rpc_send.send("EXIT")
+            self.backward_service.join()
 
     def exposed_pause_backward(self):
         self.bwd_pause_event.clear()
@@ -494,6 +500,7 @@ class ModelRpcClient:
             self._back_batch = async_wrap(self.model.back_batch)
             self._pause_backward = async_wrap(self.model.pause_backward)
             self._resume_backward = async_wrap(self.model.resume_backward)
+            self._shutdown_backward = async_wrap(self.model.shutdown_backward)
 
             self._decode_batch = async_wrap(self.model.decode_batch)
             self._filter_batch = async_wrap(self.model.filter_batch)
@@ -511,6 +518,7 @@ class ModelRpcClient:
             self._back_batch = self.model.exposed_back_batch
             self._pause_backward = self.model.exposed_pause_backward
             self._resume_backward = self.model.exposed_resume_backward
+            self._shutdown_backward = self.model.exposed_shutdown_backward
             
             self._decode_batch = self.model.exposed_decode_batch
             self._filter_batch = self.model.exposed_filter_batch
@@ -522,11 +530,11 @@ class ModelRpcClient:
                          max_total_token_num, load_way, mode, input_params,
 			                prefetch_stream, half_model=False, mem_manager_log_path=None,
                             enable_unified_mem_manager=False, unified_mem_manager_max_size=0,
-                            gpu_profiler=None):
+                            gpu_profiler=None, use_rank_id=0):
         ans : rpyc.AsyncResult = self._init_model(rank_id, world_size, weight_dir, adapter_dirs,
                                                   max_total_token_num, load_way, mode, input_params,
 						                            prefetch_stream, half_model, mem_manager_log_path, enable_unified_mem_manager,
-                                                    gpu_profiler, unified_mem_manager_max_size)
+                                                    gpu_profiler, unified_mem_manager_max_size, use_rank_id)
         if self.use_rpc:
             await ans
             return
@@ -585,6 +593,13 @@ class ModelRpcClient:
     def back_batch_threading(self, current_epoch):
         loop = asyncio.get_running_loop()
         return loop.run_in_executor(None, self._back_batch, current_epoch)
+    
+    async def shutdown_backward(self):
+        if self.use_rpc:
+            ans = self._shutdown_backward()
+            return await ans
+        else:
+            return self._shutdown_backward()
 
     async def pause_backward(self):
         if self.use_rpc:

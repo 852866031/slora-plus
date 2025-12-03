@@ -215,9 +215,6 @@ def plot_gpu_usage_panel(
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8, loc="lower right")
 
-# ------------------------------------------------------
-# Timeline plot (unchanged)
-# ------------------------------------------------------
 def plot_timeline_panel(ax, csv_path="timelines/timeline_live.csv"):
     df = pd.read_csv(csv_path)
     df["total_tokens"] = df["prompt_length"] + df["max_new_tokens"]
@@ -239,23 +236,64 @@ def plot_timeline_panel(ax, csv_path="timelines/timeline_live.csv"):
 
     ax.set_title("Request Timeline", fontsize=11, fontweight="bold")
 
+import json
+from pathlib import Path
+
+def extract_slo(json_path: str):
+    """
+    Extract ttft_slo, avg_tbt_slo, and max_tbt_slo from a JSON config file.
+
+    Returns a dict:
+      {
+         "ttft_slo": float,
+         "avg_tbt_slo": float,
+         "max_tbt_slo": float,
+      }
+
+    Raises:
+      FileNotFoundError if file does not exist.
+      KeyError if any SLO field is missing.
+      ValueError if JSON is malformed.
+    """
+    path = Path(json_path)
+    if not path.exists():
+        raise FileNotFoundError(f"SLO config file not found: {json_path}")
+
+    try:
+        with path.open("r") as f:
+            data = json.load(f)
+    except Exception as e:
+        raise ValueError(f"Failed to parse JSON at {json_path}: {e}")
+
+    required_keys = ["ttft_slo", "avg_tbt_slo", "max_tbt_slo"]
+
+    missing = [k for k in required_keys if k not in data]
+    if missing:
+        raise KeyError(f"Missing SLO fields in JSON: {missing}")
+
+    return {
+        "ttft_slo": float(data["ttft_slo"]),
+    }
+
 # ------------------------------------------------------
 # Combine All Panels
 # ------------------------------------------------------
 def plot_all_combined(ft_tokens=None, ttft_slo=None):
-    files  = ["results/latency_co-serving.csv", "results/latency_slora.csv"]
+    latency_files = ["results/latency_co-serving.csv", "results/latency_slora.csv"]
+    gpu_usage_files = ["results/gpu_usage_co-serving_0.csv", "results/gpu_usage_slora_0.csv"]
+    timeline_file = "timelines/timeline_live.csv"
     labels = ["Co-serving", "SLoRA"]
     colors = ["tab:orange", "tab:green"]
 
     fig, axes = plt.subplots(1, 4, figsize=(24, 5))
     ax_timeline, ax_ttft, ax_latency, ax_gpu = axes
 
-    plot_timeline_panel(ax_timeline)
-    plot_latency_panels(ax_ttft, ax_latency, files, labels, colors, ttft_slo=ttft_slo)
+    plot_timeline_panel(ax_timeline, csv_path=timeline_file)
+    plot_latency_panels(ax_ttft, ax_latency, latency_files, labels, colors, ttft_slo=ttft_slo)
     plot_gpu_usage_panel(
         ax_gpu,
-        "results/gpu_usage_co-serving.csv", "co-serving",
-        "results/gpu_usage_slora.csv", "SLoRA",
+        gpu_usage_files[0], labels[0],
+        gpu_usage_files[1], labels[1],
         ft_tokens=ft_tokens,
         colors=colors
     )
@@ -268,4 +306,7 @@ def plot_all_combined(ft_tokens=None, ttft_slo=None):
     print(f"✅ Saved combined 4-panel figure to {out_path}")
 
 if __name__ == "__main__":
-    plot_all_combined(ft_tokens=267922, ttft_slo=0.1)
+    ttft_slo = extract_slo(
+        "/projects/I20240005/jchen/slora-plus/S-LoRA/test/eval/config/finetuning_config_d.json"
+    )["ttft_slo"]
+    plot_all_combined(ft_tokens=267922, ttft_slo=ttft_slo)
