@@ -59,6 +59,7 @@ class ProfilingBatchGenerator:
         trust_remote_code: bool = False,
         max_new_tokens_infer: int = 1,
         rng_seed: int = 42,
+        target: int = 0,
     ) -> None:
         self.ft_params = finetune_params
         self.inference_adapter_dir = inference_adapter_dir
@@ -80,8 +81,15 @@ class ProfilingBatchGenerator:
         self.coserving_batches: List[Batch] = []
 
         # Exact targets
-        self._inf_token_targets = [2000, 100, 500, 800, 850, 1000, 1500, 2000, 2500, 3000, 4000, 5000]
-        self._coserve_pairs = [(1000, 500), (1500, 100), (800, 100), (900, 100), (2000, 300), (1200, 200), (2000, 500), (3000, 200), (4000, 200)]
+        inf_token_targets = [2000, 100, 200, 190, 210, 500, 750, 800, 850, 1000, 1200, 1500, 1750, 2000, 2500, 3000, 4000, 5000]
+        coserve_pairs = [(1000, 500), (1500, 100), (800, 100), (900, 100), (2000, 300), (1200, 200), (2000, 500), (3000, 200), (4000, 200)]
+
+        if target ==0:
+            self._inf_token_targets = inf_token_targets
+            self._coserve_pairs = coserve_pairs
+        else:
+            self._inf_token_targets = [100, 500, 800, 850, 1000, 1500, 2500, 3000, 4000, 5000]
+            self._coserve_pairs = [(100, 50), (100, 100), (200, 200), (800, 100), (1000, 200), (2000, 200), (3000, 200)]
 
         # Pre-tokenized pool used to slice exact-length prompts
         self._token_pool: List[int] = []
@@ -137,7 +145,10 @@ class ProfilingBatchGenerator:
     # ---------------------- Builders (Exact) ----------------------
     def _build_inference_batch_exact(self, total_tokens: int) -> Batch:
         # Decide how many requests; spread across 3–8 reqs for variety
-        n_reqs = min(12, max(3, total_tokens // 150))  # heuristic
+        if total_tokens<250 and total_tokens > 150:
+            n_reqs = 1
+        else:
+            n_reqs = total_tokens // 50 # heuristic
         lengths = self._exact_partition(total_tokens, n_reqs)
         reqs: List[Req] = []
         for L in lengths:
@@ -147,8 +158,8 @@ class ProfilingBatchGenerator:
 
     def _build_coserve_batch_exact(self, n_inf: int, n_ft: int) -> Batch:
         # Partition into several requests (e.g., 4–8 inf reqs, 1–3 ft reqs)
-        n_inf_reqs = min(12, max(4, n_inf // 150))
-        n_ft_reqs = min(3, max(1, n_ft // 150))
+        n_inf_reqs = n_inf // 50
+        n_ft_reqs = n_ft // 50
         inf_lengths = self._exact_partition(n_inf, n_inf_reqs)
         ft_lengths = self._exact_partition(n_ft, n_ft_reqs)
 

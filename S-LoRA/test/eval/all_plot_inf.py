@@ -243,7 +243,7 @@ def plot_timeline_panel(ax, csv_path="timelines/timeline_live.csv"):
 # Combine All Panels
 # ------------------------------------------------------
 def plot_all_combined(ft_tokens=None, ttft_slo=None):
-    files  = ["results/latency_inference.csv", "results/latency_slora.csv"]
+    files  = ["results/latency_inference_8rps.csv", "results/latency_slora_8rps.csv"]
     labels = ["Inference", "SLoRA"]
     colors = ["tab:orange", "tab:green"]
 
@@ -252,13 +252,13 @@ def plot_all_combined(ft_tokens=None, ttft_slo=None):
 
     plot_timeline_panel(ax_timeline)
     plot_latency_panels(ax_ttft, ax_latency, files, labels, colors, ttft_slo=ttft_slo)
-    plot_gpu_usage_panel(
-        ax_gpu,
-        "results/gpu_usage_inference.csv", "inference",
-        "results/gpu_usage_slora.csv", "SLoRA",
-        ft_tokens=ft_tokens,
-        colors=colors
-    )
+    # plot_gpu_usage_panel(
+    #     ax_gpu,
+    #     "results/gpu_usage_inference.csv", "inference",
+    #     "results/gpu_usage_slora.csv", "SLoRA",
+    #     ft_tokens=ft_tokens,
+    #     colors=colors
+    # )
 
     fig.tight_layout()
     out_path = os.path.abspath("results/combined_summary.png")

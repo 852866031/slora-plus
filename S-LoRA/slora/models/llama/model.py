@@ -45,15 +45,6 @@ class LlamaTpPartModel(TpPartBaseModel):
                          unified_mem_manager_max_size=unified_mem_manager_max_size)
         if enable_unified_mem_manager:
             self.backward_engine = LlamaBackwardEngine(self.alt_mem_manager, self.config)
-            # self.backward_engine = LlamaSFTBackwardService(self.config)
-            # if isinstance(self.backward_engine, LlamaSFTBackwardService):
-            #     self.model_dict = {
-            #         "pre_post_weight": self.pre_post_weight,
-            #         "trans_layers_weight": self.trans_layers_weight,
-            #         "_cos_cached": self._cos_cached,
-            #         "_sin_cached": self._sin_cached
-            #     }
-            #     self.backward_engine.receive_model_dict(self.model_dict)
         else:
             self.backward_engine = LlamaBackwardEngine(self.mem_manager, self.config)
         return
@@ -105,9 +96,6 @@ class LlamaTpPartModel(TpPartBaseModel):
 
 
     def _init_custom(self):
-        """
-        模型特殊的一些初始化
-        """
         if self.config.get("use_dynamic_ntk", False):
             self._init_to_get_dynamic_ntk_rotary()
         else:

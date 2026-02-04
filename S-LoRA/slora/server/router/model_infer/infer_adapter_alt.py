@@ -279,12 +279,6 @@ class InferAdapterAlt:
             self.gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a) 
             self.gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
         return self.mem_manager.gpu_pools[layer_id], self.a_start_lora, self.a_len_lora, self.gpu_a_loc_lora_a, self.gpu_a_loc_lora_b, self.a_scaling
-    
-    # def get_lora_params_at_layer(self, layer_id):
-    #     gpu_a_loc_lora_a = self.mem_manager.to_gpu_index(self.a_loc_lora_a) 
-    #     gpu_a_loc_lora_b = self.mem_manager.to_gpu_index(self.a_loc_lora_b)
-    #     return self.mem_manager.gpu_pools[layer_id], self.a_start_lora, self.a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, self.a_scaling
-
 
    
 import triton

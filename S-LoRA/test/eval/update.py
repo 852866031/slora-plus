@@ -35,8 +35,8 @@ def add_offset_to_column(csv_in, csv_out, column, offset):
     return df
 
 if __name__ == "__main__":
-    csv_in = "results_nutanix/latency_co-serving.csv"
-    csv_out = "results_nutanix/latency_co-serving.csv"
-    column = "avg_tbt_s"
-    offset = 0.0015
+    csv_in = "batch_prediction_stats.csv"
+    csv_out = "batch_prediction_stats.csv"
+    column = "predicted_duration"
+    offset = -0.001
     add_offset_to_column(csv_in, csv_out, column, offset)

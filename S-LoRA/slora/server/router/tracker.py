@@ -6,6 +6,9 @@ import time
 import numpy as np
 from slora.server.io_struct import Req
 from enum import Enum
+import csv
+import json
+from pathlib import Path
 
 EPS = 1e-9
 
@@ -15,12 +18,14 @@ class BatchExecutionType(Enum):
 
 
 class BatchExecutionTracker():
-    def __init__(self, max_batches = 1024) -> None:
+    def __init__(self, max_batches = 10240) -> None:
         self.max_batches = max_batches
         self.inference_tokens_list = []
         self.finetuning_tokens_list = []
         self.execution_type_list = []
         self.execution_duration_list = []
+        self.predicted_duration_list = []
+        self.timestamp_list = []
         self.last_refit_count = 0
     
     def check_refit(self) -> bool:
@@ -39,11 +44,14 @@ class BatchExecutionTracker():
         finetuning_tokens: Sequence[List[int]],    # per-request FT tokens
         execution_type: BatchExecutionType,
         execution_duration: float,
+        predicted_duration: Optional[float] = None,
     ) -> None:
+        self.timestamp_list.append(time.time())
         self.inference_tokens_list.append(inference_tokens)
         self.finetuning_tokens_list.append(finetuning_tokens)
         self.execution_type_list.append(execution_type)
         self.execution_duration_list.append(execution_duration)
+        self.predicted_duration_list.append(predicted_duration)
     
     def drop_batch_stats(self, index: int) -> None:
         """Drop the batch statistics at the specified index."""
@@ -54,11 +62,87 @@ class BatchExecutionTracker():
         del self.finetuning_tokens_list[index]
         del self.execution_type_list[index]
         del self.execution_duration_list[index]
+        del self.predicted_duration_list[index]
     
     def size(self) -> int:
         """Return the number of recorded batches."""
         return len(self.execution_type_list)
 
+    def print_batch_prediction_stats(self) -> None:
+        prefill_batch_layouts = []
+        prefill_execution_durations = []
+        prefill_predicted_durations = []
+        decode_batch_layouts = []
+        decode_execution_durations = []
+        decode_predicted_durations = []
+        for i in range(self.size()):
+            if self.predicted_duration_list[i] is None:
+                continue
+            batch_type = self.execution_type_list[i]
+            if batch_type == BatchExecutionType.PREFILL:
+                prefill_batch_layouts.append((self.inference_tokens_list[i], self.finetuning_tokens_list[i]))
+                prefill_execution_durations.append(self.execution_duration_list[i])
+                prefill_predicted_durations.append(self.predicted_duration_list[i])
+            else:
+                decode_batch_layouts.append((self.inference_tokens_list[i], self.finetuning_tokens_list[i]))
+                decode_execution_durations.append(self.execution_duration_list[i])
+                decode_predicted_durations.append(self.predicted_duration_list[i])
+        print("--- Prefill Batch Prediction Stats ---")
+        #print as ready to copy paste python list code
+        print("Batch Layouts:", prefill_batch_layouts)
+        print("Execution Durations:", prefill_execution_durations)
+        print("Predicted Durations:", prefill_predicted_durations)
+        print("--- Decode Batch Prediction Stats ---")
+        #print as ready to copy paste python list code
+        print("Batch Layouts:", decode_batch_layouts)
+        print("Execution Durations:", decode_execution_durations)
+        print("Predicted Durations:", decode_predicted_durations)
+    
+    def write_batch_prediction_stats_to_csv(
+        self,
+        csv_path: str = "batch_prediction_stats.csv",
+    ):
+        rows = []
+        for i in range(self.size()):
+            pred = self.predicted_duration_list[i]
+            if pred is None:
+                continue
+
+            batch_type_enum = self.execution_type_list[i]
+            batch_type = (
+                "prefill" if batch_type_enum == BatchExecutionType.PREFILL else "decode"
+            )
+
+            rows.append({
+                "timestamp": self.timestamp_list[i],
+                "batch_index": i,
+                "batch_type": batch_type,
+                "inference_tokens": json.dumps(self.inference_tokens_list[i]),
+                "finetuning_tokens": json.dumps(self.finetuning_tokens_list[i]),
+                "execution_duration": self.execution_duration_list[i],
+                "predicted_duration": pred,
+            })
+
+        # Write single CSV
+        with open(csv_path, "w", newline="") as f:
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "timestamp",
+                    "batch_index",
+                    "batch_type",
+                    "inference_tokens",
+                    "finetuning_tokens",
+                    "execution_duration",
+                    "predicted_duration",
+                ],
+            )
+            writer.writeheader()
+            writer.writerows(rows)
+
+        print(f"[BatchExecutionTracker] Wrote {len(rows)} rows → {csv_path}")
+                
+        
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence, Optional
 import numpy as np
@@ -244,6 +328,8 @@ class PrefillExecutionEstimator:
         Tft = float(np.sum(n_ft))
 
         pred = p.alpha * S + p.beta * Tin + p.gamma * Tft + p.c
+        if self.fit_rmse:
+            pred *= 1 + 2 * self.fit_rmse
         return float(pred)
 
     # ======================================================================
@@ -502,8 +588,8 @@ class DecodeExecutionEstimator:
     def predict(self, total_tokens: float, batch_size: float) -> float:
         p = self._params
         pred = p.delta * batch_size + p.epsilon * total_tokens + p.d
-        if self.fit_rmse:
-            pred += 1.5 * self.fit_rmse
+        # if self.fit_rmse:
+        #     pred += 1.2 * self.fit_rmse
         return float(pred)
 
     def verify(self, total_tokens: float, batch_size: float, actual_time: float) -> float:

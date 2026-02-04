@@ -67,5 +67,6 @@ def get_tokenizer(
         print(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
+    print(tokenizer)
     return tokenizer
         

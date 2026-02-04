@@ -6,6 +6,7 @@ import threading
 import numpy as np
 import rpyc
 from slora.models.llama.SFT_service import LlamaSFTBackwardService
+from slora.models.llama3.model import Llama3TpPartModel
 import torch
 import traceback
 import time
@@ -40,7 +41,6 @@ from .post_process import sample
 
 from ..mixed_req_queue import rprint
 from pprint import pprint
-from slora.models.lora_adamW_optimizer import ManualAdamW, ManualAdamW_2
 
 from enum import Enum
 
@@ -83,8 +83,20 @@ class ModelRpcServer(rpyc.Service):
         print("weight dir", weight_dir)
         try:
             self.model_type = model_cfg["model_type"]
+            print(model_cfg.keys())
+            print("model type:", self.model_type)
             if self.model_type == "llama":
-                if "num_key_value_heads" in model_cfg.keys():
+                if "Llama-3" in weight_dir:
+                    self.model = Llama3TpPartModel(rank_id, world_size, weight_dir,
+                                                    max_total_token_num,
+                                                    mem_adapter_size=input_params.pool_size_lora,
+                                                    load_way=load_way, mode=mode,
+                                                    dummy=input_params.dummy, 
+                                                    half_model=half_model, 
+                                                    mem_manager_log_path=mem_manager_log_path,
+                                                    enable_unified_mem_manager=enable_unified_mem_manager,
+                                                    unified_mem_manager_max_size=unified_mem_manager_max_size)
+                elif "num_key_value_heads" in model_cfg.keys():
                     self.model = Llama2TpPartModel(rank_id, world_size, weight_dir,
                                                     max_total_token_num,
                                                     mem_adapter_size=input_params.pool_size_lora,

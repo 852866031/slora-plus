@@ -17,7 +17,7 @@ def hf_load_config(weights_dir, mode="adapter"):
         # downloading the same model weights at the same time.
         with get_lock(model_name_or_path=weights_dir):
             weights_dir = snapshot_download(weights_dir,
-                                        allow_patterns=["*.bin", "*.json"])
+                                        allow_patterns=["*.bin", "*.json", "*.safetensors"])
     config_name = "adapter_config.json" if mode == "adapter" else "config.json"
     with open(os.path.join(weights_dir, config_name), "r") as f:
         return json.load(f), weights_dir

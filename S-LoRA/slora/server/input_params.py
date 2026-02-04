@@ -44,6 +44,8 @@ class FinetuneParams:
             self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
             self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
             self.start_on_launch = finetuning_config.get("start_on_launch", True)
+        else:
+            self.finetuning_lora_path = None
 
 class SLOParams:
     def __init__(

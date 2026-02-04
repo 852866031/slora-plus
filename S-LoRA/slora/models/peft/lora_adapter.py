@@ -108,18 +108,6 @@ class LoraTpPartAdapter:
     def offload_from_gpu(self):
         for layer_weight in self.layers:
             layer_weight.offload_from_gpu()
-    
-    def refresh_all_combined_weights_home(self):
-        for layer_weight in self.layers:
-            layer_weight.refresh_combined_weights_home()
-    
-    def unpack_all_combined_weights(self):
-        for layer_weight in self.layers:
-            layer_weight.unpack_w_combined()
-    
-    def unpack_all_combined_weights_gpu(self, new_weights):
-        for index, layer_weight in enumerate(self.layers):
-            layer_weight.unpack_w_combined_gpu(new_weights[index])
 
     def get_all_items(self):
         all_items = {}

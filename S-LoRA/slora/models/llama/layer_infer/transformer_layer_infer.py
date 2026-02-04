@@ -172,6 +172,16 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             destindex_copy_kv(key_buffer, mem_index, mem_manager.key_buffer[self.layer_num_])
             destindex_copy_kv(value_buffer, mem_index, mem_manager.value_buffer[self.layer_num_])
             #print("Access value buffer from LlamaTransformerLayerInfer")
+        
+    def _token_decode_attention_mode(self, q, infer_state: LlamaInferStateInfo, q_alt=None):
+        if "int8kv" in self.mode:
+            return self._token_decode_attention_int8kv(q, infer_state)
+        else:
+            if q_alt is not None:
+                o = self._token_decode_attention_normal_alt(q_alt, infer_state)
+                return o
+            else:
+                return self._token_decode_attention_normal(q, infer_state)
     
     def _token_decode_attention_normal_alt(self, q, infer_state: LlamaInferStateInfo):
         total_token_num = infer_state.total_token_num
@@ -218,9 +228,6 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                                           infer_state.b_seq_len,
                                           infer_state.max_len_in_batch,
                                           infer_state.other_kv_index)
-            #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
-            if time.time() - start > 0.1:
-                print(f"Layer {self.layer_num_} _token_decode_attention_normal_alt time: {time.time() - start:.5f}s")
             return o_tensor
         else:
             #infer_state.alt_mem_manager.unpin_pages(vpid_to_unpin)
@@ -304,36 +311,4 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         prob = None
         return o_tensor
     
-    def _token_decode_attention_mode(self, q, infer_state: LlamaInferStateInfo, q_alt=None):
-        if "int8kv" in self.mode:
-            return self._token_decode_attention_int8kv(q, infer_state)
-        else:
-            if q_alt is not None:
-                o = self._token_decode_attention_normal_alt(q_alt, infer_state)
-                return o
-            else:
-                return self._token_decode_attention_normal(q, infer_state)
     
-    def print_nonzeros(self, t: torch.Tensor, name: str):
-        """
-        Print (index, value) for every non-zero element of `t`.
-
-        Works on tensors of any shape and device.
-        """
-        if name:
-            print(f"--- {name} ---")
-
-        # 1) Find coordinates of all non-zero elements
-        nz_coords = torch.nonzero(t, as_tuple=False)      # [N, ndim]
-        nz_values = t[nz_coords.T.tolist()].cpu()         # gather for printing
-
-        idx_list: List[Tuple[int, ...]] = []
-
-        # 2) Print and collect
-        for idx_tensor, val in zip(nz_coords, nz_values):
-            idx = tuple(idx_tensor.tolist())              # convert to Python tuple
-            idx_list.append(idx)
-            print(f"{idx}: {val.item()}")
-
-        print(f"Total non-zeros: {len(idx_list)}")
-        return idx_list

@@ -156,16 +156,16 @@ class Mixed_ReqQueue:
             return False
 
     async def check_will_starve(self, current_batch, lora_ranks) -> bool:
-        if len(self.waiting_req_list) == 0:
-            self.check_iter=0
-            await asyncio.sleep(0.0000001)  # Yield to the request handler loop
-        else:
-            self.check_iter+=1
+        # if len(self.waiting_req_list) == 0:
+        #     self.check_iter=0
+        #     await asyncio.sleep(0.0000001)  # Yield to the request handler loop
+        # else:
+        #     self.check_iter+=1
         if len(self.waiting_req_list) > 0:
             self._init_cache_list(current_batch, lora_ranks)
-            if not self._can_add_new_req(self.waiting_req_list[0], lora_ranks):
-                print(f"[Router] Queuing UP.")
-                return False
+            # if not self._can_add_new_req(self.waiting_req_list[0], lora_ranks):
+            #     print(f"[Router] Queuing UP.")
+            #     return False
             predicted_next_decode_time = self.decode_estimator.predict(current_batch.input_tokens(), len(current_batch.reqs))
             predicted_next_checking_time = time.time() + predicted_next_decode_time
             pending_inf_token_list = []

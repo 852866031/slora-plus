@@ -79,7 +79,7 @@ class FinetuningManager:
         self.loss_list =[]
         self.max_saved_finetuning_tokens = max_saved_finetuning_tokens
 
-        self.ft_log_path = f"/projects/I20240005/jchen/slora-plus/S-LoRA/test/eval/results/bwd_log_{bwd_log_index}.csv"
+        self.ft_log_path = f"/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/results/bwd_log_{bwd_log_index}.csv"
         self.bwd_logs = []   # list of dicts
         self.total_processed_tokens_global = 0
         self._bwd_batch_counter = 0

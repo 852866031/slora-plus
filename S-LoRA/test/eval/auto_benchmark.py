@@ -22,7 +22,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 
 INSTANCE_CONFIG = [
     {"port": 8000, "enable_finetuning": False},
-    {"port": 9000, "enable_finetuning": True},
+    #{"port": 9000, "enable_finetuning": True},
 ]
 
 DEFAULTS = {
@@ -147,8 +147,8 @@ async def main():
     # ======================================================
     # RUN clean.sh AFTER scheduler completes
     # ======================================================
-    os.system("ps aux | grep 'jiaxuan' | grep 'slora' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
-    os.system("ps aux | grep 'jiaxuan' | grep 'auto_benchmark.py ' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
+    # os.system("ps aux | grep 'jiaxuan' | grep 'slora' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
+    # os.system("ps aux | grep 'jiaxuan' | grep 'auto_benchmark.py ' | grep -v grep | awk '{print $2}' | xargs -r kill -9")
     print("[auto] Done.")
 
 

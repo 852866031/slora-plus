@@ -5,72 +5,27 @@ from slora.server.router.mixed_req_queue import rprint
 from pprint import pprint
 
 class LoraLayerWeight:
-    def __init__(self, layer_num, tp_rank, world_size, lora_config, network_config,
-                 data_type=torch.float16, no_lora_swap=False, prefetch_stream=None):
+    def __init__(self, layer_num, tp_rank, world_size, lora_config, network_config, data_type=torch.float16,
+                 no_lora_swap=False, prefetch_stream=None):
         self.layer_num_ = layer_num
         self.tp_rank_ = tp_rank
         self.world_size_ = world_size
         self.data_type_ = data_type
         self.lora_config = lora_config
         self.network_config = network_config
+
+        # lora params
+        self.q_lora_A = None
+        self.q_lora_B = None
+        self.k_lora_A = None
+        self.k_lora_B = None
+        self.v_lora_A = None
+        self.v_lora_B = None
         self.prefetch_stream = prefetch_stream
+
+        # debug
         self.no_lora_swap = no_lora_swap
 
-        # ---- 1) normalize config (keeps llama1 identical) ----
-        if self.network_config.get("num_key_value_heads", None) is None:
-            self.network_config["num_key_value_heads"] = self.network_config["num_attention_heads"]
-
-        H = self.network_config["hidden_size"]
-        n_q = self.network_config["num_attention_heads"]
-        n_kv = self.network_config["num_key_value_heads"]
-
-        assert H % n_q == 0
-        head_dim = H // n_q
-        kv_out = n_kv * head_dim
-
-        assert n_q % n_kv == 0
-        assert H % self.world_size_ == 0
-        assert kv_out % self.world_size_ == 0
-
-        self.hidden_size_ = H
-        self.num_q_heads_ = n_q
-        self.num_kv_heads_ = n_kv
-        self.head_dim_ = head_dim
-        self.kv_out_dim_ = kv_out
-
-        # ---- 2) TP slice ranges ----
-        split_q_out = H // self.world_size_
-        split_kv_out = kv_out // self.world_size_
-        split_o_in = H // self.world_size_
-
-        self.tp_q_out_ = (split_q_out * self.tp_rank_, split_q_out * (self.tp_rank_ + 1))
-        self.tp_kv_out_ = (split_kv_out * self.tp_rank_, split_kv_out * (self.tp_rank_ + 1))
-        self.tp_o_in_ = (split_o_in * self.tp_rank_, split_o_in * (self.tp_rank_ + 1))
-
-        # ---- 3) per-projection sharding rules consistent with your base weights ----
-        # q/k/v: out-sharded => shard B only
-        # o: in-sharded => shard A only
-        self.proj_spec_ = {
-            "q_proj": {"A_in_slice": None,        "B_out_slice": self.tp_q_out_,  "shard_A": False, "shard_B": True},
-            "k_proj": {"A_in_slice": None,        "B_out_slice": self.tp_kv_out_, "shard_A": False, "shard_B": True},
-            "v_proj": {"A_in_slice": None,        "B_out_slice": self.tp_kv_out_, "shard_A": False, "shard_B": True},
-            "o_proj": {"A_in_slice": self.tp_o_in_, "B_out_slice": None,          "shard_A": True,  "shard_B": False},
-        }
-
-        # ---- 4) init all expected params to None (preserve infra expectations) ----
-        self.q_lora_A = self.q_lora_B = None
-        self.k_lora_A = self.k_lora_B = None
-        self.v_lora_A = self.v_lora_B = None
-        self.o_lora_A = self.o_lora_B = None
-
-        # swap/cpu homes (optional)
-        self.q_lora_A_home = self.q_lora_B_home = None
-        self.k_lora_A_home = self.k_lora_B_home = None
-        self.v_lora_A_home = self.v_lora_B_home = None
-        self.o_lora_A_home = self.o_lora_B_home = None
-        self.w_combined_home = None
-        self.w_combined = None
-        self.w_combined_home_fp32 = None
 
     def load_to_torch(self, path):
         numpy_type = {"fp32": np.float32, "fp16": np.float16}[self.data_type_]
@@ -86,81 +41,63 @@ class LoraLayerWeight:
                 "o_lora_A": self.o_lora_A, "o_lora_B": self.o_lora_B}
 
     def load_dummy_weights(self, swap):
-        # assumes __init__ already set:
-        # self.hidden_size_, self.head_dim_, self.num_q_heads_, self.num_kv_heads_
-        H = self.network_config["hidden_size"]
-        n_q = self.network_config["num_attention_heads"]
-        n_kv = self.network_config.get("num_key_value_heads", n_q)
-        head_dim = H // n_q
-
-        split_qo = H // self.world_size_                # Q and O per TP
-        kv_out = n_kv * head_dim
-        split_kv = kv_out // self.world_size_           # K and V per TP (GQA)
-
+        n_embed = self.network_config["hidden_size"]
+        split_n_embed = n_embed // self.world_size_
         rank = self.lora_config["r"]
-
-        def rand_gpu(shape):
-            return ((torch.rand(shape, dtype=self.data_type_, device="cuda") * 2 - 1) * 1e-3)
-
         if not swap or self.no_lora_swap:
-            # Keep same layout as before: store as [in_dim_shard, r] and [r, out_dim_shard] after transpose
-            # Your original code uses transpose(0,1) for both A and B.
-            # We'll preserve that behavior but with correct dims.
-
-            # Q: out_dim_shard = split_qo
-            self.q_lora_A = rand_gpu((rank, split_qo)).transpose(0, 1).contiguous()
-            self.q_lora_B = rand_gpu((split_qo, rank)).transpose(0, 1).contiguous()
-
-            # K/V: out_dim_shard = split_kv (may be smaller for llama3)
-            self.k_lora_A = rand_gpu((rank, split_kv)).transpose(0, 1).contiguous()
-            self.k_lora_B = rand_gpu((split_kv, rank)).transpose(0, 1).contiguous()
-
-            self.v_lora_A = rand_gpu((rank, split_kv)).transpose(0, 1).contiguous()
-            self.v_lora_B = rand_gpu((split_kv, rank)).transpose(0, 1).contiguous()
-
-            # O: use split_qo to preserve llama1 behavior
-            self.o_lora_A = rand_gpu((rank, split_qo)).transpose(0, 1).contiguous()
-            self.o_lora_B = rand_gpu((split_qo, rank)).transpose(0, 1).contiguous()
-            return
-
-        # ---- swap path: keep llama1 packing unchanged; avoid invalid packing for llama3 ----
-        # Generate CPU pinned buffers (same tensors but on CPU)
-        self.q_lora_A_home = rand_gpu((rank, split_qo)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.q_lora_B_home = rand_gpu((split_qo, rank)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.k_lora_A_home = rand_gpu((rank, split_kv)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.k_lora_B_home = rand_gpu((split_kv, rank)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.v_lora_A_home = rand_gpu((rank, split_kv)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.v_lora_B_home = rand_gpu((split_kv, rank)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.o_lora_A_home = rand_gpu((rank, split_qo)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-        self.o_lora_B_home = rand_gpu((split_qo, rank)).transpose(0, 1).contiguous().to("cpu").pin_memory()
-
-        # Clear GPU refs
-        self.q_lora_A = self.q_lora_B = None
-        self.k_lora_A = self.k_lora_B = None
-        self.v_lora_A = self.v_lora_B = None
-        self.o_lora_A = self.o_lora_B = None
-
-        # Only build w_combined_home if llama-style heads match (MHA / llama1)
-        if n_kv == n_q:
-            num_head = n_q
-            self.w_combined_home = torch.concat(
-                [
-                    self.q_lora_A_home.T.reshape(rank, num_head, -1),
-                    self.k_lora_A_home.T.reshape(rank, num_head, -1),
-                    self.v_lora_A_home.T.reshape(rank, num_head, -1),
-                    self.o_lora_A_home.T.reshape(rank, num_head, -1),
-                    self.q_lora_B_home.T.reshape(rank, num_head, -1),
-                    self.k_lora_B_home.T.reshape(rank, num_head, -1),
-                    self.v_lora_B_home.T.reshape(rank, num_head, -1),
-                    self.o_lora_B_home.T.reshape(rank, num_head, -1),
-                ]
-            ).pin_memory()
-            self.w_combined_home = self.w_combined_home.reshape(2, 4 * rank, num_head, -1)
-            self.w_combined = None
+            self.q_lora_A = (torch.rand((rank, split_n_embed), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.q_lora_B = (torch.rand((split_n_embed, rank), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.k_lora_A = (torch.rand((rank, split_n_embed), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.k_lora_B = (torch.rand((split_n_embed, rank), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.v_lora_A = (torch.rand((rank, split_n_embed), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.v_lora_B = (torch.rand((split_n_embed, rank), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.o_lora_A = (torch.rand((rank, split_n_embed), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
+            self.o_lora_B = (torch.rand((split_n_embed, rank), 
+                                       dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3
         else:
-            # llama3 (GQA): old packing is ill-defined (KV has fewer heads).
-            # Force "bmm" path to use per-matrix copies (q/k/v/o separately).
-            self.w_combined_home = None
+            self.q_lora_A_home = ((torch.rand((rank, split_n_embed), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.q_lora_A = None
+            self.q_lora_B_home = ((torch.rand((split_n_embed, rank), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.q_lora_B = None
+            self.k_lora_A_home = ((torch.rand((rank, split_n_embed), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.k_lora_A = None
+            self.k_lora_B_home = ((torch.rand((split_n_embed, rank), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.k_lora_B = None
+            self.v_lora_A_home = ((torch.rand((rank, split_n_embed), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.v_lora_A = None
+            self.v_lora_B_home = ((torch.rand((split_n_embed, rank), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.v_lora_B = None
+            self.o_lora_A_home = ((torch.rand((rank, split_n_embed), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.o_lora_A = None
+            self.o_lora_B_home = ((torch.rand((split_n_embed, rank), 
+                                            dtype=self.data_type_, device="cuda").transpose(0, 1).contiguous() * 2 - 1) * 1e-3).to("cpu")
+            self.o_lora_B = None
+
+            num_head = self.network_config["num_attention_heads"]
+            self.w_combined_home = torch.concat(
+                [self.q_lora_A_home.T.reshape(rank, num_head, -1),
+                 self.k_lora_A_home.T.reshape(rank, num_head, -1),
+                 self.v_lora_A_home.T.reshape(rank, num_head, -1),
+                 self.o_lora_A_home.T.reshape(rank, num_head, -1),
+                 self.q_lora_B_home.T.reshape(rank, num_head, -1),
+                 self.k_lora_B_home.T.reshape(rank, num_head, -1),
+                 self.v_lora_B_home.T.reshape(rank, num_head, -1),
+                 self.o_lora_B_home.T.reshape(rank, num_head, -1)]).pin_memory()
+            self.w_combined_home = self.w_combined_home.reshape(2, 4 * rank, num_head, -1)
             self.w_combined = None
         return
  

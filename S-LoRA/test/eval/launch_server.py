@@ -6,6 +6,7 @@ import os, subprocess, time, shutil
 import socket
 import requests
 
+
 modules_loaded = "\
         module load GCCcore/13.2.0 \
         module load binutils/2.40-GCCcore-13.2.0 \
@@ -42,7 +43,7 @@ CONFIG = {
         "half_model": False,
         "enable_unified_mem_manager": True,
         "enable_gpu_profile": False,
-        "unified_mem_manager_max_size": 16,
+        "unified_mem_manager_max_size": 12,
         "num_adapter": 1,
         "num_token": 25000,
         "pool_size_lora": 0,

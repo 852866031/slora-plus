@@ -38,7 +38,7 @@ DEFAULTS = {
     "max_wait": 120.0,
     "ft_poll_interval": 3.0,
     "ft_max_wait": 60.0,
-    "total_gpu": 4,
+    "total_gpu": 1,
     "current_gpu": 0,
 }
 def internet_available(timeout=2):
@@ -639,6 +639,24 @@ async def exit_finetuning(session: aiohttp.ClientSession, server: str) -> bool:
             return resp.status == 200
     except Exception:
         return False
+    
+def max_rps_in_file(path: str) -> int:
+    """
+    Return the maximum requests-per-second (RPS) observed in the timeline file.
+    RPS is computed by floor-binning timestamps into 1-second intervals.
+    """
+    df = pd.read_csv(path)
+    if "timestamp_s" not in df.columns:
+        raise ValueError("CSV must have a 'timestamp_s' column.")
+
+    # floor() bins timestamps: e.g., 0.2 -> bin 0, 0.9 -> bin 0, 1.1 -> bin 1
+    bins = np.floor(df["timestamp_s"]).astype(int)
+
+    # count requests per second
+    rps_series = bins.value_counts()
+
+    # return maximum RPS
+    return int(rps_series.max()) if len(rps_series) > 0 else 0
 
 # ---------------- Main ----------------
 async def main():
@@ -678,7 +696,7 @@ async def main():
     proc = launch_server(args.enable_finetuning, bwd_log_index=bwd_log_index)
 
      # ---------------- Warmup (first 3 seconds) ----------------
-    WARMUP_END = 6
+    WARMUP_END = 3
     await wait_for_server(args.server, max_wait_s=args.max_wait)
     await asyncio.sleep(1.0)
     print(f"[orchestrator] Starting warmup phase (first {WARMUP_END}s)…")
@@ -719,7 +737,7 @@ async def main():
         kill_server(proc)
         if not args.ft:
             summarize(results)
-            out_stem = f"{current_dir}/results/latency_{suffix}"
+            out_stem = f"{current_dir}/results/latency_{suffix}_{max_rps_in_file(DEFAULTS['timeline_csv'])}rps"
             write_latency_csv_multi(results, out_stem, total_gpu=args.total_gpu, current_gpu=args.current_gpu)
             #write_throughput_csv(results, out_stem)
         print("[orchestrator] Done.")

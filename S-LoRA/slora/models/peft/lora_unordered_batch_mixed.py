@@ -349,7 +349,6 @@ class LoraUnorderedBatchMixed:
                     0,                                   # qkvo
                     self.infer_adapter.a_scaling,
                 )
-                delta_qA_cuda = delta_qA.clone()         # keep for diff
 
                 dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
                     q,
@@ -362,35 +361,6 @@ class LoraUnorderedBatchMixed:
                     0,
                     self.infer_adapter.a_scaling,
                 )
-                q_cuda = q.clone()
-
-                # delta_qA_pt = dispatch_bgmv_pt_exact(
-                #     input_embs.view(-1, base_layer_infer.embed_dim_),
-                #     self.key_buffer[layer_id],
-                #     self.infer_adapter.a_start,
-                #     self.infer_adapter.a_len,
-                #     self.infer_adapter.a_loc,
-                #     self.batch_req_bins,
-                #     0,
-                #     self.infer_adapter.a_scaling,
-                #     first_launch=True
-                # )                                       # shape [N , r]
-
-                # q_pt = dispatch_bgmv_pt_exact(
-                #     delta_qA_pt,                        # X  is  delta
-                #     self.value_buffer[layer_id],
-                #     self.infer_adapter.a_start,
-                #     self.infer_adapter.a_len,
-                #     self.infer_adapter.a_loc,
-                #     self.batch_req_bins,
-                #     0,
-                #     self.infer_adapter.a_scaling,
-                #     first_launch=False
-                # ).to(input_embs.dtype)
-                # q_pt.add_(q_base)                                     # shape [N , D]
-
-                #self.report_diff_percent('q', q_cuda, q_pt)
-            # delta_qA = None
 
         rotary_emb_fwd(q.view(-1, base_layer_infer.tp_q_head_num_, base_model.head_dim_),
                        infer_state.position_cos, infer_state.position_sin)
@@ -399,7 +369,6 @@ class LoraUnorderedBatchMixed:
         # k (S, H)
         torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.k_weight_,
                  out=cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
-        k_base = cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_).clone() #TODO: remove this
         if not no_lora_compute:
             delta_kA = self.delta[1]
             if self.max_b_seq_len >= 200 and self.max_lora_dim >= 64  and len(infer_state.b_seq_len) >= 2:
@@ -422,48 +391,17 @@ class LoraUnorderedBatchMixed:
                             self.key_buffer[layer_id], 
                             self.infer_adapter.a_start, self.infer_adapter.a_len, 
                             self.infer_adapter.a_loc, self.batch_req_bins, 1, self.infer_adapter.a_scaling)
-                delta_kA_cuda = delta_kA.clone()         # keep for diff
                 dispatch_bgmv(cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
                             delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                             self.batch_req_bins, 1, self.infer_adapter.a_scaling)
                 
-                k_cuda = cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_).clone()
-
-                # delta_kA_pt = dispatch_bgmv_pt_exact(
-                #     input_embs.view(-1, base_layer_infer.embed_dim_),
-                #     self.key_buffer[layer_id],
-                #     self.infer_adapter.a_start,
-                #     self.infer_adapter.a_len,
-                #     self.infer_adapter.a_loc,
-                #     self.batch_req_bins,
-                #     1,
-                #     self.infer_adapter.a_scaling,
-                #     first_launch=True
-                # )                                       # shape [N , r]
-
-                # k_pt = dispatch_bgmv_pt_exact(
-                #     delta_kA_pt,                        # X  is  delta
-                #     self.value_buffer[layer_id],
-                #     self.infer_adapter.a_start,
-                #     self.infer_adapter.a_len,
-                #     self.infer_adapter.a_loc,
-                #     self.batch_req_bins,
-                #     1,
-                #     self.infer_adapter.a_scaling,
-                #     first_launch=False
-                # ).to(input_embs.dtype)
-                # k_pt.add_(k_base)  
-                #self.report_diff_percent('k', k_cuda, k_pt)
-            # delta_kA = None
-
         rotary_emb_fwd(cache_k, infer_state.position_cos, infer_state.position_sin)
         k = cache_k.clone()
 
         # v (S, H)
         torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.v_weight_,
                  out=cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
-        v_base = cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_).clone() #TODO: remove this
         if not no_lora_compute:
             delta_vA = self.delta[2]
             if self.max_b_seq_len >= 200 and self.max_lora_dim >= 64 and len(infer_state.b_seq_len) >= 2:
@@ -486,38 +424,10 @@ class LoraUnorderedBatchMixed:
                             self.key_buffer[layer_id], 
                             self.infer_adapter.a_start, self.infer_adapter.a_len, 
                             self.infer_adapter.a_loc, self.batch_req_bins, 2, self.infer_adapter.a_scaling)
-                delta_vA_cuda = delta_vA.clone()
-                v_base = cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_).clone()
                 dispatch_bgmv(cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
                             delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                             self.batch_req_bins, 2, self.infer_adapter.a_scaling)
-                v_cuda = cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_).clone()
-                # delta_vA_pt = dispatch_bgmv_pt_exact(
-                #     input_embs.view(-1, base_layer_infer.embed_dim_),
-                #     self.key_buffer[layer_id],
-                #     self.infer_adapter.a_start,
-                #     self.infer_adapter.a_len,
-                #     self.infer_adapter.a_loc,
-                #     self.batch_req_bins,
-                #     2,
-                #     self.infer_adapter.a_scaling,
-                #     first_launch=True
-                # )                                       # shape [N , r]
-                # # v = wv*x + x*Bv.T * scaling * Av.T
-                # v_pt = dispatch_bgmv_pt_exact(
-                #     delta_vA_pt,                        # X  is  delta
-                #     self.value_buffer[layer_id],
-                #     self.infer_adapter.a_start,
-                #     self.infer_adapter.a_len,
-                #     self.infer_adapter.a_loc,
-                #     self.batch_req_bins,
-                #     2,
-                #     self.infer_adapter.a_scaling,
-                #     first_launch=False
-                # ).to(input_embs.dtype)
-                # v_pt.add_(v_base)  
-                #self.report_diff_percent('v', v_cuda, v_pt)
         v = cache_v.clone()
             # delta_vA = None
         return q, k, v
