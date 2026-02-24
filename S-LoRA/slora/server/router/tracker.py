@@ -284,7 +284,8 @@ class PrefillExecutionEstimator:
         """Predict prefill time for an inference-only batch."""
         p = self._params
         if any(v is None for v in (p.alpha, p.beta, p.c)):
-            raise ValueError("Model not fitted yet")
+            print("Model not fitted yet")
+            return 0.5
 
         n = np.asarray(token_list, dtype=float)
         if n.size == 0:
@@ -313,7 +314,8 @@ class PrefillExecutionEstimator:
 
         p = self._params
         if any(v is None for v in (p.alpha, p.beta, p.gamma, p.c)):
-            raise ValueError("Model not fitted yet")
+            print("Model not fitted yet")
+            return 0.5
 
         n_inf = np.asarray(inference_tokens, dtype=float)
         n_ft = np.asarray(finetuning_tokens, dtype=float)

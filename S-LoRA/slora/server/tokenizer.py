@@ -43,16 +43,6 @@ def get_tokenizer(
                 "Cannot use the fast tokenizer in slow tokenizer mode.")
         kwargs["use_fast"] = False
 
-    if "llama" in tokenizer_name.lower() and kwargs.get("use_fast", True):
-        print(
-            "For some LLaMA-based models, initializing the fast tokenizer may "
-            "take a long time. To eliminate the initialization time, consider "
-            f"using '{_FAST_LLAMA_TOKENIZER}' instead of the original "
-            "tokenizer.")
-        # tokenizer = LlamaTokenizer.from_pretrained(tokenizer_name)
-        # tokenizer = convert_slow_tokenizer(tokenizer)
-        # return tokenizer
-
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args,
                                                   **kwargs)
@@ -67,6 +57,5 @@ def get_tokenizer(
         print(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead.")
-    print(tokenizer)
     return tokenizer
         

@@ -1,28 +1,15 @@
-# -----------------------------------------------------------------------------
-# LlamaBackwardEngine – Back‑propagation support utilities for S‑LoRA
-# -----------------------------------------------------------------------------
-# This module contains everything required to compute analytical gradients for a
-# LoRA‑augmented Llama model **without** replaying the entire forward graph.
-
 from enum import Enum
 import hashlib
 import math
 import time
 from multiprocessing import Pipe
 from slora.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
-from slora.models.peft.layer_weights.lora_layer_weight import LoraLayerWeight
-from slora.models.peft.lora_adapter import LoraTpPartAdapter
 import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
 import pynvml
-
-from einops import rearrange
-from slora.models.llama.infer_struct import LlamaInferStateInfo
 from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_forward
-from slora.common.basemodel import PostLayerInferTpl
-from slora.server.router.mixed_req_queue import rprint
 
 def bwd_print(*args, sep=' ', end='\n'):
     color = "\033[35m"
@@ -58,80 +45,6 @@ class SharedActivations():
         self.transformer_out_activations = []
         self.attention_out_activations = []
         self.input_layer_output = None
-
-import triton
-import triton.language as tl
-
-
-@triton.jit
-def _rotary_kernel(
-    Q, Cos, Sin,
-    stride_qbs, stride_qh, stride_qd,
-    stride_cosbs, stride_cosd,
-    stride_sinbs, stride_sind,
-    max_total_len,
-    H, 
-    BLOCK_HEAD: tl.constexpr,
-    BLOCK_SEQ: tl.constexpr,
-    BLOCK_DMODEL: tl.constexpr,
-):
-    cur_head_index = tl.program_id(0)
-    cur_seq_index = tl.program_id(1)
-
-    cur_head_range = cur_head_index * BLOCK_HEAD + tl.arange(0, BLOCK_HEAD)
-    cur_seq_range = cur_seq_index * BLOCK_SEQ + tl.arange(0, BLOCK_SEQ)
-
-    dim_range0 = tl.arange(0, BLOCK_DMODEL // 2)
-    dim_range1 = tl.arange(BLOCK_DMODEL // 2, BLOCK_DMODEL)
-
-    off_q0 = cur_seq_range[:, None, None] * stride_qbs + cur_head_range[None, :, None] * stride_qh + dim_range0[None, None, :] * stride_qd
-    off_q1 = cur_seq_range[:, None, None] * stride_qbs + cur_head_range[None, :, None] * stride_qh + dim_range1[None, None, :] * stride_qd
-
-    off_dimcos_sin = cur_seq_range[:, None, None] * stride_cosbs + dim_range0[None, None, :] * stride_cosd
-
-    q0 = tl.load(Q + off_q0, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < H), other=0.0)
-    q1 = tl.load(Q + off_q1, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < H), other=0.0)
-
-    cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-    sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
-
-    out0 = q0 * cos - q1 * sin
-    out1 = q0 * sin + q1 * cos
-
-    tl.store(Q + off_q0, out0, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < H))
-    tl.store(Q + off_q1, out1, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < H))
-
-    return
-
-
-@torch.no_grad()
-def rotary_emb_fwd(q, cos, sin):
-    total_len = q.shape[0]
-    head_num = q.shape[1]
-    head_dim = q.shape[2]
-    assert q.shape[0] == cos.shape[0] and q.shape[0] == sin.shape[0], f"q shape {q.shape} cos shape {cos.shape}"
-    BLOCK_HEAD = 4
-    BLOCK_SEQ = 32
-    grid = (triton.cdiv(head_num, BLOCK_HEAD), triton.cdiv(total_len, BLOCK_SEQ))
-    if head_dim >= 128:
-        num_warps = 8
-    else:
-        num_warps = 4
-
-    _rotary_kernel[grid](
-        q, cos, sin,
-        q.stride(0), q.stride(1), q.stride(2),
-        cos.stride(0), cos.stride(1),
-        sin.stride(0), sin.stride(1),
-        total_len, head_num,
-        BLOCK_HEAD=BLOCK_HEAD,
-        BLOCK_SEQ=BLOCK_SEQ,
-        BLOCK_DMODEL=head_dim,
-        num_warps=num_warps,
-        num_stages=1,
-    )
-    return
-
 
 
 def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
@@ -220,12 +133,8 @@ class LlamaSFTBackwardService():
                 time.sleep(0.1)  # yield to CPU, avoid busy wait
         
     def _maybe_pause(self, drain_stream=True):
-        # If bwd_pause_event is missing or set → keep going
         if getattr(self, "bwd_pause_event", None) is None or self.bwd_pause_event.is_set():
             return
-        # if drain_stream and self.bwd_stream is not None:
-        #     self.bwd_stream.synchronize()
-        # Block here until resume
         if self.working: bwd_print("Paused")
         while not self.bwd_pause_event.is_set():
             time.sleep(0.1)
@@ -244,8 +153,8 @@ class LlamaSFTBackwardService():
         self.adapter_weights = AdapterWeights()
         self.adapter_weights.scaling = adapter_dict["scaling"]
         self.adapter_weights.lora_weights = adapter_dict["lora_weights"][:]
-        for layer in self.adapter_weights.lora_weights:
-            layer.requires_grad = True
+        # for layer in self.adapter_weights.lora_weights:
+        #     layer.requires_grad = True
         return
 
 
@@ -269,18 +178,14 @@ class LlamaSFTBackwardService():
         for n in request_token_info:
             logit = logit_tensor[:n, :]
             self.activations.logit_list.append(logit)
-            #print(f"Logits shape: {logit.shape}")
             logit_tensor = logit_tensor[n:, :]
 
         self.activations.concat_input_ids = self.shared_activations.concat_input_ids[:total_token_num+len(request_token_info)].clone()
         self.activations.transformer_out_activations = []
         self.activations.attention_out_activations = []
         for i in range(self.num_layers):
-            # self.activations.transformer_out_activations.append(self.shared_activations.transformer_out_activations[i][:total_token_num].float())
-            # self.activations.attention_out_activations.append(self.shared_activations.attention_out_activations[i][:total_token_num].float())
             self.activations.transformer_out_activations.append(self.shared_activations.transformer_out_activations[i][:total_token_num])
             self.activations.attention_out_activations.append(self.shared_activations.attention_out_activations[i][:total_token_num])
-        #self.activations.input_layer_output = self.shared_activations.input_layer_output[:total_token_num].float()
         self.activations.input_layer_output = self.shared_activations.input_layer_output[:total_token_num]
         return
 
@@ -292,11 +197,9 @@ class LlamaSFTBackwardService():
         logit_grad = self._logit_backward(logits_and_targets)
         self._maybe_pause()
         grad_transformer_out = self._post_layer_backward(logit_grad, self.model_weights.pre_post_weight)
-        #bwd_print("Post-layer backward done.")
         for i in reversed(range(self.num_layers)):
             self._maybe_pause()
             grad_transformer_out = self._lora_context_backward(i, grad_transformer_out, batch_seq_lens)
-            #bwd_print(f"Layer {i} backward done.")
         return True, loss, total_tokens_to_process
 
     def get_logits_and_targets(self):
@@ -392,19 +295,19 @@ class LlamaSFTBackwardService():
         # backprop for a transformer layer, start from ffn
         layer_weight = self.model_weights.trans_layers_weight[layer_id]
         ffn_input = self.activations.attention_out_activations[layer_id]      # shape [N, D]
-        grad_ffn_input = self._backprop_ffn_fp16(ffn_input, output_grad, layer_weight)
+        grad_ffn_input = self._backprop_ffn(ffn_input, output_grad, layer_weight)
         if layer_id == 0:
             last_layer_input = self.activations.input_layer_output    # shape [N, D]
         else:
             last_layer_input = self.activations.transformer_out_activations[layer_id-1]    # shape [N, D]
         # Backprop through LoRA
         self._maybe_pause()
-        grad_attn_input = self._backpop_attention_fp16(last_layer_input, grad_ffn_input, layer_weight, layer_id, batch_seq_lens)
+        grad_attn_input = self._backpop_attention(last_layer_input, grad_ffn_input, layer_weight, layer_id, batch_seq_lens)
         return grad_attn_input
     
     
     @torch.no_grad()
-    def _backprop_ffn_fp16(
+    def _backprop_ffn(
         self,
         ffn_input: torch.Tensor,          # x  (dtype can be fp16/bf16/fp32)
         output_grad: torch.Tensor,        # ∂L/∂y  with y = x + FFN(...)
@@ -439,7 +342,7 @@ class LlamaSFTBackwardService():
         return grad_ffn_input
     
     @torch.no_grad()
-    def _backpop_attention_fp16(
+    def _backpop_attention(
         self,
         last_layer_input: torch.Tensor,
         grad_ffn_input: torch.Tensor,
@@ -712,171 +615,3 @@ class LlamaSFTBackwardService():
             g.mul_(max_norm / (gn + 1e-6))
         self.adapter_weights.lora_weights[layer_id].grad = g.to(torch.float32)
         return grad_last_layer_input
-    
-
-    def _backprop_ffn(
-        self,
-        ffn_input: torch.Tensor,          # x  (dtype can be fp16/bf16/fp32)
-        output_grad: torch.Tensor,        # ∂L/∂y  with y = x + FFN(...)
-        layer_weight,
-    ):
-        eps = self.eps_
-
-        # --- Keep RMSNorm weights in fp32 for numerical stability ---
-        w_rms = layer_weight.ffn_norm_weight_.float()
-
-        # --- Keep projection weights in fp16 (match model precision) ---
-        w_gate = layer_weight.gate_proj
-        w_up   = layer_weight.up_proj
-        w_down = layer_weight.down_proj
-
-        # --- Forward re-computation ---
-        # RMSNorm must stay in fp32 to avoid loss of precision on small eps values
-        x = ffn_input.to(torch.float32)
-        dy = output_grad.to(torch.float32)
-
-        # RMSNorm forward in fp32
-        x_norm = rmsnorm_forward(x, w_rms, eps=eps)
-
-        # --- Matmuls and activations in bf16/fp16 autocast region ---
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            gate_in = x_norm @ w_gate         # [N, D_gate]
-            gate_out = torch.nn.functional.silu(gate_in)
-            up_out = x_norm @ w_up            # [N, D_up]
-
-            # Backward part
-            grad_ffn_mid = dy @ w_down.T      # [N, D_mid]
-            grad_gate_out = grad_ffn_mid * up_out
-            grad_up_out = grad_ffn_mid * gate_out
-            grad_x_norm_up = grad_up_out @ w_up.T
-
-            # SiLU gradient
-            sig = torch.sigmoid(gate_in)
-            silu_grad = sig * (1 + gate_in * (1 - sig))
-            grad_gate_in = grad_gate_out * silu_grad
-            grad_x_norm_gate = grad_gate_in @ w_gate.T
-
-            grad_x_norm = grad_x_norm_up + grad_x_norm_gate
-
-        # --- Back to fp32 for RMSNorm backward & residual add ---
-        grad_from_norm = rmsnorm_backward(x, grad_x_norm.to(torch.float32), w_rms, eps=eps)
-        grad_ffn_input = grad_from_norm + dy
-        return grad_ffn_input
-    
-     # Backprop through the LoRA augmented attention block, only this function uses the autograd of pytorch
-     # backward (20%) <=> decode (80%)
-    def _backpop_attention(self,
-                       last_layer_input: torch.Tensor, 
-                       grad_ffn_input: torch.Tensor, 
-                       layer_weight: LlamaTransformerLayerWeight,
-                       layer_id: int,
-                       batch_seq_lens: torch.Tensor):
-        # https://github.com/benfred/py-spy
-        # Build *flattened* position index for **all** tokens in this micro‑batch
-        device = last_layer_input.device
-        position_ids = torch.cat([
-            torch.arange(0, batch_seq_lens[i], device=device)
-            for i in range(len(batch_seq_lens))
-        ])
-        position_cos = self.model_weights._cos_cached.index_select(0, position_ids)  # [T, D/2]
-        position_sin = self.model_weights._sin_cached.index_select(0, position_ids)  # [T, D/2]
-
-        # ========================  Weight re‑materialisation  =================
-        # Everything is explicitly cast to *float32* for numerical robustness
-        # ---------------------------------------------------------------------
-        w_q = layer_weight.q_weight_.float()
-        w_k = layer_weight.k_weight_.float()
-        w_v = layer_weight.v_weight_.float()
-        w_o = layer_weight.o_weight_.float()
-        w_attn_norm = layer_weight.att_norm_weight_.float()
-
-        # -------------------- 1️⃣  RMSNorm (x → x_norm) -----------------------
-        last_layer_input_leaf = last_layer_input.float().detach().requires_grad_()
-        x_norm = rmsnorm_forward(last_layer_input_leaf, w_attn_norm, eps=self.eps_)
-
-         # -------------------- 2️⃣  LoRA weight materialisation -----------------
-        w_combined = self.adapter_weights.lora_weights[layer_id]
-        r = w_combined.shape[1] // 4 # Derived LoRA hyper‑params
-        H, Hd = w_combined.shape[2], w_combined.shape[3]
-
-        # To use autograd: create *leaf* clones so autograd tracks them separately
-        # w_combined_leaf = w_combined.detach().clone().requires_grad_()
-        w_combined_leaf = w_combined
-        # Unpack the packed [2,4r,H,Hd] tensor into the individual A/B matrices.
-        # Shapes follow the original LoRA paper:  A is [D,r]  and  B is [r,D].
-        qA = w_combined_leaf[0, 0 : r].reshape(r, -1).T
-        qB = w_combined_leaf[1, 0 : r].reshape(-1, r).T
-        kA = w_combined_leaf[0, r : 2 * r].reshape(r, -1).T
-        kB = w_combined_leaf[1, r : 2 * r].reshape(-1, r).T
-        vA = w_combined_leaf[0, 2 * r : 3 * r].reshape(r, -1).T
-        vB = w_combined_leaf[1, 2 * r : 3 * r].reshape(-1, r).T
-        oA = w_combined_leaf[0, 3 * r : 4 * r].reshape(r, -1).T  # [D, r]
-        oB = w_combined_leaf[1, 3 * r : 4 * r].reshape(-1, r).T  # [r, D]
-         # To use autograd: Leaf clone of x_norm so we get ∂L/∂x_norm later 
-        x_norm_leaf = x_norm.detach().requires_grad_()
-
-         # Helper: apply LoRA projection  x · A · B  * α/r ----------------------
-        def proj_lora(x, A, B):
-            output = torch.mm(torch.mm(x, A), B).mul_(self.adapter_weights.scaling)
-            return output
-        
-
-        # -------------------- 3️⃣  Linear projections Q K V --------------------
-        q_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_q)
-        k_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_k)
-        v_base = torch.mm(x_norm_leaf.view(-1, self.embed_dim_), w_v)
-
-        q_  = q_base + proj_lora(x_norm_leaf, qA, qB)
-        k_  = k_base + proj_lora(x_norm_leaf, kA, kB)
-        v_  = v_base + proj_lora(x_norm_leaf, vA, vB)
-        rotary_emb_fwd(q_.view(-1, H, Hd), position_cos, position_sin)
-        rotary_emb_fwd(k_.view(-1, H, Hd), position_cos, position_sin)
-        self._maybe_pause()
-        # -------------------- 4️⃣  Masked causal attention --------------------
-        S = x_norm.size(0) 
-        D = x_norm.size(1)  
-        qh, kh, vh = q_.view(S, H, Hd), k_.view(S, H, Hd), v_.view(S, H, Hd)
-        ctx = torch.empty_like(qh)
-        
-        B = batch_seq_lens.shape[0]
-        scale = 1.0 / (Hd ** 0.5)
-
-        b_start_loc = torch.cat([torch.tensor([0], device=device), batch_seq_lens.cumsum(dim=0)[:-1]])
-
-        for i in range(B):
-            st, ln = b_start_loc[i], batch_seq_lens[i]
-            q_blk  = qh[st:st+ln].transpose(0, 1)          # [H,L,D]
-            k_blk  = kh[st:st+ln].transpose(0, 1)
-            v_blk  = vh[st:st+ln].transpose(0, 1)
-
-            att = (q_blk @ k_blk.transpose(-1, -2)) * scale
-            att.masked_fill_(torch.triu(torch.ones_like(att), 1).bool(), float('-inf'))
-            att = torch.softmax(att, dim=-1)
-            ctx_blk = (att @ v_blk).transpose(0, 1)        # [L,H,D]
-            ctx[st:st+ln] = ctx_blk
-
-        # Flatten back to [tokens, D]
-        ctx_flat = ctx.reshape(S, D)
-
-        # -------------------- 5️⃣  Output projection (O) ----------------------
-        o_base_ = torch.mm(ctx_flat, w_o)
-        o_lora_ = proj_lora(ctx_flat, oA, oB)
-        o_total = o_base_ + o_lora_
-
-        # Residual add: x_prev + Attn_out
-        input_embs = last_layer_input_leaf + o_total.view(-1, self.embed_dim_)
-
-        # -------------------- 6️⃣  Backward pass ------------------------------
-        grad_o = grad_ffn_input.float()
-        self._maybe_pause()
-        input_embs.backward(grad_o)
-        
-        # -------------------- 7️⃣  Gradient clipping & copy -------------------
-        g = w_combined_leaf.grad
-        max_norm = 1
-        if g is not None:
-            grad_norm = g.norm()                           # ‖g‖₂   (scalar tensor)
-            if grad_norm > max_norm:                       # scale *in-place*
-                g.mul_(max_norm / (grad_norm + 1e-6))
-
-        return last_layer_input_leaf.grad

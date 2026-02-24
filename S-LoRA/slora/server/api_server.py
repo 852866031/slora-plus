@@ -592,7 +592,7 @@ def main():
     parser.add_argument("--no-lora", action="store_true")
     ''' end of slora arguments '''
     ''' finetune arguments '''
-    parser.add_argument("--scheduler", type=str, default="slora")
+    parser.add_argument("--scheduler", type=str, default="slora_plus")
     parser.add_argument("--finetuning_config_path", type=str, default="")
     parser.add_argument("--mem_manager_log_path", type=str, default=None)
     parser.add_argument("--half_model", action="store_true")

@@ -59,7 +59,7 @@ class UnifiedMemoryAllocator:
                         device=self.device, dtype=self.dtype)
             for _ in range(self.layer_num)
         ]
-
+        print(f"UnifiedMemoryAllocator initialized with {self.tot_size} of {self.gpu_pools[0].shape[1:]} pages per layer, Page size={get_tensor_size_kb(self.head_num * self.head_dim, self.dtype):.2f} KB, dtype={self.dtype}")
         # bitmaps shared by all layers
         self.page_type_map = torch.zeros(self.tot_size, dtype=torch.long, device=self.device)
         self.free_bitmap = torch.ones(self.tot_size, dtype=torch.bool, device=self.device)  # True=free

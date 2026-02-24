@@ -30,6 +30,14 @@ def tensor_hash(t: torch.Tensor, algo="sha256") -> str:
     h.update(t.detach().cpu().numpy().tobytes())
     return h.hexdigest()
 
+def kernel_bgmv(y: torch.Tensor , x: torch.Tensor, w: torch.Tensor, start_indicies: torch.Tensor,
+                   lora_ranks: torch.Tensor, loc_indicies: torch.Tensor, indicies: torch.Tensor,
+                   qkvo: int, lora_scales: torch.Tensor):
+    w_ld = w.size(1) * w.size(2)
+    h_in = x.size(1)
+    h_out = y.size(1)
+    w_valid = h_in if (h_out < h_in) else h_out
+    dispatch_bgmv(y, x, w, start_indicies, lora_ranks, loc_indicies, indicies, qkvo, lora_scales, w_ld, w_valid)
 
 class LoraUnorderedBatchMixed:
     def __init__(self, base_model, adapters, infer_adapter=None, finetuning_adapter= None, infer_adapter_alt=None, enable_unified_mem_manager=False):
@@ -285,20 +293,12 @@ class LoraUnorderedBatchMixed:
         cache_k, cache_v = layer_infer._pre_cache_kv(infer_state, layer_weight)
         # gen new q, k, v (batch different adapters)
         if self.enable_unified_mem_manager:
-            start = time.time()
             q = self._lora_get_qkv_alt(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
-            #if layer_id==16: print(f"\tLayer {layer_id} get qkv time: {time.time() - start:.4f}s")
             input1 = None
-            start = time.time()
             layer_infer._post_cache_kv(cache_k, cache_v, infer_state, layer_weight)
-            #if layer_id==16: print(f"\tLayer {layer_id} post cache kv time: {time.time() - start:.4f}s")
             # compute attention
-            start = time.time()
             o = layer_infer._context_attention_kernel(q, cache_k, cache_v, infer_state, layer_weight)
-            #if layer_id==16: print(f"\tLayer {layer_id} attention kernel time: {time.time() - start:.4f}s")
-            start = time.time()
             o = self._lora_get_o_alt(layer_id, o, infer_state, no_lora_compute)
-            #if layer_id==16: print(f"\tLayer {layer_id} get o time: {time.time() - start:.4f}s")
         else:
             q, k, v = self._lora_get_qkv(layer_id, input1, cache_k, cache_v, infer_state, no_lora_compute)
             input1 = None
@@ -338,7 +338,7 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, self.kv_embed_dim, 
                                          0, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(                                             # 1️⃣ SHRINK  (A-side)
+                kernel_bgmv(                                             # 1️⃣ SHRINK  (A-side)
                     delta_qA,
                     input_embs.view(-1, base_layer_infer.embed_dim_),
                     self.key_buffer[layer_id],
@@ -350,7 +350,7 @@ class LoraUnorderedBatchMixed:
                     self.infer_adapter.a_scaling,
                 )
 
-                dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+                kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                     q,
                     delta_qA,
                     self.value_buffer[layer_id],
@@ -387,11 +387,11 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, self.kv_embed_dim, 
                                          1, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(delta_kA, input_embs.view(-1, base_layer_infer.embed_dim_), 
+                kernel_bgmv(delta_kA, input_embs.view(-1, base_layer_infer.embed_dim_), 
                             self.key_buffer[layer_id], 
                             self.infer_adapter.a_start, self.infer_adapter.a_len, 
                             self.infer_adapter.a_loc, self.batch_req_bins, 1, self.infer_adapter.a_scaling)
-                dispatch_bgmv(cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
+                kernel_bgmv(cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
                             delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                             self.batch_req_bins, 1, self.infer_adapter.a_scaling)
@@ -420,11 +420,11 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, self.kv_embed_dim, 
                                          2, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(delta_vA, input_embs.view(-1, base_layer_infer.embed_dim_), 
+                kernel_bgmv(delta_vA, input_embs.view(-1, base_layer_infer.embed_dim_), 
                             self.key_buffer[layer_id], 
                             self.infer_adapter.a_start, self.infer_adapter.a_len, 
                             self.infer_adapter.a_loc, self.batch_req_bins, 2, self.infer_adapter.a_scaling)
-                dispatch_bgmv(cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
+                kernel_bgmv(cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
                             delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                             self.batch_req_bins, 2, self.infer_adapter.a_scaling)
@@ -463,7 +463,7 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, self.kv_embed_dim, 
                                          0, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(                                             
+                kernel_bgmv(                                             
                     self.delta[0],
                     input_embs.view(-1, base_layer_infer.embed_dim_),
                     buffer_address,
@@ -475,7 +475,7 @@ class LoraUnorderedBatchMixed:
                     a_scaling,
                 )
 
-                dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+                kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                     q,
                     self.delta[0],
                     buffer_address,
@@ -510,7 +510,7 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, self.kv_embed_dim, 
                                          1, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(                                             
+                kernel_bgmv(                                             
                     self.delta[1],
                     input_embs.view(-1, base_layer_infer.embed_dim_),
                     buffer_address,
@@ -522,7 +522,7 @@ class LoraUnorderedBatchMixed:
                     a_scaling,
                 )
 
-                dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+                kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                     cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_),
                     self.delta[1],
                     buffer_address,
@@ -557,7 +557,7 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, self.kv_embed_dim, 
                                          2, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(                                             
+                kernel_bgmv(                                             
                     self.delta[2],
                     input_embs.view(-1, base_layer_infer.embed_dim_),
                     buffer_address,
@@ -569,7 +569,7 @@ class LoraUnorderedBatchMixed:
                     a_scaling,
                 )
 
-                dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+                kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                     cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_),
                      self.delta[2],
                     buffer_address,
@@ -606,12 +606,12 @@ class LoraUnorderedBatchMixed:
                                          infer_state.b_seq_len, self.req_bins, base_layer_infer.embed_dim_, 
                                          3, self.max_lora_dim, self.max_b_seq_len)
             else:
-                dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
+                kernel_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
                             self.key_buffer[layer_id], 
                             self.infer_adapter.a_start, self.infer_adapter.a_len, 
                             self.infer_adapter.a_loc, self.batch_req_bins, 3, self.infer_adapter.a_scaling)
                 
-                dispatch_bgmv(o, delta_oA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+                kernel_bgmv(o, delta_oA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                             self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                             self.batch_req_bins, 3, self.infer_adapter.a_scaling)
                 o_cuda = o.clone()
@@ -645,12 +645,12 @@ class LoraUnorderedBatchMixed:
                                          3, self.max_lora_dim, self.max_b_seq_len)
             else:
                 
-                dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
+                kernel_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
                             buffer_address, 
                             a_start_lora, a_len_lora, 
                             gpu_a_loc_lora_a, self.batch_req_bins, 3, a_scaling)
 
-                dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
+                kernel_bgmv(o, delta_oA, buffer_address, a_start_lora, 
                             a_len_lora, gpu_a_loc_lora_b, 
                             self.batch_req_bins, 3, a_scaling)   
         return o
@@ -796,11 +796,11 @@ class LoraUnorderedBatchMixed:
         if not no_lora_compute:
             # mark_start("get_q")
             delta_qA = self.delta[0]
-            dispatch_bgmv(delta_qA, input_embs.view(-1, base_layer_infer.embed_dim_), 
+            kernel_bgmv(delta_qA, input_embs.view(-1, base_layer_infer.embed_dim_), 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
                           self.infer_adapter.a_loc, self.req_bins, 0, self.infer_adapter.a_scaling)
-            dispatch_bgmv(q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+            kernel_bgmv(q, delta_qA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                           self.req_bins, 0, self.infer_adapter.a_scaling)
 
@@ -814,11 +814,11 @@ class LoraUnorderedBatchMixed:
         if not no_lora_compute:
             # mark_start("get_k")
             delta_kA = self.delta[1]
-            dispatch_bgmv(delta_kA, input_embs.view(-1, base_layer_infer.embed_dim_), 
+            kernel_bgmv(delta_kA, input_embs.view(-1, base_layer_infer.embed_dim_), 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
                           self.infer_adapter.a_loc, self.req_bins, 1, self.infer_adapter.a_scaling)
-            dispatch_bgmv(cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
+            kernel_bgmv(cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
                           delta_kA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                           self.req_bins, 1, self.infer_adapter.a_scaling)
@@ -834,11 +834,11 @@ class LoraUnorderedBatchMixed:
         if not no_lora_compute:
             # mark_start("get_v")
             delta_vA = self.delta[2]
-            dispatch_bgmv(delta_vA, input_embs.view(-1, base_layer_infer.embed_dim_), 
+            kernel_bgmv(delta_vA, input_embs.view(-1, base_layer_infer.embed_dim_), 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
                           self.infer_adapter.a_loc, self.req_bins, 2, self.infer_adapter.a_scaling)
-            dispatch_bgmv(cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
+            kernel_bgmv(cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_), 
                           delta_vA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                           self.req_bins, 2, self.infer_adapter.a_scaling)
@@ -860,13 +860,13 @@ class LoraUnorderedBatchMixed:
                     self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
     
         if not no_lora_compute:
-            dispatch_bgmv(                                             
+            kernel_bgmv(                                             
                 self.delta[0], input_embs.view(-1, base_layer_infer.embed_dim_),
                 buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a,
                 self.req_bins, 0, a_scaling,
             )
 
-            dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+            kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                 q, self.delta[0],
                 buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_b,
                 self.req_bins, 0, a_scaling,
@@ -878,9 +878,9 @@ class LoraUnorderedBatchMixed:
         # k (bs, H)
         torch.mm(input_embs.view(-1, base_layer_infer.embed_dim_), base_layer_weight.k_weight_,
                  out=cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_))
-
+        
         if not no_lora_compute:
-            dispatch_bgmv(                                             
+            kernel_bgmv(                                             
                 self.delta[1],
                 input_embs.view(-1, base_layer_infer.embed_dim_),
                 buffer_address,
@@ -891,8 +891,7 @@ class LoraUnorderedBatchMixed:
                 1,                                   # qkvo
                 a_scaling,
             )
-
-            dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+            kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                 cache_k.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_),
                 self.delta[1],
                 buffer_address,
@@ -914,7 +913,7 @@ class LoraUnorderedBatchMixed:
 
         if not no_lora_compute:
             # mark_start("get_v")
-            dispatch_bgmv(                                             
+            kernel_bgmv(                                             
                 self.delta[2],
                 input_embs.view(-1, base_layer_infer.embed_dim_),
                 buffer_address,
@@ -926,7 +925,7 @@ class LoraUnorderedBatchMixed:
                 a_scaling,
             )
 
-            dispatch_bgmv(                                             # 2️⃣ EXPAND (B-side)
+            kernel_bgmv(                                             # 2️⃣ EXPAND (B-side)
                 cache_v.view(-1, base_model.tp_k_head_num_ * base_model.head_dim_),
                     self.delta[2],
                 buffer_address,
@@ -951,12 +950,12 @@ class LoraUnorderedBatchMixed:
         if not no_lora_compute:
             # mark_start("get_o")
             delta_oA = self.delta[0]
-            dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
+            kernel_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
                           self.key_buffer[layer_id], 
                           self.infer_adapter.a_start, self.infer_adapter.a_len, 
                           self.infer_adapter.a_loc, self.req_bins, 3, self.infer_adapter.a_scaling)
             
-            dispatch_bgmv(o, delta_oA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
+            kernel_bgmv(o, delta_oA, self.value_buffer[layer_id], self.infer_adapter.a_start, 
                           self.infer_adapter.a_len, self.infer_adapter.a_loc, 
                           self.req_bins, 3, self.infer_adapter.a_scaling)
             # delta_oA = None
@@ -976,12 +975,12 @@ class LoraUnorderedBatchMixed:
             buffer_address, a_start_lora, a_len_lora, gpu_a_loc_lora_a, gpu_a_loc_lora_b, a_scaling = \
                 self.infer_adapter_alt.get_lora_params_at_layer(layer_id)
             delta_oA = self.delta[0]
-            dispatch_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
+            kernel_bgmv(delta_oA, input.view(-1, base_layer_infer.embed_dim_), 
                             buffer_address, 
                             a_start_lora, a_len_lora, 
                             gpu_a_loc_lora_a, self.req_bins, 3, a_scaling)
             #self.check_invalid_probs(delta_oA)
-            dispatch_bgmv(o, delta_oA, buffer_address, a_start_lora, 
+            kernel_bgmv(o, delta_oA, buffer_address, a_start_lora, 
                             a_len_lora, gpu_a_loc_lora_b, 
                             self.req_bins, 3, a_scaling) 
 

@@ -42,7 +42,6 @@ class TpPartBaseModel:
         self.mem_manager_log_path = mem_manager_log_path
         self.enable_unified_mem_manager = enable_unified_mem_manager
         self.unified_mem_manager_max_size = unified_mem_manager_max_size
-        print("half_model:", self.half_model)
         self._init_config()
         if self.half_model:
             self.config["n_layer"] = int(self.config["n_layer"] / 2)

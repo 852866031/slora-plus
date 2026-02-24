@@ -80,11 +80,8 @@ class ModelRpcServer(rpyc.Service):
         model_cfg = get_model_config(weight_dir, dummy=input_params.dummy)
         if half_model:
             model_cfg["num_hidden_layers"] = int(model_cfg["num_hidden_layers"] / 2)
-        print("weight dir", weight_dir)
         try:
             self.model_type = model_cfg["model_type"]
-            print(model_cfg.keys())
-            print("model type:", self.model_type)
             if self.model_type == "llama":
                 if "Llama-3" in weight_dir:
                     self.model = Llama3TpPartModel(rank_id, world_size, weight_dir,
@@ -126,6 +123,7 @@ class ModelRpcServer(rpyc.Service):
         self.adapter_id = {}
         target_adapter_dir = None
         num = 0
+        print(f"Prepare to load {len(adapter_dirs)} adapters")
         for adapter_dir in tqdm(adapter_dirs, desc="load adapters"):
             print(f"Adding adapter from {adapter_dir}, number {num}")
             num += 1
@@ -137,7 +135,9 @@ class ModelRpcServer(rpyc.Service):
 						   prefetch_stream=prefetch_stream))
 
         finetuning_lora_path = input_params.finetuning_params.finetuning_lora_path
-        if finetuning_lora_path != "":
+        self.finetuning_adapter = None
+        self.backward_service = None
+        if finetuning_lora_path != None:
             self.adapter_id[finetuning_lora_path] = len(self.adapters)
             print("Loading finetuning adapter", finetuning_lora_path)
             self.adapters.append(LoraTpPartAdapter(rank_id, world_size, finetuning_lora_path, model_cfg,
@@ -149,15 +149,13 @@ class ModelRpcServer(rpyc.Service):
             self.finetuning_adapter.is_finetuning = True
             self.current_epoch = 0
             self.total_epochs = input_params.finetuning_params.num_epochs
-            self.backward_service = None
             self.bwd_pause_event = None
             if True:
                 rpc_recv, bwd_send = Pipe()
                 bwd_recv, rpc_send = Pipe()
                 self.bwd_pause_event = mp.Event()
                 self.bwd_pause_event.set()   # set = RUNNING; clear = PAUSED
-
-                backward_service_obj = LlamaSFTBackwardService(
+                backward_service_obj = self.model.backward_service_class(
                     self.model.config, bwd_recv, bwd_send,
                     lr=input_params.finetuning_params.learning_rate,
                     weight_decay=input_params.finetuning_params.weight_decay,

@@ -25,27 +25,27 @@ class FinetuneParams:
         self.model_weightdir = model_weightdir
         self.tokenizor_mode = tokenizor_mode
         self.trust_remote_code = trust_remote_code
-        if len(finetuning_config.keys())!=0:
-            self.finetuning_type = finetuning_config.get("finetuning_type", "SFT")
-            self.finetuning_data_path = finetuning_config.get("finetuning_data_path", None)
-            self.finetuning_prepare_size = finetuning_config.get("finetuning_prepare_size", 0)
-            self.finetuning_lora_path = finetuning_config.get("finetuning_lora_path", None)
-            self.reference_lora_path = finetuning_config.get("reference_lora_path", None)
-            self.learning_rate = finetuning_config.get("learning_rate", 1e-4)
-            self.weight_decay = finetuning_config.get("weight_decay", 0.01)
-            self.gamma = finetuning_config.get("gamma", 0.95)
-            self.alpha = finetuning_config.get("alpha", 0.5)
-            self.beta = finetuning_config.get("beta", 0.02)
-            self.lambdas = finetuning_config.get("lambda", 2)
-            self.eval_steps = finetuning_config.get("eval_steps", 100)
-            self.num_epochs = finetuning_config.get("num_epochs", 1)
-            self.max_saved_finetuning_tokens = finetuning_config.get("max_saved_finetuning_tokens", 512)
-            self.max_finetuning_tokens_in_batch = finetuning_config.get("max_finetuning_tokens_in_batch", 256)
-            self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
-            self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
-            self.start_on_launch = finetuning_config.get("start_on_launch", True)
-        else:
-            self.finetuning_lora_path = None
+        if finetuning_config == None:
+            finetuning_config = {}
+        self.finetuning_type = finetuning_config.get("finetuning_type", "SFT")
+        self.finetuning_data_path = finetuning_config.get("finetuning_data_path", None)
+        self.finetuning_prepare_size = finetuning_config.get("finetuning_prepare_size", 0)
+        self.finetuning_lora_path = finetuning_config.get("finetuning_lora_path", None)
+        self.reference_lora_path = finetuning_config.get("reference_lora_path", None)
+        self.learning_rate = finetuning_config.get("learning_rate", 1e-4)
+        self.weight_decay = finetuning_config.get("weight_decay", 0.01)
+        self.gamma = finetuning_config.get("gamma", 0.95)
+        self.alpha = finetuning_config.get("alpha", 0.5)
+        self.beta = finetuning_config.get("beta", 0.02)
+        self.lambdas = finetuning_config.get("lambda", 2)
+        self.eval_steps = finetuning_config.get("eval_steps", 100)
+        self.num_epochs = finetuning_config.get("num_epochs", 1)
+        self.max_saved_finetuning_tokens = finetuning_config.get("max_saved_finetuning_tokens", 512)
+        self.max_finetuning_tokens_in_batch = finetuning_config.get("max_finetuning_tokens_in_batch", 256)
+        self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
+        self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
+        self.start_on_launch = finetuning_config.get("start_on_launch", True)
+
 
 class SLOParams:
     def __init__(

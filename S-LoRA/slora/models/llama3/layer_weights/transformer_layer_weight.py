@@ -66,11 +66,3 @@ class Llama3TransformerLayerWeight(LlamaTransformerLayerWeight):
         if key_o in weights:
             wo = weights[key_o][:, split_q_out * self.tp_rank_: split_q_out * (self.tp_rank_ + 1)]
             self.o_weight_ = self._cuda(wo.transpose(0, 1))
-
-        #print qkvo dimensions
-        if self.layer_num_ == 0:
-            print(f"Layer {self.layer_num_} QKV0 shapes:")
-            print(f"  Q weight: {self.q_weight_.shape}")
-            print(f"  K weight: {self.k_weight_.shape}")      
-            print(f"  V weight: {self.v_weight_.shape}")
-            print(f"  O weight: {self.o_weight_.shape}")

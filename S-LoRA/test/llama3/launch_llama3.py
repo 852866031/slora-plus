@@ -10,17 +10,17 @@ CONFIG = {
     "online": {
         "base_model": "meta-llama/Meta-Llama-3-8B",
         "adapter_dirs": [
-            "yzdnaufan/Llama-3-8b-Alpaca-Lora",
+            "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora",
         ],
-        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/finetuning_config.json",
-        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/config/no_finetuning_config.json",
+        "finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/finetuning_config.json",
+        "no_finetuning_config_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/no_finetuning_config.json",
     },
 
     "defaults": {
         "half_model": False,
         "enable_unified_mem_manager": True,
         "enable_gpu_profile": False,
-        "unified_mem_manager_max_size": 8,
+        "unified_mem_manager_max_size": 6,
         "num_adapter": 1,
         "num_token": 25000,
         "pool_size_lora": 0,
@@ -87,6 +87,8 @@ if __name__ == "__main__":
 
     if args.enable_finetuning:
         cmd += f" --finetuning_config_path {BASE['finetuning_config_path']}"
+    else:
+        cmd += f" --finetuning_config_path {BASE['no_finetuning_config_path']}"
 
     # adapter dirs
     for adapter_dir in BASE["adapter_dirs"]:

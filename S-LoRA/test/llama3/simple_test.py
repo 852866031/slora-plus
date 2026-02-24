@@ -1,111 +1,333 @@
-# simple_benchmark.py
-"""A minimal async benchmark script that sends 20 inference requests to an
-HTTP server exposing the /generate endpoint used by the Slora examples.
-
-* The first 10 requests are fired immediately.
-* The script then waits **4 seconds** before firing the next 10 requests.
-
-Only two external dependencies are required:
-    aiohttp  (pip install aiohttp)
-    tqdm     (optional — progress bar)
-
-Usage
------
-$ python simple_benchmark.py --server http://localhost:8000
+#!/usr/bin/env python3
 """
-from __future__ import annotations
+orchestrate_run_once.py
+
+- Launches launch_llama3.py in a separate process group
+- Forces unbuffered child output so server prints are not "missing"
+- Streams server logs live
+- Forwards Ctrl+C (SIGINT) to the server process group and kills it *immediately-ish*
+"""
 
 import argparse
 import asyncio
 import json
+import os
+import signal
+import sys
 import time
-from pathlib import Path
-from typing import Dict, List
+from typing import Dict, Optional
 
 import aiohttp
-from tqdm import tqdm
-import time
-from launch_llama3 import base_model, adapter_dirs
 
-# -----------------------------------------------------------------------------
-# Helper – build a request payload
-# -----------------------------------------------------------------------------
 
-def make_payload(prompt: str, output_len: int) -> Dict:
-    """Return the JSON body expected by the /generate route."""
+# ----------------------------
+# Request helpers
+# ----------------------------
+def make_payload(prompt: str, base_model: str, lora_dir: str, max_new_tokens: int = 10) -> Dict:
     return {
-        "model_dir": base_model,         # adapt as needed
-        #"lora_dir": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/test_e2e/finetuning_adapter",               # adapt as needed
-        "lora_dir": "tloen/alpaca-lora-7b",
+        "model_dir": base_model,
+        "lora_dir": lora_dir,
         "inputs": prompt,
         "parameters": {
             "do_sample": False,
             "ignore_eos": True,
-            "max_new_tokens": 10,
+            "max_new_tokens": max_new_tokens,
         },
     }
 
-# -----------------------------------------------------------------------------
-# Core request coroutine
-# -----------------------------------------------------------------------------
 
-async def send_request(session: aiohttp.ClientSession, server: str, idx: int, prompt: str, output_len: int) -> float:
-    """Send *one* generation request and return the latency (s)."""
-    url = f"{server.rstrip('/')}/generate"
-    payload = make_payload(prompt, output_len)
-
-    start = time.time()
-    async with session.post(url, json=payload) as resp:
-        # We assume the server streams chunks but reading the whole body is fine
-        body = await resp.read()
-        try:
-            result = json.loads(body)
-            generated = result.get("generated_text", ["<no-text>"])[0]
-        except json.JSONDecodeError:
-            generated = body.decode(errors="replace")
-    latency = time.time() - start
-
-    print(f"[req {idx:02d}] prompt: {prompt} latency={latency*1000:7.1f} ms  →  {generated}")
-    return latency
+async def try_health(session: aiohttp.ClientSession, server: str, timeout_s: float = 1.0) -> bool:
+    try:
+        async with session.get(f"{server.rstrip('/')}/health", timeout=timeout_s) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
-async def run_benchmark(
+async def try_generate_probe(
+    session: aiohttp.ClientSession,
     server: str,
-    prompts: List[str] = ["Capital of France is", "i am feeling a bit restless these days <label>"],
-    per_wave: int = 10,
-    wait_interval: float = 1,
-    num_waves: int = 5
-):
-    """Fire N requests in multiple waves with a delay between them, using rotating prompts."""
+    base_model: str,
+    lora_dir: str,
+    timeout_s: float = 2.0,
+) -> bool:
+    try:
+        async with session.post(
+            f"{server.rstrip('/')}/generate",
+            json=make_payload("ping", base_model=base_model, lora_dir=lora_dir, max_new_tokens=2),
+            timeout=timeout_s,
+        ) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
-    requests: List[tuple[int, str, int]] = [
-        (i, prompts[i % len(prompts)], 32) for i in range(per_wave * num_waves)
+
+async def wait_for_server(
+    server: str,
+    base_model: str,
+    lora_dir: str,
+    max_wait_s: float = 180.0,
+    poll_period_s: float = 0.5,
+) -> None:
+    t0 = time.time()
+    async with aiohttp.ClientSession() as session:
+        while True:
+            if await try_health(session, server) or await try_generate_probe(session, server, base_model, lora_dir):
+                print(f"[orchestrator] Server is up ✅ at {server}", flush=True)
+                return
+            if time.time() - t0 > max_wait_s:
+                raise TimeoutError(f"Server didn't become healthy within {max_wait_s:.1f}s")
+            await asyncio.sleep(poll_period_s)
+
+
+async def send_one_request(
+    server: str,
+    prompt: str,
+    base_model: str,
+    lora_dir: str,
+    max_new_tokens: int,
+) -> str:
+    url = f"{server.rstrip('/')}/generate"
+    payload = make_payload(prompt, base_model=base_model, lora_dir=lora_dir, max_new_tokens=max_new_tokens)
+
+    async with aiohttp.ClientSession(headers={"User-Agent": "RunOnceClient"}) as session:
+        start = time.time()
+        async with session.post(url, json=payload) as resp:
+            body = await resp.read()
+            latency = time.time() - start
+
+            try:
+                result = json.loads(body)
+                generated = result.get("generated_text", ["<no-text>"])[0]
+            except json.JSONDecodeError:
+                generated = body.decode(errors="replace")
+
+    print(f"[orchestrator] latency={latency*1000:.1f} ms", flush=True)
+    return generated
+
+
+# ----------------------------
+# Process orchestration
+# ----------------------------
+def terminate_process_tree_fast(p, grace_s: float = 0.15) -> None:
+    """
+    Immediate-ish shutdown:
+      - POSIX: SIGINT to process group, short grace, then SIGKILL
+      - Windows: CTRL_BREAK_EVENT, short grace, then kill()
+    """
+    if p is None or p.poll() is not None:
+        return
+
+    if os.name == "posix":
+        try:
+            pgid = os.getpgid(p.pid)
+            os.killpg(pgid, signal.SIGINT)
+        except Exception:
+            # fallback
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+        # Very short grace period
+        t0 = time.time()
+        while time.time() - t0 < grace_s:
+            if p.poll() is not None:
+                return
+            time.sleep(0.01)
+
+        # Hard kill
+        try:
+            pgid = os.getpgid(p.pid)
+            os.killpg(pgid, signal.SIGKILL)
+        except Exception:
+            try:
+                p.kill()
+            except Exception:
+                pass
+    else:
+        # Windows
+        try:
+            p.send_signal(signal.CTRL_BREAK_EVENT)
+        except Exception:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+
+        t0 = time.time()
+        while time.time() - t0 < grace_s:
+            if p.poll() is not None:
+                return
+            time.sleep(0.01)
+
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+
+async def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--launcher", default="launch_llama3.py", help="Path to launch_llama3.py")
+    ap.add_argument("--port", type=int, default=9000)
+    ap.add_argument("--rank_id", type=int, default=0)
+    ap.add_argument("--bwd_log_index", type=int, default=0)
+    ap.add_argument("--enable-finetuning", action="store_true")
+
+    # request params
+    ap.add_argument("--prompt", default="Instruction:\nSay hello in one short sentence.\n### Response: ")
+    ap.add_argument("--max_new_tokens", type=int, default=10)
+
+    # These should match what your server expects; override if needed
+    ap.add_argument("--base_model", default="meta-llama/Meta-Llama-3-8B")
+    ap.add_argument("--lora_dir", default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora")
+    #yzdnaufan/Llama-3-8b-Alpaca-Lora
+    # wait params
+    ap.add_argument("--max_wait_s", type=float, default=240.0)
+    ap.add_argument("--poll_period_s", type=float, default=0.5)
+
+    # log behavior
+    ap.add_argument("--use-stdbuf", action="store_true", help="(POSIX only) wrap child with stdbuf -oL -eL")
+
+    args = ap.parse_args()
+
+    server = f"http://127.0.0.1:{args.port}"
+
+    # Build launcher command
+    cmd = [
+        sys.executable,
+        "-u",  # IMPORTANT: unbuffered child output so prints appear immediately
+        args.launcher,
+        "--port",
+        str(args.port),
+        "--rank_id",
+        str(args.rank_id),
+        "--bwd_log_index",
+        str(args.bwd_log_index),
     ]
+    if args.enable_finetuning:
+        cmd.append("--enable-finetuning")
 
-    async with aiohttp.ClientSession(headers={"User-Agent": "SimpleBenchmark"}) as session:
-        for wave_idx in range(num_waves):
-            print(f"\nStarting wave {wave_idx + 1}/{num_waves}…")
-            wave_reqs = [
-                send_request(session, server, idx, prompt, out_len)
-                for idx, prompt, out_len in requests[wave_idx * per_wave : (wave_idx + 1) * per_wave]
-            ]
-            await asyncio.gather(*wave_reqs)
+    # Optional: force line-buffering at the OS level for non-python output (POSIX only)
+    if args.use_stdbuf and os.name == "posix":
+        cmd = ["stdbuf", "-oL", "-eL"] + cmd
 
-            if wave_idx < num_waves - 1:
-                print(f"\nWaiting {wait_interval} seconds before the next wave…\n")
-                await asyncio.sleep(wait_interval)
+    print("[orchestrator] launching:", " ".join(cmd), flush=True)
 
-    print("\nBenchmark finished ✅")
-# -----------------------------------------------------------------------------
-# Entrypoint
-# -----------------------------------------------------------------------------
+    import subprocess
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Minimal async benchmark for /generate endpoint")
-    parser.add_argument("--server", type=str, default="http://localhost:8000", help="Base URL of inference server")
-    args = parser.parse_args()
+    p: Optional[subprocess.Popen] = None
+    log_task: Optional[asyncio.Task] = None
+
+    # Ensure child is unbuffered even if python -u isn't honored by some wrapper
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    stop_event = asyncio.Event()
 
     try:
-        asyncio.run(run_benchmark(args.server))
+        # Start server in its own process group so we can signal the whole group
+        if os.name == "posix":
+            p = subprocess.Popen(
+                cmd,
+                preexec_fn=os.setsid,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,  # line-buffer in parent reader
+                env=env,
+            )
+        else:
+            p = subprocess.Popen(
+                cmd,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                env=env,
+            )
+
+        # Stream logs in the background
+        async def pump_logs() -> None:
+            assert p is not None
+            assert p.stdout is not None
+            loop = asyncio.get_running_loop()
+            while True:
+                line = await loop.run_in_executor(None, p.stdout.readline)
+                if not line:
+                    break
+                print("[server]", line.rstrip(), flush=True)
+
+        log_task = asyncio.create_task(pump_logs())
+
+        # Forward Ctrl+C to the child process group and stop ASAP (POSIX)
+        loop = asyncio.get_running_loop()
+
+        def _on_sigint() -> None:
+            if p is not None and p.poll() is None:
+                terminate_process_tree_fast(p, grace_s=0.1)
+            stop_event.set()
+
+        try:
+            loop.add_signal_handler(signal.SIGINT, _on_sigint)
+        except NotImplementedError:
+            # Windows: we rely on KeyboardInterrupt handler below
+            pass
+
+        # Wait for server (break early if Ctrl+C)
+        waiter = asyncio.create_task(
+            wait_for_server(
+                server,
+                base_model=args.base_model,
+                lora_dir=args.lora_dir,
+                max_wait_s=args.max_wait_s,
+                poll_period_s=args.poll_period_s,
+            )
+        )
+        stopper = asyncio.create_task(stop_event.wait())
+
+        done, pending = await asyncio.wait({waiter, stopper}, return_when=asyncio.FIRST_COMPLETED)
+
+        for t in pending:
+            t.cancel()
+
+        if stop_event.is_set():
+            return
+
+        # Send one request (also abort if Ctrl+C right before sending)
+        if stop_event.is_set():
+            return
+
+        generated = await send_one_request(
+            server=server,
+            prompt=args.prompt,
+            base_model=args.base_model,
+            lora_dir=args.lora_dir,
+            max_new_tokens=args.max_new_tokens,
+        )
+        print("\n=== GENERATED ===", flush=True)
+        print(generated, flush=True)
+        print("=================\n", flush=True)
+
     except KeyboardInterrupt:
-        print("Interrupted — exiting…")
+        # Windows / fallback
+        if p is not None:
+            terminate_process_tree_fast(p, grace_s=0.1)
+    finally:
+        if p is not None and p.poll() is None:
+            print("[orchestrator] shutting down server…", flush=True)
+            terminate_process_tree_fast(p, grace_s=0.1)
+
+        if log_task is not None:
+            log_task.cancel()
+            # Don't block forever on log_task cancellation
+            try:
+                await asyncio.wait_for(log_task, timeout=0.5)
+            except Exception:
+                pass
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

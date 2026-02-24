@@ -85,6 +85,8 @@ class FinetuningManager:
         self._bwd_batch_counter = 0
 
     def load(self) -> int:
+        if self.data_path is None:
+            return 0
         loaded = 0
         with open(self.data_path, "r", encoding="utf-8") as f:
             for line in f:

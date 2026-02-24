@@ -76,7 +76,6 @@ class ProfilingBatchGenerator:
             )
         except Exception:
             self.tokenizer = get_tokenizer("huggyllama/llama-7b", tokenizor_mode or "auto")
-
         self.inference_batches: List[Batch] = []
         self.coserving_batches: List[Batch] = []
 

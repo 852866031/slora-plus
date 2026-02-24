@@ -6,20 +6,24 @@ import math
 
 
 @triton.jit
-def _fwd_kernel_token_att1(
+def _fwd_kernel_token_att1_gqa(
     Q, K, sm_scale, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
     Att_Out,
     stride_b_loc_b, stride_b_loc_s,
     stride_qbs, stride_qh, stride_qd,
     stride_kbs, stride_kh, stride_kd,
     att_stride_h, att_stride_bs,
-
+    group_size: tl.constexpr,          # q_heads // kv_heads
+    kv_heads: tl.constexpr,            # kv head count (for safety masking)
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr
 ):
     cur_batch = tl.program_id(0)
-    cur_head = tl.program_id(1)
+    cur_q_head = tl.program_id(1)
     start_n = tl.program_id(2)
+
+    # Map Q head -> KV head (GQA/MQA)
+    cur_kv_head = cur_q_head // group_size
 
     offs_d = tl.arange(0, BLOCK_DMODEL)
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
@@ -28,54 +32,148 @@ def _fwd_kernel_token_att1(
     cur_batch_start_index = max_input_len - cur_batch_seq_len
     cur_batch_end_index = max_input_len
 
-    off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d * stride_qd
+    off_q = cur_batch * stride_qbs + cur_q_head * stride_qh + offs_d * stride_qd
 
     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    block_stard_index = start_n * BLOCK_N
-    block_mask = tl.where(block_stard_index < cur_batch_seq_len, 1, 0)
+    block_start_index = start_n * BLOCK_N
+    block_mask = tl.where(block_start_index < cur_batch_seq_len, 1, 0)
 
+    # one-step loop kept from your original code
     for start_mark in range(0, block_mask, 1):
         q = tl.load(Q + off_q + start_mark)
+
         offs_n_new = cur_batch_start_index + offs_n
-        k_loc = tl.load(B_Loc + stride_b_loc_b * cur_batch + stride_b_loc_s * offs_n_new, mask=offs_n_new < cur_batch_end_index, other=0)
-        off_k = k_loc[:, None] * stride_kbs + cur_head * stride_kh + offs_d[None, :] * stride_kd
-        k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
+        k_loc = tl.load(
+            B_Loc + stride_b_loc_b * cur_batch + stride_b_loc_s * offs_n_new,
+            mask=offs_n_new < cur_batch_end_index,
+            other=0
+        )
+
+        # Use KV head for K indexing
+        off_k = k_loc[:, None] * stride_kbs + cur_kv_head * stride_kh + offs_d[None, :] * stride_kd
+
+        # Mask KV head to avoid OOB if misconfigured
+        k = tl.load(
+            K + off_k,
+            mask=(offs_n_new[:, None] < cur_batch_end_index) & (cur_kv_head < kv_heads),
+            other=0.0
+        )
+
         att_value = tl.sum(q[None, :] * k, 1)
         att_value *= sm_scale
-        off_o = cur_head * att_stride_h + (cur_batch_in_all_start_index + offs_n) * att_stride_bs
+
+        off_o = cur_q_head * att_stride_h + (cur_batch_in_all_start_index + offs_n) * att_stride_bs
         tl.store(Att_Out + off_o, att_value, mask=offs_n_new < cur_batch_end_index)
-    return
 
 
 @torch.no_grad()
-def token_att_fwd(q, k, att_out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
+def token_att_fwd(q, k, att_out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len, *, kv_heads: int):
+    """
+    q: [B, q_heads, d]
+    k: backing K cache tensor, typically [N, out_heads, d] (out_heads may be >= kv_heads)
+    att_out: [q_heads, total_token_num] (your layout)
+    kv_heads: actual KV head count (e.g., 8)
+    """
     BLOCK = 32
-    # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
-    assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lq == Lk and Lk in {16, 32, 64, 128}
     sm_scale = 1.0 / (Lk ** 0.5)
 
-    batch, head_num = B_Loc.shape[0], q.shape[1]
+    batch = B_Loc.shape[0]
+    q_heads = q.shape[1]
+    assert q_heads % kv_heads == 0, f"q_heads ({q_heads}) must be divisible by kv_heads ({kv_heads})"
+    group_size = q_heads // kv_heads
 
-    grid = (batch, head_num, triton.cdiv(max_input_len, BLOCK))
-
+    grid = (batch, q_heads, triton.cdiv(max_input_len, BLOCK))
     num_warps = 4
-    
-    _fwd_kernel_token_att1[grid](
+
+    _fwd_kernel_token_att1_gqa[grid](
         q, k, sm_scale, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
         att_out,
         B_Loc.stride(0), B_Loc.stride(1),
         q.stride(0), q.stride(1), q.stride(2),
         k.stride(0), k.stride(1), k.stride(2),
         att_out.stride(0), att_out.stride(1),
+        group_size=group_size,
+        kv_heads=kv_heads,
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK,
         num_warps=num_warps,
         num_stages=1,
     )
-    return
+
+# @triton.jit
+# def _fwd_kernel_token_att1(
+#     Q, K, sm_scale, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
+#     Att_Out,
+#     stride_b_loc_b, stride_b_loc_s,
+#     stride_qbs, stride_qh, stride_qd,
+#     stride_kbs, stride_kh, stride_kd,
+#     att_stride_h, att_stride_bs,
+
+#     BLOCK_DMODEL: tl.constexpr,
+#     BLOCK_N: tl.constexpr
+# ):
+#     cur_batch = tl.program_id(0)
+#     cur_head = tl.program_id(1)
+#     start_n = tl.program_id(2)
+
+#     offs_d = tl.arange(0, BLOCK_DMODEL)
+#     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+#     cur_batch_in_all_start_index = tl.load(B_Start_Loc + cur_batch)
+
+#     cur_batch_start_index = max_input_len - cur_batch_seq_len
+#     cur_batch_end_index = max_input_len
+
+#     off_q = cur_batch * stride_qbs + cur_head * stride_qh + offs_d * stride_qd
+
+#     offs_n = start_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+#     block_stard_index = start_n * BLOCK_N
+#     block_mask = tl.where(block_stard_index < cur_batch_seq_len, 1, 0)
+
+#     for start_mark in range(0, block_mask, 1):
+#         q = tl.load(Q + off_q + start_mark)
+#         offs_n_new = cur_batch_start_index + offs_n
+#         k_loc = tl.load(B_Loc + stride_b_loc_b * cur_batch + stride_b_loc_s * offs_n_new, mask=offs_n_new < cur_batch_end_index, other=0)
+#         off_k = k_loc[:, None] * stride_kbs + cur_head * stride_kh + offs_d[None, :] * stride_kd
+#         k = tl.load(K + off_k, mask=offs_n_new[:, None] < cur_batch_end_index, other=0.0)
+#         att_value = tl.sum(q[None, :] * k, 1)
+#         att_value *= sm_scale
+#         off_o = cur_head * att_stride_h + (cur_batch_in_all_start_index + offs_n) * att_stride_bs
+#         tl.store(Att_Out + off_o, att_value, mask=offs_n_new < cur_batch_end_index)
+#     return
+
+
+# @torch.no_grad()
+# def token_att_fwd(q, k, att_out, B_Loc, B_Start_Loc, B_Seqlen, max_input_len):
+#     BLOCK = 32
+#     # shape constraints
+#     Lq, Lk = q.shape[-1], k.shape[-1]
+#     assert Lq == Lk
+#     assert Lk in {16, 32, 64, 128}
+#     sm_scale = 1.0 / (Lk ** 0.5)
+
+#     batch, head_num = B_Loc.shape[0], q.shape[1]
+
+#     grid = (batch, head_num, triton.cdiv(max_input_len, BLOCK))
+
+#     num_warps = 4
+    
+#     _fwd_kernel_token_att1[grid](
+#         q, k, sm_scale, B_Loc, B_Start_Loc, B_Seqlen, max_input_len,
+#         att_out,
+#         B_Loc.stride(0), B_Loc.stride(1),
+#         q.stride(0), q.stride(1), q.stride(2),
+#         k.stride(0), k.stride(1), k.stride(2),
+#         att_out.stride(0), att_out.stride(1),
+#         BLOCK_DMODEL=Lk,
+#         BLOCK_N=BLOCK,
+#         num_warps=num_warps,
+#         num_stages=1,
+#     )
+#     return
 
 
 @triton.jit

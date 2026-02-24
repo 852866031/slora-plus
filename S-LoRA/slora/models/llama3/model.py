@@ -1,6 +1,7 @@
 import os
 import json
 from slora.common.build_utils import repair_config
+from slora.models.llama3.SFT_service import Llama3SFTBackwardService
 import torch
 
 from slora.models.llama3.layer_infer.transformer_layer_infer import Llama3TransformerLayerInfer
@@ -24,6 +25,8 @@ class Llama3TpPartModel(LlamaTpPartModel):
 
     # infer class
     transformer_layer_infer_class = Llama3TransformerLayerInfer
+
+    backward_service_class = Llama3SFTBackwardService
 
     def __init__(self, tp_rank, world_size, weight_dir,
                  max_total_token_num, mem_adapter_size, load_way="HF", mode=[],
@@ -61,6 +64,7 @@ class Llama3TpPartModel(LlamaTpPartModel):
         # KV heads per TP rank (sharded strategy)
         self.tp_k_head_num_ = self.config["num_key_value_heads"] // self.world_size_
         self.tp_v_head_num_ = self.tp_k_head_num_
+        self.tp_kv_head_num_ = self.tp_k_head_num_  # for convenience
         # For attention implementation convenience
         assert self.tp_q_head_num_ % self.tp_k_head_num_ == 0, \
             "Per-TP grouping must be integer (tp_q_head_num_ % tp_k_head_num_ == 0)"
@@ -80,7 +84,7 @@ class Llama3TpPartModel(LlamaTpPartModel):
 
         if self.enable_unified_mem_manager:
             self.alt_mem_manager = self.alt_memory_manager_class(
-                head_num=tp_kv_head_num, 
+                head_num=self.config["num_attention_heads"], 
                 head_dim=head_dim,
                 layer_num=self.config["num_hidden_layers"],
                 vocab_size=self.config["vocab_size"],
@@ -94,7 +98,7 @@ class Llama3TpPartModel(LlamaTpPartModel):
                 tot_size=self.max_total_token_num + self.mem_adapter_size,
                 cache_size=self.max_total_token_num,
                 dtype=torch.float16,
-                head_num=tp_kv_head_num,   # CRITICAL CHANGE for GQA
+                head_num=self.config["num_attention_heads"], 
                 head_dim=head_dim,
                 layer_num=self.config["num_hidden_layers"],
             )

@@ -4,3 +4,5 @@
 *.safetensors
 *.csv
 *.png
+S-LoRA/test/llama3/adapters/llama3-toy-lora/*
+S-LoRA/test/llama3/adapters/llama3-toy-lora-ft/*

@@ -52,12 +52,13 @@ inline bool launch_bgmv_kernel(T* Y, const T* X, const T* W,
                                uint64_t qkvo,
                                uint16_t in_features, uint16_t out_features,
                                int64_t batch_size,
-                               const T* lora_scales) {
+                               const T* lora_scales,
+                               uint32_t w_ld, uint32_t w_valid, uint32_t y_ld) {
   switch (pack_u16(in_features, out_features)) {
 #define CASE_ONESIDE(_T, feat_in, feat_out)                           \
   case pack_u16(feat_in, feat_out):                                   \
     bgmv_kernel<feat_in, feat_out>(Y, X, W, start_indicies, lora_ranks, loc_indicies, indicies, \
-                                   qkvo, batch_size, lora_scales);     \
+                                   qkvo, batch_size, lora_scales, w_ld, w_valid, y_ld);     \
     break;
 #define CASE(_T, narrow, wide)  \
   CASE_ONESIDE(T, narrow, wide) \
@@ -75,8 +76,11 @@ inline bool launch_bgmv_kernel(T* Y, const T* X, const T* W,
 
 void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Tensor start_indicies,
                    torch::Tensor lora_ranks, torch::Tensor loc_indicies, torch::Tensor indicies,
-                   int64_t qkvo, torch::Tensor lora_scales) {
-  CHECK_INPUT(y);
+                   int64_t qkvo, torch::Tensor lora_scales, 
+                   uint32_t w_ld, uint32_t w_valid) {
+  //CHECK_INPUT(y);
+  CHECK_CUDA(y);
+
   CHECK_INPUT(x);
   CHECK_INPUT(w);
   CHECK_INPUT(start_indicies);
@@ -89,9 +93,31 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
   CHECK_DIM(3, w); // [size, head_dim, head_size]
   CHECK_DIM(1, indicies);
 
-  int64_t B = x.size(0);
-  int64_t h_in = x.size(1);
+  int64_t B     = x.size(0);
+  int64_t h_in  = x.size(1);
   int64_t h_out = y.size(1);
+
+  // Treat w_valid as the logical feature width for this launch.
+  // w_ld is the storage pitch (can be larger, e.g. 4096).
+  int64_t K_logical = (int64_t)w_valid;
+  uint32_t y_ld = (uint32_t)y.stride(0);
+
+  if (h_in >= h_out) {
+    TORCH_CHECK(y.is_contiguous(), "y must be contiguous for shrink path");
+  }
+
+  TORCH_CHECK(w_ld >= w_valid,
+              "w_ld must be >= w_valid. w_ld=", w_ld, " w_valid=", w_valid);
+
+  // In shrink:  x is K_logical-wide, y is small
+  // In expand:  y is K_logical-wide, x is small
+  TORCH_CHECK((h_in == K_logical) || (h_out == K_logical),
+              "Expected either x.size(1) or y.size(1) to equal K=w_valid. "
+              "Got x=", x.sizes(), " y=", y.sizes(),
+              " w_valid=", w_valid, " w_ld=", w_ld,
+              " w=", w.sizes());
+
+
   CHECK_EQ(indicies.size(0), x.size(0));
   CHECK_EQ(y.size(0), x.size(0));
   bool ok = false;
@@ -105,7 +131,8 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
                                 lora_ranks.data_ptr<int64_t>(),
                                 loc_indicies.data_ptr<int64_t>(),
                                 indicies.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
-                                static_cast<nv_half*>(lora_scales.data_ptr()));
+                                static_cast<nv_half*>(lora_scales.data_ptr()),
+                                w_ld, w_valid, y_ld);
         break;
       case at::ScalarType::BFloat16:
         ok = launch_bgmv_kernel(static_cast<nv_bfloat16*>(y.data_ptr()),
@@ -115,7 +142,8 @@ void dispatch_bgmv(torch::Tensor y, torch::Tensor x, torch::Tensor w, torch::Ten
                                 lora_ranks.data_ptr<int64_t>(),
                                 loc_indicies.data_ptr<int64_t>(),
                                 indicies.data_ptr<int64_t>(), qkvo, h_in, h_out, B,
-                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()));
+                                static_cast<nv_bfloat16*>(lora_scales.data_ptr()),
+                                w_ld, w_valid, y_ld);
         break;
       default:
         break;

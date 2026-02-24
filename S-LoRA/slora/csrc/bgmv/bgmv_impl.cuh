@@ -157,7 +157,8 @@ __global__ void bgmv_multi_lora_rank_expand_kernel(T* __restrict__ Y, const T* _
                                    const int64_t* __restrict__ loc_indicies,
                                    const int64_t* __restrict__ indicies,
                                    int64_t qkvo, 
-                                   const T* __restrict__ lora_scales) {
+                                   const T* __restrict__ lora_scales,
+                                   uint32_t w_ld, uint32_t w_valid, uint32_t y_ld) {
   auto block = cg::this_thread_block();
   size_t tile_idx = blockIdx.x;
   size_t batch_idx = blockIdx.y;
@@ -182,13 +183,15 @@ __global__ void bgmv_multi_lora_rank_expand_kernel(T* __restrict__ Y, const T* _
   // load X and W
   vec_t<T, vec_size> x_vec;
   vec_t<T, vec_size> w_vec;
+  const size_t out_i = tile_idx * (tz * ty) + threadIdx.z * ty + threadIdx.y;
+  const bool out_ok = (out_i < w_valid);
 
-  if (threadIdx.x * vec_size >= lora_rank) {
+  if (!out_ok || threadIdx.x * vec_size >= lora_rank) {
       x_vec.fill(T(0.0));
       w_vec.fill(T(0.0));
   } else {
       x_vec.load(X + batch_idx * feat_in + threadIdx.x * vec_size);
-      w_vec.load(W + (w_outer_idx * feat_out) + bin_offset);
+      w_vec.load(W + (w_outer_idx * w_ld) + bin_offset);
   }
 
   float sum = 0.f;
@@ -202,8 +205,12 @@ __global__ void bgmv_multi_lora_rank_expand_kernel(T* __restrict__ Y, const T* _
     sum += __shfl_down_sync(0xffffffff, sum, offset);
   }
 
-  if (threadIdx.x == 0) {
-    Y[batch_idx * feat_out + tile_idx * (tz * ty) + threadIdx.z * ty + threadIdx.y] += sum;
+  // if (threadIdx.x == 0) {
+  //   Y[batch_idx * feat_out + tile_idx * (tz * ty) + threadIdx.z * ty + threadIdx.y] += sum;
+  // }
+  if (threadIdx.x == 0 && out_ok) {
+    //Y[batch_idx * feat_out + out_i] += sum;
+    Y[batch_idx * y_ld + out_i] += sum;
   }
 }
 
@@ -216,19 +223,24 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X,
                  const int64_t* __restrict__ indicies,
                  int64_t qkvo,
                  int64_t batch_size,
-                 const T* __restrict__ lora_scales) {
+                 const T* __restrict__ lora_scales, 
+                 uint32_t w_ld, uint32_t w_valid, uint32_t y_ld) {
   size_t vec_size = 16 / sizeof(T);
   if constexpr (feat_in < feat_out) {
     size_t tx = feat_in / vec_size;
     size_t ty = 32 / tx;
     size_t tz = 4;
-    dim3 nblks(feat_out / (ty * tz), batch_size);
+    //dim3 nblks(feat_out / (ty * tz), batch_size);
+    const uint32_t tiles_out = (w_valid + (ty * tz) - 1) / (ty * tz);
+    dim3 nblks(tiles_out, batch_size);
+
     dim3 nthrs(tx, ty, tz);
 
     bgmv_multi_lora_rank_expand_kernel<feat_in, feat_out>
         <<<nblks, nthrs>>>(Y, X, W, start_indicies, 
                            lora_ranks, loc_indicies, indicies,
-                           qkvo, lora_scales);
+                           qkvo, lora_scales, 
+                           w_ld, w_valid, y_ld);
   } else {
     assert(feat_in % (vec_size) == 0);
     dim3 nblks(feat_out, batch_size);
@@ -247,7 +259,8 @@ void bgmv_kernel(T* __restrict__ Y, const T* __restrict__ X,
       const int64_t* __restrict__ lora_ranks,                           \
       const int64_t* __restrict__ loc_indicies,                           \
       const int64_t* __restrict__ indicies, int64_t qkvo,           \
-      int64_t batch_size, const T* __restrict__ lora_scales);
+      int64_t batch_size, const T* __restrict__ lora_scales, \
+      uint32_t w_ld, uint32_t w_valid, uint32_t y_ld);
 
 #define INST_BGMV_TWOSIDE(T, narrow, wide) \
   INST_BGMV(narrow, wide, T)               \
