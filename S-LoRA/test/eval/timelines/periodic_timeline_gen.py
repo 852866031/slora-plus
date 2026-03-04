@@ -83,13 +83,13 @@ def generate_peak_valley_timeline(
 
 
 if __name__ == "__main__":
-    peak_duration = 4.0
-    valley_duration = 2.0
-    prompt_length = 20
-    max_new_tokens = 20
-    total_cycles = 3
-    peak_rps = [2]
-    valley_rps = [0, 1]
+    peak_duration = 2.0
+    valley_duration = 4.0
+    prompt_length = 80
+    max_new_tokens = 80
+    total_cycles = 5
+    peak_rps = [45]
+    valley_rps = [0]
 
     initial_idle = 1.0
 

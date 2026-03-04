@@ -19,6 +19,13 @@ from typing import Dict, Optional
 
 import aiohttp
 
+DEFAULTS = {
+    "server": "http://localhost:9000",
+    "timeline_csv": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/timeline_live.csv",
+    "max_wait": 120.0,
+    "ft_poll_interval": 3.0,
+    "ft_max_wait": 60.0,
+}
 
 # ----------------------------
 # Request helpers
@@ -105,6 +112,29 @@ async def send_one_request(
     print(f"[orchestrator] latency={latency*1000:.1f} ms", flush=True)
     return generated
 
+async def exit_finetuning(session: aiohttp.ClientSession, server: str) -> bool:
+    url = f"{server.rstrip('/')}/exit_finetuning"
+    try:
+        async with session.post(url) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
+    
+async def start_finetuning(session: aiohttp.ClientSession, server: str, timeout_s: float = 5.0) -> bool:
+    """
+    Call POST /start_finetuning on the given server.
+    Returns True on success, False on failure.
+    """
+    url = f"{server.rstrip('/')}/start_finetuning"
+
+    try:
+        async with session.post(url, timeout=timeout_s) as resp:
+            print("[orchestrator] start_finetuning response status:", resp.status)
+            if resp.status == 200:
+                return True
+            return False
+    except Exception:
+        return False
 
 # ----------------------------
 # Process orchestration
@@ -145,26 +175,6 @@ def terminate_process_tree_fast(p, grace_s: float = 0.15) -> None:
                 p.kill()
             except Exception:
                 pass
-    else:
-        # Windows
-        try:
-            p.send_signal(signal.CTRL_BREAK_EVENT)
-        except Exception:
-            try:
-                p.terminate()
-            except Exception:
-                pass
-
-        t0 = time.time()
-        while time.time() - t0 < grace_s:
-            if p.poll() is not None:
-                return
-            time.sleep(0.01)
-
-        try:
-            p.kill()
-        except Exception:
-            pass
 
 
 async def main() -> None:
@@ -172,8 +182,7 @@ async def main() -> None:
     ap.add_argument("--launcher", default="launch_llama3.py", help="Path to launch_llama3.py")
     ap.add_argument("--port", type=int, default=9000)
     ap.add_argument("--rank_id", type=int, default=0)
-    ap.add_argument("--bwd_log_index", type=int, default=0)
-    ap.add_argument("--enable-finetuning", action="store_true")
+    ap.add_argument("--co", action="store_true")
 
     # request params
     ap.add_argument("--prompt", default="Instruction:\nSay hello in one short sentence.\n### Response: ")
@@ -203,10 +212,8 @@ async def main() -> None:
         str(args.port),
         "--rank_id",
         str(args.rank_id),
-        "--bwd_log_index",
-        str(args.bwd_log_index),
     ]
-    if args.enable_finetuning:
+    if args.co:
         cmd.append("--enable-finetuning")
 
     # Optional: force line-buffering at the OS level for non-python output (POSIX only)
@@ -236,16 +243,6 @@ async def main() -> None:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,  # line-buffer in parent reader
-                env=env,
-            )
-        else:
-            p = subprocess.Popen(
-                cmd,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
                 env=env,
             )
 
@@ -299,6 +296,15 @@ async def main() -> None:
         # Send one request (also abort if Ctrl+C right before sending)
         if stop_event.is_set():
             return
+        
+        if args.co:
+            print("[orchestrator] Starting finetuning via API call...", flush=True)
+            async with aiohttp.ClientSession() as session:
+                if not await start_finetuning(session, server):
+                    print("[orchestrator] Failed to start finetuning", flush=True)
+                    return
+                else:
+                    print("[orchestrator] Finetuning started successfully", flush=True)
 
         generated = await send_one_request(
             server=server,
@@ -310,7 +316,15 @@ async def main() -> None:
         print("\n=== GENERATED ===", flush=True)
         print(generated, flush=True)
         print("=================\n", flush=True)
-
+        await asyncio.sleep(5)
+        if args.co:
+            print("[orchestrator] Exiting finetuning via API call...", flush=True)
+            async with aiohttp.ClientSession() as session:
+                if not await exit_finetuning(session, server):
+                    print("[orchestrator] Failed to exit finetuning", flush=True)
+                else:
+                    print("[orchestrator] Exited finetuning successfully", flush=True)
+        await asyncio.sleep(3)
     except KeyboardInterrupt:
         # Windows / fallback
         if p is not None:

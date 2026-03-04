@@ -45,6 +45,7 @@ class FinetuneParams:
         self.optimizer_threading = finetuning_config.get("optimizer_threading", False)
         self.min_backward_sample_count = finetuning_config.get("min_backward_sample_count", 8)
         self.start_on_launch = finetuning_config.get("start_on_launch", True)
+        self.ft_log_path = finetuning_config.get("ft_log_path", "")
 
 
 class SLOParams:
@@ -96,7 +97,6 @@ class InputParams:
         tokenizer_mode,
         trust_remote_code=True,
         finetuning_config = {},
-        bwd_log_index = 0,
     ) -> None:
         self.max_req_total_len = max_req_total_len
         self.max_total_token_num = max_total_token_num
@@ -128,13 +128,12 @@ class InputParams:
             model_weightdir=model_weightdir,
             tokenizor_mode=tokenizer_mode,
             trust_remote_code=trust_remote_code,
-            finetuning_config=finetuning_config
+            finetuning_config=finetuning_config,
         )
         self.slo_params = SLOParams(
             ttft_slo=finetuning_config.get("ttft_slo", 0.3),
             avg_tbt_slo=finetuning_config.get("avg_tbt_slo", 0.15),
             max_tbt_slo=finetuning_config.get("max_tbt_slo", 0.4),
         )
-        self.bwd_log_index = bwd_log_index
         return
  

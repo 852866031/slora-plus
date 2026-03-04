@@ -55,7 +55,7 @@ def get_scheduler(input_params, adapter_dirs):
     elif input_params.scheduler == "slora_plus":
         if input_params.finetuning_params.finetuning_type == None or input_params.finetuning_params.finetuning_type == "SFT":
             return Mixed_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
-                                input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params, input_params.bwd_log_index)
+                                input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params)
         elif input_params.finetuning_params.finetuning_type == "SFT Profile":
             return Profile_ReqQueue(input_params.max_total_token_num, input_params.batch_max_tokens,
                                 input_params.running_max_req_size, input_params.finetuning_params, input_params.slo_params, adapter_dirs[0])
@@ -686,7 +686,6 @@ def start_router_process(args, router_port, detokenization_port, model_rpc_ports
                                tokenizer_mode=args.tokenizer_mode,
                                trust_remote_code=args.trust_remote_code,
                                finetuning_config=args.finetuning_config,
-                               bwd_log_index = args.bwd_log_index,
                               )
 
     try:

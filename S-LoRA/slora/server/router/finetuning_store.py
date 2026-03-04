@@ -45,7 +45,7 @@ class FinetuningManager:
         max_saved_finetuning_tokens: int,
         max_prepare: Optional[int] = None,
         trust_remote_code: bool = False,
-        bwd_log_index : int = 0,
+        ft_log_path : str = "",
     ) -> None:
         self.data_path = data_path
         self.tokenizer = tokenizer
@@ -79,7 +79,7 @@ class FinetuningManager:
         self.loss_list =[]
         self.max_saved_finetuning_tokens = max_saved_finetuning_tokens
 
-        self.ft_log_path = f"/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/eval/results/bwd_log_{bwd_log_index}.csv"
+        self.ft_log_path = ft_log_path
         self.bwd_logs = []   # list of dicts
         self.total_processed_tokens_global = 0
         self._bwd_batch_counter = 0
@@ -311,6 +311,9 @@ class FinetuningManager:
         Columns:
         timestamp, epoch, batch_idx, batch_tokens, batch_loss, total_processed_tokens
         """
+        if self.ft_log_path == "":
+            print("No ft_log_path specified, skipping writing backward logs.")
+            return
         import csv
         csv_path = self.ft_log_path
         if not self.bwd_logs:

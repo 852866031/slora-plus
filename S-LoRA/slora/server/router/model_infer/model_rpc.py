@@ -161,7 +161,6 @@ class ModelRpcServer(rpyc.Service):
                     weight_decay=input_params.finetuning_params.weight_decay,
                     gamma=input_params.finetuning_params.gamma,
                     use_rank_id = self.use_rank_id,
-                    bwd_log_index = input_params.bwd_log_index
                 )
                 backward_service_obj.bwd_pause_event = self.bwd_pause_event
                 backward_service_obj.receive_model_dict(self.model.export_model_dict())

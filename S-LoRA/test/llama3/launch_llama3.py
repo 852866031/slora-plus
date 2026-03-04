@@ -68,7 +68,8 @@ if __name__ == "__main__":
     parser.add_argument("--enable-finetuning", action="store_true")
     parser.add_argument("--rank_id", type=int, default=0)
     parser.add_argument("--port", type=int, default=9000)
-    parser.add_argument("--bwd_log_index", type=int, default=0)
+    parser.add_argument("--ft_log_path", type=str, default="/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/bwd_log.csv")
+
     args = parser.parse_args()
 
     # Load defaults
@@ -83,7 +84,7 @@ if __name__ == "__main__":
     cmd += f" --pool-size-lora {D['pool_size_lora']}"
     cmd += f" --port {args.port}"
     cmd += f" --rank_id {args.rank_id}"
-    cmd += f" --bwd_log_index {args.bwd_log_index}"
+    cmd += f" --ft_log_path {args.ft_log_path}"
 
     if args.enable_finetuning:
         cmd += f" --finetuning_config_path {BASE['finetuning_config_path']}"

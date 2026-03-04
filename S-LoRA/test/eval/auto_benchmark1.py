@@ -217,15 +217,6 @@ async def send_one(
             except Exception:
                 out = body.decode(errors="replace")
 
-            # print(
-            #     f"[req {idx:04d}] @{t_rel:6.3f}s  {latency*1000:7.1f} ms",
-            #     end="",
-            # )
-            # if ttft is not None:
-            #     print(f" ttft:{ttft*1000:7.1f} ms, avg_tbt:{(avg_tbt or 0)*1000:7.1f} ms, worst_tbt:{(worst_tbt or 0)*1000:7.1f} ms",flush=True,)
-            # else:
-            #     print(" (no timing info)", flush=True)
-
             return (idx, t_rel, latency, "ok", ttft, avg_tbt, worst_tbt)
     except Exception as e:
         latency = time.monotonic() - t_send

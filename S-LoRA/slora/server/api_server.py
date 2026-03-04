@@ -599,7 +599,7 @@ def main():
     parser.add_argument("--enable_unified_mem_manager", action="store_true")
     parser.add_argument("--unified_mem_manager_max_size", type=int, default=5,help="in GB")
     parser.add_argument("--enable_gpu_profile", action="store_true")
-    parser.add_argument("--bwd_log_index", type=int, default=0)
+    parser.add_argument("--ft_log_path", type=str, default="")
     ''' end of finetune arguments '''
     
     args = parser.parse_args()
@@ -624,7 +624,8 @@ def main():
             "weight_decay": 0.01,
             "gamma": 0.9,
             "optimizer_threading": False,
-            "start_on_launch": True
+            "start_on_launch": True,
+            "ft_log_path": args.ft_log_path
         }
         for key, default_value in default_config.items():
             config_data.setdefault(key, default_value)

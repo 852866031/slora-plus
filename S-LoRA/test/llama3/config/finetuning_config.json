@@ -1,5 +1,5 @@
 {
-  "finetuning_data_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/emotion.txt",
+  "finetuning_data_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/config/emotion_1000.csv",
   "finetuning_lora_path": "/home/jiaxuan/Documents/Projects/slora-plus/S-LoRA/test/llama3/adapters/llama3-toy-lora-ft",
   "finetuning_type": "SFT",
   "finetuning_prepare_size": 999999,
@@ -11,7 +11,7 @@
   "max_saved_finetuning_tokens": 256,
   "max_finetuning_tokens_in_batch": 128,
   "optimizer_threading": true,
-  "start_on_launch": true,
+  "start_on_launch": false,
   "ttft_slo": 0.1,
   "avg_tbt_slo": 0.15,
   "max_tbt_slo": 0.35

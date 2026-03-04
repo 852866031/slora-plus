@@ -57,7 +57,6 @@ class Mixed_ReqQueue:
                  running_max_req_size: int,
                  finetune_params: FinetuneParams,
                  slo_params: SLOParams,
-                 bwd_log_index: int = 0,
                  ) -> None:
         self.max_total_tokens = max_total_tokens 
         self.batch_max_tokens = batch_max_tokens
@@ -82,6 +81,7 @@ class Mixed_ReqQueue:
             print("Could not load tokenizer. Using default.")
             self.tokenizer = get_tokenizer("huggyllama/llama-7b", finetune_params.tokenizor_mode) 
         
+        print("ft log path: ", finetune_params.ft_log_path)
         self.finetuning_manager = FinetuningManager(
             data_path=self.finetuning_data_path,
             tokenizer=self.tokenizer,
@@ -90,7 +90,7 @@ class Mixed_ReqQueue:
             max_prepare=self.finetuning_prepare_size,
             trust_remote_code=finetune_params.trust_remote_code,
             max_saved_finetuning_tokens=self.max_saved_finetuning_tokens,
-            bwd_log_index=bwd_log_index,
+            ft_log_path=finetune_params.ft_log_path,
         )
         self.finetuning_manager.load()
         self.waiting_req_list: List[Req] = []
