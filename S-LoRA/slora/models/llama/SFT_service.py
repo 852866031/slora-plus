@@ -8,7 +8,6 @@ import torch
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
-import pynvml
 from slora.models.llama.triton_kernel.rmsnorm import rmsnorm_backward, rmsnorm_forward
 
 def bwd_print(*args, sep=' ', end='\n'):
