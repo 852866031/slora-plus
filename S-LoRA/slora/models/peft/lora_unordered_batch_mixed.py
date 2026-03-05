@@ -361,7 +361,8 @@ class LoraUnorderedBatchMixed:
                     0,
                     self.infer_adapter.a_scaling,
                 )
-
+        # [#req, #tokens, #hiddensize]
+        # [#(req*req_tokens), #hiddensize]
         rotary_emb_fwd(q.view(-1, base_layer_infer.tp_q_head_num_, base_model.head_dim_),
                        infer_state.position_cos, infer_state.position_sin)
 
