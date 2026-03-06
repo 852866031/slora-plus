@@ -1,6 +1,6 @@
-# S-LoRA
+# DeltaServe
 
-[S-LoRA](https://github.com/S-LoRA/S-LoRA)
+Extend on [S-LoRA](https://github.com/S-LoRA/S-LoRA)
 
 ```
 conda create -n dserve python=3.9
