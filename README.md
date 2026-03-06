@@ -8,6 +8,6 @@ conda activate dserve
 # cuda > 12.6
 pip install torch==2.8.0
 pip install uvloop=0.22.0
-pip install -e .
+pip install -e . --no-build-isolation
 pip install triton==3.4.0
 ```
