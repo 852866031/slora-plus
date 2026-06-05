@@ -4,7 +4,7 @@
 #
 # Installs sglang 0.4.6.post5 and applies the DeltaServe co-serving port:
 #   1. pip install sglang==0.4.6.post5  (skipped if already present)
-#   2. copy 21 new drop-in files into the installed sglang package
+#   2. copy 17 new drop-in files into the installed sglang package
 #   3. patch 10 existing sglang files with sglang-046-port.patch
 #
 # Idempotent: re-running re-copies drop-ins and re-checks the patch.
@@ -92,7 +92,7 @@ else
 fi
 
 # --- 3. copy drop-in files -------------------------------------------------
-log "copying deltaserve/ package (17 files)"
+log "copying deltaserve/ package (13 files)"
 rm -rf "$SG/srt/deltaserve"
 cp -r "$HERE/new-files/deltaserve" "$SG/srt/deltaserve"
 
