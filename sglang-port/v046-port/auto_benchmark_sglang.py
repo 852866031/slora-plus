@@ -141,6 +141,29 @@ def make_prompt(prompt_length: int) -> str:
     return _PROMPT_FILLER[:prompt_length * 6][: prompt_length * 6]
 
 
+# Distinct FT prompts drawn from a real finetuning corpus. The timeline's
+# inference prompts are all one fixed length (→ identical text → radix-cached),
+# which is fine for inference but would dedup FT prefills down to a single
+# backward fire. Real FT samples are distinct, so FT-tagged requests draw a
+# fresh corpus line each time → one real prefill (and one backward) per sample.
+_FT_CORPUS: List[str] = []
+
+
+def load_ft_corpus(path: Optional[str]) -> List[str]:
+    if not path:
+        return []
+    p = Path(path)
+    if not p.is_absolute():
+        p = _REPO / "eval" / "llama3" / "data" / path
+    if not p.exists():
+        print(f"[bench] FT corpus not found: {p} — FT reqs will reuse timeline prompts",
+              file=sys.stderr)
+        return []
+    lines = [ln.strip() for ln in p.read_text().splitlines() if ln.strip()]
+    print(f"[bench] loaded {len(lines)} FT samples from {p}")
+    return lines
+
+
 @dataclass
 class RequestResult:
     rid: str
@@ -158,8 +181,11 @@ class RequestResult:
 
 
 async def stream_one(session: aiohttp.ClientSession, port: int,
-                     row: TimelineRow, is_ft: bool, sent_t: float) -> RequestResult:
-    prompt = make_prompt(row.prompt_length)
+                     row: TimelineRow, is_ft: bool, sent_t: float,
+                     ft_prompt: Optional[str] = None) -> RequestResult:
+    # FT-tagged requests use a distinct corpus sample (when available) so each
+    # one does a real prefill; inference requests use the timeline-shaped prompt.
+    prompt = ft_prompt if (is_ft and ft_prompt) else make_prompt(row.prompt_length)
     payload = {
         "text": prompt,
         "sampling_params": {
@@ -233,9 +259,11 @@ async def drive(port: int, timeline: List[TimelineRow], ft_fraction: float,
             if target_t > now:
                 await asyncio.sleep(target_t - now)
             is_ft = (i % max(1, int(round(1/ft_fraction))) == 0) if ft_fraction > 0 else False
+            ft_prompt = (_FT_CORPUS[sent_count % len(_FT_CORPUS)]
+                         if (is_ft and _FT_CORPUS) else None)
             sent_count += 1
             task = asyncio.create_task(
-                stream_one(session, port, row, is_ft, time.monotonic() - t_anchor)
+                stream_one(session, port, row, is_ft, time.monotonic() - t_anchor, ft_prompt)
             )
             pending.append(task)
         results = await asyncio.gather(*pending)
@@ -281,6 +309,10 @@ def main():
                     help="Disable sglang's cuda-graph for inference batches too. By default inference batches DO use cuda graph (FT batches always bypass via _has_ft check in model_runner).")
     ap.add_argument("--real-backward", action="store_true",
                     help="Task A: use real LoRA backward kernels (vs faux). Slower per fire but produces real grads + loss curves.")
+    ap.add_argument("--ft-corpus", default="alpaca_1000_p95.txt",
+                    help="File of distinct FT samples (one per line) for FT-tagged requests, "
+                         "resolved against eval/llama3/data/. Distinct prompts avoid radix-cache "
+                         "dedup so the backward fires per sample. Empty string = reuse timeline prompts.")
     sg = ap.add_mutually_exclusive_group()
     sg.add_argument("--tight", action="store_true")
     sg.add_argument("--loose", action="store_true")
@@ -289,6 +321,10 @@ def main():
                     help="Launch the server (default). Pass --no-launch-server to use an already-running server.")
     ap.add_argument("--no-launch-server", dest="launch_server", action="store_false")
     args = ap.parse_args()
+
+    global _FT_CORPUS
+    if args.co and args.ft_fraction > 0:
+        _FT_CORPUS = load_ft_corpus(args.ft_corpus)
 
     gpu = args.timeline_gpu or detect_gpu_subdir()
     shape = "tight" if args.tight else ("loose" if args.loose else "tight")
@@ -351,6 +387,8 @@ def main():
     results = asyncio.run(drive(args.port, timeline, ft_fraction=(args.ft_fraction if args.co else 0.0), t_anchor=t_anchor))
 
     suffix = f"_{shape}{'_co' if args.co else '_inf'}"
+    if args.co and args.real_backward:
+        suffix += "_real"
     out_csv = OUTPUT_DIR / f"timeline_results{suffix}.csv"
     write_csv(out_csv, results)
     print(f"[bench] wrote {out_csv}")

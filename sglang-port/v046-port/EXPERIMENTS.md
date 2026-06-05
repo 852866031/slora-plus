@@ -78,3 +78,71 @@ NaN/inf, the server crashes, or interleaved inference output changes/garbles.
   motivation for S12a (subprocess+MPS) + backward-compute opt. Next: re-run the
   apples-to-apples benchmark with real backward (#48), using a DISTINCT FT corpus so
   the backward fires per sample under production radix-cache-on inference.
+
+---
+
+### A-bench-1b — real-backward co-serving overhead, in-process bwd_stream (the "before S12a" baseline)   (2026-06-05, H200 ×1)
+
+**Reflection / audit.** Task A is verified correct + safe. Now measure the actual
+co-serving cost of the real backward as it stands today (in-process, on bwd_stream,
+NO MPS isolation) so S12a has a before/after. Discovery while setting this up: the
+tight timeline is 224 rows ALL at prompt_length=80 → identical text → radix-cache
+dedups every prefill (so the prior *faux* numbers are themselves under a radix-cache
+confound, and a real-backward run there would barely fire). Fix: FT-tagged requests
+now draw DISTINCT alpaca samples (`--ft-corpus alpaca_1000_p95.txt`, ~100-tok p50),
+inference keeps the timeline prompt. Iterating on 1B (fast); 8B apples-to-apples is
+the final step after the optimizations land.
+
+**Prediction (mine).** With real backward at ~45ms/fire (and bigger at ~100-tok FT
+samples → likely 80-150ms/fire) sharing SMs with inference and no MPS, co-serving
+TTFT will blow up vs inf-only — I expect co TTFT ≥ 2× inf TTFT, worse than the faux
++130%. FALSIFIED if co TTFT ≈ inf TTFT (would mean the backward isn't actually
+contending — e.g. not firing, or overlapping for free).
+
+- Goal/criteria: quantify inf-only vs co-serving(real) TTFT mean/p95 on 1B tight.
+  This is a measurement, not a pass/fail gate.
+- Command (both, back-to-back, server auto-launched each):
+  `python auto_benchmark_sglang.py --tight --port 30401`  (inf-only baseline)
+  `python auto_benchmark_sglang.py --co --tight --real-backward --ft-fraction 0.25
+   --ft-corpus alpaca_1000_p95.txt --port 30402`  (co, real backward, distinct FT)
+- Data: tight timeline 224 reqs @ pl=80; FT = every 4th req, distinct alpaca sample.
+- Model: Llama-3.2-1B-Instruct; real backward q/k/v/o rank16 fp32, AdamW lr5e-6,
+  in-process bwd_stream (no subprocess, no MPS).
+- Predicted: inf TTFT ~20-40ms; co TTFT ≥ 2× inf. FALSIFIED if co ≈ inf.
+- **Actual (before fix):** inf-only TTFT mean=**10ms** p95=14ms, latency mean=158ms.
+  co-serving(real, in-process) TTFT mean=**97ms** (p95=123, **~10× inf**), latency
+  mean=**4670ms** (**~30× inf**). Prediction confirmed in direction; blowup far worse
+  than 2×.
+  - **Root cause found:** 838 backward fires from only 56 FT requests. n_valid histogram:
+    only 36 fires are real prefills (n_valid 60+); 785 fires (94%) are spurious
+    DECODE-step fires (n_valid 1–19) — when ≥2 FT requests decode together the dispatch
+    fired the backward on unrelated single tokens (garbage grads) AND burned ~44ms each.
+    838×44ms = 37s of backward stuffed into a 25s timeline → that IS the 30× latency,
+    not inherently-slow backward.
+- Decision: **fix the dispatch to fire only on FT prefill (EXTEND mode), never decode**
+  (`model_runner._forward`: gate on `forward_mode.is_extend()`). SFT is forward-only →
+  one backward per FT sequence. Re-measure (A-bench-1b-fix). This is a correctness fix
+  (no more training on garbage) AND should be the dominant perf win — bigger than S12a.
+
+---
+
+### A-bench-1b-fix — prefill-only backward gate (the "after" for the decode-fire fix)   (2026-06-05, H200 ×1)
+
+**Hypothesis.** Gating the backward to FT prefill only drops fires from ~838 to ~56
+(one per FT sample), cutting ~94% of backward GPU time. Expect co-serving TTFT/latency
+to collapse toward the inf-only baseline — most of the 30× was spurious decode fires.
+
+- Command: `python auto_benchmark_sglang.py --co --tight --real-backward --ft-fraction
+  0.25 --ft-corpus alpaca_1000_p95.txt --port 30403` (same as before; only the
+  server-side dispatch gate changed).
+- Predicted: fires ≈ 56 (down from 838); co TTFT mean ≲ 40ms (down from 97); latency
+  mean ≲ 1s (down from 4.67s). FALSIFIED if fires stay high or latency stays ~4s.
+- **Actual:** PASS, prediction hit. fires=**56** (53 real prefills n_valid≥20, 3 short
+  samples), TTFT mean=**35ms** p95=75ms (was 97/123), latency mean=**644ms** (was 4670).
+  **Latency 7.3× better, TTFT 2.8× better** from the prefill-only gate alone.
+  - vs inf-only: co TTFT 35 vs 10 (3.5×), latency 644 vs 158 (4×) — residual is 56 real
+    backward fires (~100ms each at n_valid~100) contending on shared SMs.
+- Decision: land the gate in the patch + commit. Residual 3.5–4× is the target for
+  S12a (MPS isolation) and backward-compute opt (graph the real attention bwd). Next
+  realism lever: FT requests are forward-only in real SFT — sending max_new_tokens=1
+  for FT would remove their 80 pointless decode steps (still adds decode load now).

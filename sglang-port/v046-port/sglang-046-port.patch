@@ -342,7 +342,7 @@
          # Handle the case where some ranks do not finish loading.
          try:
              dist.monitored_barrier(
-@@ -1165,6 +1200,18 @@
+@@ -1165,6 +1200,26 @@
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
          self.forward_pass_id += 1
  
@@ -351,7 +351,15 @@
 +        # capture per-sample activations.
 +        _ft_mask = getattr(forward_batch, "is_finetuning_mask", None)
 +        _has_ft = _ft_mask is not None and bool(_ft_mask.any().item())
-+        if _has_ft and getattr(self, "finetune_accumulator", None) is not None:
++        # DeltaServe: capture activations + run the backward ONLY on the FT
++        # *prefill* (the EXTEND forward where the sample's tokens form a real
++        # sequence). FT requests also carry FT-tagged tokens through their
++        # decode steps, but firing the backward there trains on unrelated
++        # single tokens AND adds ~44ms/step of GPU contention — 94% of fires
++        # were spurious decode fires, driving a 30x co-serving latency blowup.
++        # SFT is forward-only: exactly one backward per FT sequence (its prefill).
++        _ft_prefill = _has_ft and forward_batch.forward_mode.is_extend()
++        if _ft_prefill and getattr(self, "finetune_accumulator", None) is not None:
 +            self.finetune_accumulator.begin_step(
 +                req_ids=[],  # not needed for the math
 +                finetune_mask=_ft_mask,
@@ -361,14 +369,14 @@
          with get_global_expert_distribution_recorder().with_forward_pass(
              self.forward_pass_id,
              forward_batch,
-@@ -1176,6 +1223,17 @@
+@@ -1176,6 +1231,17 @@
          if self.eplb_manager is not None:
              self.eplb_manager.on_forward_pass_end(self.forward_pass_id)
  
 +        # DeltaServe Path C: synchronously run faux-backward in-process so
 +        # we measure realistic co-serving GPU contention. Real backward
 +        # math wiring follows in next loop iteration (Task A).
-+        if _has_ft and getattr(self, "finetune_accumulator", None) is not None:
++        if _ft_prefill and getattr(self, "finetune_accumulator", None) is not None:
 +            try:
 +                from sglang.srt.deltaserve.faux_backward import run_faux_backward
 +                snapshot = self.finetune_accumulator.pop_step()
@@ -379,7 +387,7 @@
          return output
  
      def _forward_raw(
-@@ -1184,10 +1242,16 @@
+@@ -1184,10 +1250,16 @@
          skip_attn_backend_init: bool,
          pp_proxy_tensors: Optional[PPProxyTensors],
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
