@@ -35,68 +35,92 @@ class _RealBackward:
     for the duration of the process. Constructed once at model_runner.load_model
     end; called from faux_backward.run_faux_backward when real-bwd is enabled."""
 
-    def __init__(self, model: nn.Module, lora_rank: int = 16,
+    def __init__(self, model: Optional[nn.Module] = None, lora_rank: int = 16,
                  lora_alpha: float = 32.0, lr: float = 5e-6,
-                 weight_decay: float = 0.01, backward_fp32: bool = False) -> None:
+                 weight_decay: float = 0.01, backward_fp32: bool = False,
+                 state: Optional[Dict[str, Any]] = None,
+                 device: Optional[str] = None) -> None:
+        # Two construction paths share the same tail (LoRA masters + optimizer):
+        #   - in-process (Path C): `model` is the live sglang model; base weights
+        #     are zero-copy VIEWS into it.
+        #   - subprocess (S12a): `state` is a portable dict produced by
+        #     extract_base_state() (config + base weights as tensors); we move
+        #     them to `device`. Same layout, so the verified backward is byte-
+        #     identical — no HF re-load / RoPE-permutation risk.
+        assert (model is None) ^ (state is None), "pass exactly one of model/state"
         self.model = model
         self.lora_rank = int(lora_rank)
         self.scaling = float(lora_alpha) / float(lora_rank)
         self.lr = float(lr)
         self.weight_decay = float(weight_decay)
+        self.save_attn_qkv = False  # we DON'T capture qh/kh/vh, recompute via layer_forward
 
-        # Extract dims from config / first layer.
+        if model is not None:
+            self._init_from_model(model)
+        else:
+            self._init_from_state(state, device or "cuda")
+        self.dims = (self.Hq, self.Hkv, self.Hd, self.kv_size)
+        self.bwd_dtype = torch.float32 if backward_fp32 else self.base_dtype
+
+        self._build_lora_and_optim()
+
+    def _set_config(self, c: Dict[str, Any]) -> None:
+        self.D = int(c["hidden_size"]); self.L = int(c["num_hidden_layers"])
+        self.Hq = int(c["num_attention_heads"])
+        self.Hkv = int(c.get("num_key_value_heads") or self.Hq)
+        self.Hd = int(c.get("head_dim") or (self.D // self.Hq))
+        self.kv_size = self.Hkv * self.Hd
+        self.q_size = self.Hq * self.Hd
+        self.inter = int(c["intermediate_size"])
+        self.theta = float(c.get("rope_theta") or 10000.0)
+        self.eps = float(c.get("rms_norm_eps") or 1e-5)
+        self.vocab = int(c["vocab_size"])
+
+    def _init_from_model(self, model: nn.Module) -> None:
         cfg = model.config if hasattr(model, "config") else getattr(model, "model").config
         def _cfg(name, default=None):
             v = getattr(cfg, name, None)
             if v is None and hasattr(cfg, "to_dict"):
                 v = cfg.to_dict().get(name, default)
             return v if v is not None else default
-        self.D = int(_cfg("hidden_size"))
-        self.L = int(_cfg("num_hidden_layers"))
-        self.Hq = int(_cfg("num_attention_heads"))
-        self.Hkv = int(_cfg("num_key_value_heads", _cfg("num_attention_heads")))
-        head_dim = _cfg("head_dim", self.D // self.Hq)
-        self.Hd = int(head_dim)
-        self.kv_size = self.Hkv * self.Hd
-        self.q_size = self.Hq * self.Hd
-        self.inter = int(_cfg("intermediate_size"))
-        self.theta = float(_cfg("rope_theta", 10000.0))
-        self.eps = float(_cfg("rms_norm_eps", 1e-5))
-        self.vocab = int(_cfg("vocab_size"))
-        self.dims = (self.Hq, self.Hkv, self.Hd, self.kv_size)
-        self.save_attn_qkv = False  # we DON'T capture qh/kh/vh, recompute via layer_forward
-
-        # Reach into the sglang Llama model: model.model.layers[i].self_attn / mlp / norms.
+        self._set_config({
+            "hidden_size": _cfg("hidden_size"), "num_hidden_layers": _cfg("num_hidden_layers"),
+            "num_attention_heads": _cfg("num_attention_heads"),
+            "num_key_value_heads": _cfg("num_key_value_heads", _cfg("num_attention_heads")),
+            "head_dim": _cfg("head_dim", None), "intermediate_size": _cfg("intermediate_size"),
+            "rope_theta": _cfg("rope_theta", 10000.0), "rms_norm_eps": _cfg("rms_norm_eps", 1e-5),
+            "vocab_size": _cfg("vocab_size"),
+        })
         inner = model.model if hasattr(model, "model") and hasattr(model.model, "layers") else model
         self.layers = inner.layers
-        self.norm_w = inner.norm.weight  # final RMSNorm
-        self.lm_w = model.lm_head.weight  # [vocab_pad, D]
+        self.norm_w = inner.norm.weight
+        self.lm_w = model.lm_head.weight
         self.base_dtype = self.lm_w.dtype
-        self.bwd_dtype = torch.float32 if backward_fp32 else self.base_dtype
-
         # Slice fused weights once into per-layer views (no copy).
-        self.base: List[Dict[str, torch.Tensor]] = []
-        for i in range(self.L):
-            lyr = self.layers[i]
-            attn = lyr.self_attn
-            mlp = lyr.mlp
-            # With LoRA, qkv_proj might be wrapped as .base_layer.weight. Probe.
-            qkv_w = getattr(attn.qkv_proj, "base_layer", attn.qkv_proj).weight
-            gate_up_w = getattr(mlp.gate_up_proj, "base_layer", mlp.gate_up_proj).weight
-            o_w = getattr(attn.o_proj, "base_layer", attn.o_proj).weight
-            down_w = getattr(mlp.down_proj, "base_layer", mlp.down_proj).weight
-            self.base.append({
-                "q":       qkv_w[:self.q_size],
-                "k":       qkv_w[self.q_size:self.q_size + self.kv_size],
-                "v":       qkv_w[self.q_size + self.kv_size:],
-                "o":       o_w,
-                "gate":    gate_up_w[:self.inter],
-                "up":      gate_up_w[self.inter:],
-                "down":    down_w,
-                "in_ln":   lyr.input_layernorm.weight,
-                "post_ln": lyr.post_attention_layernorm.weight,
-            })
+        self.base = [self._slice_layer(self.layers[i]) for i in range(self.L)]
 
+    def _slice_layer(self, lyr) -> Dict[str, torch.Tensor]:
+        attn = lyr.self_attn; mlp = lyr.mlp
+        qkv_w = getattr(attn.qkv_proj, "base_layer", attn.qkv_proj).weight
+        gate_up_w = getattr(mlp.gate_up_proj, "base_layer", mlp.gate_up_proj).weight
+        o_w = getattr(attn.o_proj, "base_layer", attn.o_proj).weight
+        down_w = getattr(mlp.down_proj, "base_layer", mlp.down_proj).weight
+        return {
+            "q": qkv_w[:self.q_size], "k": qkv_w[self.q_size:self.q_size + self.kv_size],
+            "v": qkv_w[self.q_size + self.kv_size:], "o": o_w,
+            "gate": gate_up_w[:self.inter], "up": gate_up_w[self.inter:], "down": down_w,
+            "in_ln": lyr.input_layernorm.weight, "post_ln": lyr.post_attention_layernorm.weight,
+        }
+
+    def _init_from_state(self, state: Dict[str, Any], device: str) -> None:
+        self._set_config(state["config"])
+        self.layers = None
+        self.base_dtype = getattr(torch, str(state.get("base_dtype", "bfloat16")).split(".")[-1])
+        self.norm_w = state["norm_w"].to(device)
+        self.lm_w = state["lm_w"].to(device)
+        self.base = [{k: v.to(device) for k, v in layer.items()} for layer in state["base"]]
+
+    def _build_lora_and_optim(self) -> None:
         # Build fp32 LoRA master tensors per layer × {q,k,v,o} × {A,B}.
         # LoRA A: [rank, D]; B: [out_dim, rank] (out_dim = q_size for q/o, kv_size for k/v).
         device = self.lm_w.device
@@ -229,15 +253,48 @@ class _RealBackward:
         return elapsed
 
 
+def extract_base_state(model: nn.Module) -> Dict[str, Any]:
+    """Produce a portable, process-independent snapshot of the frozen base
+    weights + config, for the S12a backward subprocess. Weights are cloned to
+    CPU (so they survive `torch.save` to /dev/shm and a load in the child).
+    Layout is identical to the in-process VIEW path, so the child's backward is
+    byte-for-byte the same math — no HF re-load / RoPE-permutation risk.
+
+    Builds a throwaway _RealBackward(model) only to reuse its exact slicing;
+    we copy out `base/norm_w/lm_w` and drop everything else."""
+    rb = _RealBackward(model=model)
+    config = {
+        "hidden_size": rb.D, "num_hidden_layers": rb.L,
+        "num_attention_heads": rb.Hq, "num_key_value_heads": rb.Hkv,
+        "head_dim": rb.Hd, "intermediate_size": rb.inter,
+        "rope_theta": rb.theta, "rms_norm_eps": rb.eps, "vocab_size": rb.vocab,
+    }
+    base = [{k: v.detach().to("cpu", copy=True) for k, v in layer.items()}
+            for layer in rb.base]
+    return {
+        "config": config,
+        "base": base,
+        "norm_w": rb.norm_w.detach().to("cpu", copy=True),
+        "lm_w": rb.lm_w.detach().to("cpu", copy=True),
+        "base_dtype": str(rb.base_dtype),
+    }
+
+
 _INSTANCE: Optional[_RealBackward] = None
 
 
 def build_real_backward(model: nn.Module, **kwargs) -> _RealBackward:
-    """Module-level singleton accessor."""
+    """Module-level singleton accessor (in-process Path C)."""
     global _INSTANCE
     if _INSTANCE is None:
-        _INSTANCE = _RealBackward(model, **kwargs)
+        _INSTANCE = _RealBackward(model=model, **kwargs)
     return _INSTANCE
+
+
+def build_real_backward_from_state(state: Dict[str, Any], device: str = "cuda",
+                                   **kwargs) -> _RealBackward:
+    """Construct the backward in a subprocess from extract_base_state() output."""
+    return _RealBackward(model=None, state=state, device=device, **kwargs)
 
 
 def get_real_backward() -> Optional[_RealBackward]:
