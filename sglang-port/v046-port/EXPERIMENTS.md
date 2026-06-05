@@ -294,3 +294,40 @@ sync) and copies them in so the hooks apply the trained adapter under MPS.
 - Decision: **S12a and §13 compose** — MPS-isolated backward that also fine-tunes
   serving. The drops are the overfit-stress artifact (back-to-back requests); real
   FT load is spaced out. 7/14 sections, both headline features now combinable.
+
+---
+
+### vLLM-rematch — apples-to-apples vs DeltaServe-vLLM, MATCHED protocol   (2026-06-05, H200 ×1)
+
+**Reflection.** The README's vLLM comparison (vLLM ≈0% co overhead, sglang +324%) was
+apples-to-oranges: sglang IN-PROCESS (no MPS) vs a favorable older vLLM run on a
+different timeline. User asked to verify. Re-cloned + reinstalled DeltaServe-vLLM
+(precompiled vllm 0.21.1rc1.dev, dserve-vllm env), generated the missing dummy LoRA
+weights, pointed it at the SAME 224-req tight timeline sglang used, same 8B model,
+same alpaca corpus, same rank-16, both under MPS. Compared to sglang subprocess+MPS.
+
+- Commands: `eval/auto_benchmark.py --tight` and `--co --tight --timeline-gpu A100
+  --model <8B>` (DSV-vLLM env); sglang side from S12a-8b.
+- vLLM backward verified HEALTHY through the window: loss 4.74→3.10 over 49 batches
+  (24.7k tokens), continuous bwd_log; exitcode=1 was at shutdown only. (Harness post-
+  proc threw NameError `cutoff_iso` AFTER writing the results CSV — a DSV-vLLM harness
+  bug, doesn't affect the data.)
+- **Actual (8B, matched 224-req tight, both MPS):**
+
+  |                | inf TTFT | co TTFT mean/p50/p95 | inf LAT | co LAT mean/p50/p95 | FT trained |
+  |----------------|---------:|---------------------:|--------:|--------------------:|-----------:|
+  | DSV-vLLM 14/14 |  29.3 ms |   61 / 32 / **269**  | 648 ms  |  **697**/664/936    | ~24.7k tok |
+  | sglang+MPS 7/14|  17.3 ms |   37 / 32 / **73**   | 497 ms  |  1057/1083/1188     | ~3.9k tok  |
+
+- **Findings (mixed — neither dominates):**
+  1. Inference baseline: **sglang faster** (17 vs 29 ms TTFT) — engine advantage.
+  2. **vLLM wins E2E latency under co-serving**: +8% (648→697) vs sglang +113%
+     (497→1057), AND it trained ~6× more FT tokens. Its async-schedule + interruptible
+     stack (§8/§10, which the port lacks) keeps total request time smooth.
+  3. **sglang+MPS wins the TTFT tail**: co p95 73 ms vs vLLM 269 ms — MPS hard-isolation
+     protects first-token latency tightly; vLLM's tight-timeline TTFT has a real tail.
+- Decision: replace the misleading "vLLM ≈0% / sglang +324%" with this matched table.
+  The honest gap = E2E latency under co-serving (+113% vs +8%), which maps exactly to
+  the unimplemented §8 (async sched) + §10 (forward_interruptible). Caveat retained: FT
+  injection differs (continuous store-driven vs request-tagged) → ~6× FT-volume gap; a
+  fully FT-volume-matched run would need the sglang port to drive continuous store FT.

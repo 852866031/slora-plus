@@ -26,11 +26,29 @@ nearly halves the TTFT overhead** (+324%→+118%). The tradeoff at 8B: under the
 bursty timeline, drop-on-busy backpressure sheds ~30% of FT samples (39/56 trained)
 to protect inference latency — cheaper IPC (§12 second half) would recover that.
 
-For reference, DeltaServe-vLLM's fully-optimized stack (14/14 opts) achieves
-near-zero co-serving overhead (~22 ms co vs 24 ms inf TTFT) — but that comparison
-is **not yet apples-to-apples**: the vLLM reference predates the radix-cache /
-distinct-FT-sample methodology fixes below and needs a re-run before the numbers
-can be put head-to-head. See `EXPERIMENTS.md`.
+### Apples-to-apples vs DeltaServe-vLLM (matched 2026-06-05)
+
+Re-ran DeltaServe-vLLM (14/14 opts) on the **same** 8B model, **same** 224-req tight
+timeline, same alpaca corpus, same rank-16, both under MPS, both with a verified-healthy
+real FT backward (vLLM loss 4.74→3.10 in-window). The matched result **overturns** the
+old "vLLM ≈ 0% / sglang +324%" framing (that compared sglang *in-process* to a favorable
+older vLLM run):
+
+| 8B, matched tight | inf TTFT | co TTFT (mean/p50/**p95**) | inf LAT | co LAT (mean) | FT trained |
+|---|---:|---:|---:|---:|---:|
+| **DSV-vLLM** 14/14 | 29 ms | 61 / 32 / **269** ms | 648 ms | **697 ms (+8%)** | ~24.7k tok |
+| **sglang+MPS** 7/14 | 17 ms | 37 / 32 / **73** ms | 497 ms | 1057 ms (+113%) | ~3.9k tok |
+
+It's a **tradeoff, not a blowout**:
+- **sglang is faster at inference** (17 vs 29 ms) and keeps the **co-serving TTFT tail
+  tight** (p95 73 vs 269 ms) — MPS hard-isolation protects first-token latency.
+- **vLLM wins end-to-end latency under co-serving** (+8% vs +113%) while training ~6×
+  more FT — its async-scheduling + forward-interruptible stack (§8/§10, not yet in the
+  port) keeps total request time smooth.
+
+So the real remaining gap is **E2E latency under co-serving**, and it maps precisely to
+the unimplemented §8 + §10. Caveat: FT injection still differs (vLLM continuous
+store-driven vs sglang request-tagged → the ~6× FT-volume gap). See `EXPERIMENTS.md`.
 
 > **History:** an earlier version of this table reported +130%/+234% with a *faux*
 > backward (~8 ms/fire placeholder). Those numbers understated the real cost — a
