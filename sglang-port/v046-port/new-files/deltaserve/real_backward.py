@@ -209,6 +209,23 @@ class _RealBackward:
             return out
         return hook
 
+    def export_masters_cpu(self):
+        """Compact CPU snapshot of the trained LoRA masters, for child→parent
+        publish sync (S12a + §13). Small: rank×D per A, out×rank per B."""
+        return [{p: {"A": self.lora[i][p]["A"].detach().to("cpu", copy=True),
+                     "B": self.lora[i][p]["B"].detach().to("cpu", copy=True)}
+                 for p in ("q", "k", "v", "o")} for i in range(self.L)]
+
+    @torch.no_grad()
+    def import_masters(self, masters) -> None:
+        """Copy synced masters into this instance's LoRA tensors in place, so
+        attached inference hooks immediately apply the updated adapter."""
+        dev = self.lm_w.device
+        for i in range(self.L):
+            for p in ("q", "k", "v", "o"):
+                self.lora[i][p]["A"].data.copy_(masters[i][p]["A"].to(dev))
+                self.lora[i][p]["B"].data.copy_(masters[i][p]["B"].to(dev))
+
     def _layer_weights(self, i: int) -> dict:
         lw = dict(self.base[i])
         ld = self.lora[i]

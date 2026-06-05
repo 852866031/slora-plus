@@ -28,25 +28,40 @@ _MAX_INFLIGHT = 1  # drop new FT samples while a backward is in flight
 
 
 class BackwardClient:
-    def __init__(self, sock, proc, weights_path: str):
+    def __init__(self, sock, proc, weights_path: str, publisher=None, publish_every: int = 0):
         self._sock = sock
         self._proc = proc
         self._weights_path = weights_path
         self._outstanding = 0
         self._sent = 0
         self._dropped = 0
+        # §13+S12a: parent-side publisher (holds LoRA masters + inference hooks).
+        # The child ships trained masters every `publish_every` fires; we copy
+        # them in so the hooks apply the adapter under MPS isolation.
+        self._publisher = publisher
+        self._publish_every = int(publish_every) if publisher is not None else 0
+        self._syncs = 0
 
     def _drain(self):
-        """Non-blocking: pull any completed-backward replies to free in-flight slots."""
+        """Non-blocking: pull completed-backward replies to free in-flight slots,
+        and apply any synced LoRA masters to the parent-side publisher."""
         import zmq
         while True:
             try:
-                self._sock.recv(flags=zmq.NOBLOCK)
+                raw = self._sock.recv(flags=zmq.NOBLOCK)
             except zmq.Again:
                 break
             except Exception:
                 break
             self._outstanding = max(0, self._outstanding - 1)
+            if self._publisher is not None:
+                try:
+                    rep = pickle.loads(raw)
+                    if isinstance(rep, dict) and rep.get("masters") is not None:
+                        self._publisher.import_masters(rep["masters"])
+                        self._syncs += 1
+                except Exception as e:
+                    logger.warning(f"[DeltaServe] master sync apply failed: {e}")
 
     def submit(self, snapshot: dict, sample_lens=None) -> bool:
         """Ship one FT-prefill snapshot to the child. Returns True if sent,
@@ -63,6 +78,7 @@ class BackwardClient:
             self._sock.send(pickle.dumps({
                 "op": "backward", "snapshot": cpu_snap,
                 "sample_lens": sample_lens or [],
+                "publish_every": self._publish_every,
             }))
         except Exception as e:
             logger.warning(f"[DeltaServe] backward submit failed: {e}")
@@ -137,7 +153,25 @@ def maybe_start_backward_subprocess(model) -> Optional[BackwardClient]:
             return None
         logger.warning(f"[DeltaServe] backward subprocess ready (L={r.get('L')} "
                        f"D={r.get('D')} mps={mps_pct}%)")
-        return BackwardClient(sock, proc, wpath)
+
+        # §13+S12a: if publishing, build a parent-side holder with the inference
+        # hooks. Its masters start at B=0 (zero delta) until the child's first
+        # sync; then the hooks apply the trained adapter under MPS isolation.
+        publisher = None
+        publish_every = 0
+        if os.environ.get("SGLANG_DS_PUBLISH_LORA", "0") == "1":
+            try:
+                from sglang.srt.deltaserve.real_backward import _RealBackward
+                publisher = _RealBackward(model=model)
+                publisher.attach_inference_hooks()
+                publish_every = int(os.environ.get("SGLANG_DS_PUBLISH_EVERY", "10"))
+                logger.warning(f"[DeltaServe] §13 publish under MPS: parent publisher "
+                               f"built, syncing masters every {publish_every} fires")
+            except Exception as e:
+                logger.warning(f"[DeltaServe] parent publisher build failed: {e}")
+                publisher = None
+        return BackwardClient(sock, proc, wpath, publisher=publisher,
+                              publish_every=publish_every)
     except Exception as e:
         logger.warning(f"[DeltaServe] backward subprocess start failed: {e} — in-process fallback")
         return None

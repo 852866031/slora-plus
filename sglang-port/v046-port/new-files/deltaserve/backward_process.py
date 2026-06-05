@@ -94,10 +94,17 @@ def main(channel_addr: str, model_name: str, mps_pct):
                 if msg.get("sync"):
                     torch.cuda.synchronize()
                     ms = (time.monotonic() - t0) * 1000
-                sock.send(pickle.dumps({
+                reply = {
                     "loss": float(rb._cum_loss / max(1, rb._call_count)),
                     "last_call_ms": ms, "calls": rb._call_count,
-                }))
+                }
+                # §13+S12a: periodically ship the trained masters back so the
+                # parent's inference hooks apply the adapter (publish under MPS).
+                pub_every = int(msg.get("publish_every", 0))
+                if pub_every > 0 and (rb._call_count % pub_every == 0):
+                    torch.cuda.synchronize()  # masters must be post-step
+                    reply["masters"] = rb.export_masters_cpu()
+                sock.send(pickle.dumps(reply))
                 continue
 
             sock.send(pickle.dumps({"error": f"unknown op: {op!r}"}))

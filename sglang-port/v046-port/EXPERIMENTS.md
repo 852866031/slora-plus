@@ -269,3 +269,28 @@ SERVED logprob rise while a control sample stays put.
   the same tensor memory) but is untested here. (2) Works in the IN-PROCESS backward;
   the SUBPROCESS path (S12a) trains masters in the child's address space, so §13+S12a
   needs a cross-process publish (child → parent master sync) — that's the follow-up.
+
+---
+
+### S12a+S13 — served-LoRA publish UNDER MPS isolation (unified)   (2026-06-05, H200 ×1)
+
+**Reflection.** S12a (MPS subprocess) and §13 (publish) were mutually exclusive:
+the child trains masters in its address space; the publish hooks live in the
+inference process. Unify: child ships masters back every K fires; parent holds a
+publisher (_RealBackward(model) → hooks + masters, B=0 → zero delta until first
+sync) and copies them in so the hooks apply the trained adapter under MPS.
+
+- Command: `python scripts/test_publish_lora.py --subprocess --port 30321 --steps 200`
+  (SGLANG_DS_BACKWARD_SUBPROCESS=1 + SGLANG_DS_PUBLISH_LORA=1, MPS daemon up,
+  PUBLISH_EVERY=5; --disable-cuda-graph).
+- Predicted: target served logprob rises (masters sync child→parent, hooks apply);
+  control flat; smaller than in-process §13 due to backpressure drops. FALSIFIED if
+  target flat (sync/publish broken).
+- **Actual:** PASS. target logprob −162.0 → −143.1 (**Δ +18.9**, monotone:
+  +0.9/+5.5/+11.8/+18.9 @ 50/100/150/200), control −59.2 → −59.1 (Δ +0.1).
+  Smaller than in-process §13 (+136.5) because only **51/200 fires** landed — 101+
+  dropped by drop-on-busy backpressure (sequential overfit outran the ~50ms child
+  backward). Per-effective-step gain comparable; mechanism correct.
+- Decision: **S12a and §13 compose** — MPS-isolated backward that also fine-tunes
+  serving. The drops are the overfit-stress artifact (back-to-back requests); real
+  FT load is spaced out. 7/14 sections, both headline features now combinable.

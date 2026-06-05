@@ -84,6 +84,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=30320)
     ap.add_argument("--steps", type=int, default=200)
+    ap.add_argument("--subprocess", action="store_true",
+                    help="run the backward in an MPS-capped subprocess (needs MPS daemon up) "
+                         "— exercises the unified S12a+§13 path")
     args = ap.parse_args()
 
     log = _PORT_DIR / "output" / "server_publish.log"
@@ -94,14 +97,21 @@ def main():
     env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0"),
            "SGLANG_DS_REAL_BACKWARD": "1", "SGLANG_DS_PUBLISH_LORA": "1",
            "SGLANG_DS_FT_START_ON_LAUNCH": "0"}
-    print(f"[pub] launch (publish ON): {log}")
+    if args.subprocess:
+        env["SGLANG_DS_BACKWARD_SUBPROCESS"] = "1"
+        env["SGLANG_DS_BACKWARD_MPS_PCT"] = "10"
+        env["SGLANG_DS_PUBLISH_EVERY"] = "5"
+        env.setdefault("CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps")
+        env.setdefault("CUDA_MPS_LOG_DIRECTORY", "/tmp/nvidia-mps-log")
+    print(f"[pub] launch (publish ON, {'SUBPROCESS+MPS' if args.subprocess else 'in-process'}): {log}")
     proc = subprocess.Popen(cmd, stdout=open(log, "w"), stderr=subprocess.STDOUT,
                             env=env, preexec_fn=os.setsid)
     try:
         if not health(args.port):
             print("[pub] server did not come up"); print("".join(open(log).readlines()[-30:])); return 3
-        # confirm hooks attached
-        hooks = "§13 publish ON" in open(log).read()
+        # confirm hooks attached (in-process or parent-publisher under MPS)
+        logtxt = open(log).read()
+        hooks = ("§13 publish ON" in logtxt) or ("§13 publish under MPS" in logtxt)
         print(f"[pub] publish hooks attached: {hooks}")
 
         L0 = seq_logprob(args.port, TARGET)
