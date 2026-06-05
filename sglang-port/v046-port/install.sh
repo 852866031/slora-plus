@@ -129,6 +129,7 @@ for m in ("sglang.srt.deltaserve.real_backward",
           "sglang.srt.deltaserve.accumulate",
           "sglang.srt.deltaserve.gates",
           "sglang.srt.deltaserve.backward_process",
+          "sglang.srt.deltaserve.backward_client",
           "sglang.srt.deltaserve.bwd_services.llama3"):
     importlib.import_module(m)
 from sglang.srt.server_args import ServerArgs
