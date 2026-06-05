@@ -125,13 +125,35 @@ From `CO_SERVING_OPTIMIZATIONS.md`:
 | 10 | `forward_interruptible` (3-tier pre-emption) | ❌ | needs Task A |
 | 11 | `/start_finetuning` endpoint + `disable_log_stats` | ✅ (the endpoint) | `new-files/deltaserve/gates.py` + `http_server.py` patches |
 | 12 | Backward subprocess + MPS isolation | ✅ (first half) | `new-files/deltaserve/backward_process.py` + `backward_client.py` (CUDA-IPC zero-copy = second half, TODO) |
-| 13 | Served-LoRA hot-publish | ❌ | needs Task A + LoRAManager integration |
+| 13 | Served-LoRA hot-publish | ✅ (in-process) | `real_backward.attach_inference_hooks` — `SGLANG_DS_PUBLISH_LORA=1`; subprocess publish = follow-up |
 | 14 | Eval tooling (`auto_benchmark.py`, plots) | ✅ | `auto_benchmark_sglang.py` + `auto_plot_sglang.py` |
 
-**6 of 14 sections fully implemented; 2 partial.** Task A (real backward) is
-done and verified; §12 first-half (subprocess+MPS) landed. Remaining levers:
-§13 served-LoRA publish, §8 async scheduling, §10 forward_interruptible,
-§12 second-half (CUDA-IPC zero-copy).
+**7 of 14 sections fully implemented; 2 partial.** Task A (real backward) verified;
+§12 first-half (subprocess+MPS) and §13 (served-LoRA publish, in-process) landed.
+Remaining levers: §8 async scheduling, §10 forward_interruptible, §12 second-half
+(CUDA-IPC zero-copy), and the §13 cross-process publish for the subprocess path.
+
+## §13 — served-LoRA publish: training actually fine-tunes the served model
+
+Until §13 the backward trained the LoRA masters **write-only** — inference used
+base weights, so serving never reflected training. `SGLANG_DS_PUBLISH_LORA=1`
+applies the trained delta `scaling·(x@Aᵀ)@Bᵀ` in the inference forward via hooks
+on each layer's `qkv_proj`/`o_proj`, reading the live masters (no base merge — that
+would break the backward's frozen-base rematerialization).
+
+**Proof** (`scripts/test_publish_lora.py`): overfit one sample for 200 steps and
+watch its *served* logprob, vs an untrained control:
+
+| sample | logprob before | after | Δ |
+|---|---:|---:|---:|
+| **target (trained)** | −162.0 | −25.6 | **+136.5** |
+| control (untrained) | −59.2 | −58.7 | +0.5 |
+
+The served model now fits the trained sample dramatically better (monotone over
+steps), while the control is untouched — training changed serving, specifically,
+with no global corruption and a stable feedback loop. Verified with CUDA graph off;
+works in the in-process backward (the subprocess path needs a child→parent master
+sync, a follow-up).
 
 ## Task A — real LoRA backward: DONE & verified (2026-06-05)
 

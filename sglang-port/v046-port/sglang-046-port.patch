@@ -300,7 +300,7 @@
              ret.global_num_tokens_cpu = batch.global_num_tokens
 --- a/srt/model_executor/model_runner.py
 +++ b/srt/model_executor/model_runner.py
-@@ -579,6 +579,47 @@
+@@ -579,6 +579,50 @@
              f"mem usage={(before_avail_memory - after_avail_memory):.2f} GB."
          )
  
@@ -336,7 +336,10 @@
 +                        from sglang.srt.deltaserve.backward_client import maybe_start_backward_subprocess
 +                        self._ds_bwd_client = maybe_start_backward_subprocess(self.model)
 +                        if self._ds_bwd_client is None:
-+                            build_real_backward(self.model)  # in-process fallback
++                            rb = build_real_backward(self.model)  # in-process fallback
++                            # §13: publish the trained LoRA into the inference forward
++                            if os.environ.get("SGLANG_DS_PUBLISH_LORA", "0") == "1":
++                                rb.attach_inference_hooks()
 +                except Exception as e:
 +                    logger.warning(f"[DeltaServe] real backward build failed: {e}")
 +            except Exception as e:
@@ -348,7 +351,7 @@
          # Handle the case where some ranks do not finish loading.
          try:
              dist.monitored_barrier(
-@@ -1165,6 +1206,26 @@
+@@ -1165,6 +1209,26 @@
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:
          self.forward_pass_id += 1
  
@@ -375,7 +378,7 @@
          with get_global_expert_distribution_recorder().with_forward_pass(
              self.forward_pass_id,
              forward_batch,
-@@ -1176,6 +1237,22 @@
+@@ -1176,6 +1240,22 @@
          if self.eplb_manager is not None:
              self.eplb_manager.on_forward_pass_end(self.forward_pass_id)
  
@@ -398,7 +401,7 @@
          return output
  
      def _forward_raw(
-@@ -1184,10 +1261,16 @@
+@@ -1184,10 +1264,16 @@
          skip_attn_backend_init: bool,
          pp_proxy_tensors: Optional[PPProxyTensors],
      ) -> Tuple[Union[LogitsProcessorOutput, PPProxyTensors], bool]:

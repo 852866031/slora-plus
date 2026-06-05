@@ -148,12 +148,66 @@ class _RealBackward:
         self._call_count = 0
         self._cum_loss = 0.0
         self._cum_tokens = 0
+        self.publish_enabled = False   # §13: apply trained LoRA in inference forward
+        self._infer_hooks = []
         logger.warning(
             f"[DeltaServe] real_backward state built: D={self.D} L={self.L} "
             f"Hq={self.Hq} Hkv={self.Hkv} Hd={self.Hd} inter={self.inter} "
             f"vocab={self.vocab} lora_rank={self.lora_rank} "
             f"params={sum(p.numel() for p in params)/1e6:.2f}M"
         )
+
+    # --- §13 served-LoRA publish ------------------------------------------- #
+    def attach_inference_hooks(self) -> None:
+        """Apply the trained LoRA delta in the MODEL's inference forward via
+        forward-hooks on each layer's qkv_proj + o_proj, reading the live fp32
+        masters every call so training continuously affects serving. Base
+        weights stay frozen — the backward's rematerialization uses `self.base`
+        views and the math layer's explicit weights, NOT these modules' outputs,
+        so the two paths don't interfere. In-place param updates from
+        optimizer.step propagate even through captured CUDA graphs (the matmul
+        kernels reference the A/B tensor memory)."""
+        if self.layers is None:
+            logger.warning("[DeltaServe] §13 publish: no model handle (state-built) — hooks skipped")
+            return
+        if self._infer_hooks:
+            return
+        for i in range(self.L):
+            attn = self.layers[i].self_attn
+            self._infer_hooks.append(attn.qkv_proj.register_forward_hook(self._make_qkv_hook(i)))
+            self._infer_hooks.append(attn.o_proj.register_forward_hook(self._make_o_hook(i)))
+        self.publish_enabled = True
+        logger.warning(f"[DeltaServe] §13 publish ON: {len(self._infer_hooks)} LoRA "
+                       f"inference hooks attached ({self.L} layers × qkv+o)")
+
+    def _delta(self, x, A, B):
+        # scaling·(x @ Aᵀ) @ Bᵀ ; x any dtype, A[r,D]/B[out,r] fp32 → x.dtype
+        d = (x.float() @ A.t()) @ B.t()
+        return (self.scaling * d).to(x.dtype)
+
+    def _make_qkv_hook(self, i: int):
+        ld = self.lora[i]; qs, ks = self.q_size, self.kv_size
+        def hook(module, inp, out):
+            if not self.publish_enabled:
+                return None
+            x = inp[0]
+            t = out[0] if isinstance(out, tuple) else out
+            t[..., :qs] += self._delta(x, ld["q"]["A"], ld["q"]["B"])
+            t[..., qs:qs + ks] += self._delta(x, ld["k"]["A"], ld["k"]["B"])
+            t[..., qs + ks:qs + 2 * ks] += self._delta(x, ld["v"]["A"], ld["v"]["B"])
+            return out
+        return hook
+
+    def _make_o_hook(self, i: int):
+        ld = self.lora[i]
+        def hook(module, inp, out):
+            if not self.publish_enabled:
+                return None
+            x = inp[0]
+            t = out[0] if isinstance(out, tuple) else out
+            t += self._delta(x, ld["o"]["A"], ld["o"]["B"])
+            return out
+        return hook
 
     def _layer_weights(self, i: int) -> dict:
         lw = dict(self.base[i])

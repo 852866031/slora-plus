@@ -243,3 +243,29 @@ TTFT 35ms, latency 644ms vs inf-only TTFT 10ms / 158ms.
     queue (train slightly stale instead of dropping).
 - Decision: S12a validated on both model sizes. Update README 8B TL;DR with the
   isolated row. Next: §12 second-half (CUDA-IPC) or §13 served-LoRA publish.
+
+---
+
+### S13-publish — does the trained LoRA actually affect serving?   (2026-06-05, H200 ×1)
+
+**Reflection.** Until now the backward trained the LoRA masters write-only —
+inference used base weights, so serving never reflected training (the per-fire
+loss was flat by construction). §13 applies the trained delta in the inference
+forward via hooks on qkv_proj/o_proj (NOT a base merge — that would break the
+backward's frozen-base rematerialization). Proof = overfit one sample, watch its
+SERVED logprob rise while a control sample stays put.
+
+- Command: `python scripts/test_publish_lora.py --port 30320 --steps 200`
+  (server: SGLANG_DS_REAL_BACKWARD=1 SGLANG_DS_PUBLISH_LORA=1, in-process backward,
+  --disable-radix-cache --disable-cuda-graph, gate opened after baseline).
+- Predicted: target logprob rises clearly with steps; control ≈ flat; no NaN/divergence.
+  FALSIFIED if target flat (publish broken) or control moves as much (global corruption).
+- **Actual:** PASS. target logprob −162.0 → −25.6 (**Δ +136.5 nats**), monotone over
+  steps (+18.6 @50, +50.1 @100, +98.6 @150, +136.5 @200). control −59.2 → −58.7
+  (Δ **+0.5**). Hooks attached confirmed; no NaN; feedback loop stable.
+- Decision: **§13 works in-process** — training genuinely fine-tunes the served model,
+  specific to the trained sample. Caveats: (1) verified with CUDA graph OFF; graph-on
+  is expected to work (optimizer.step updates params in place, captured matmuls read
+  the same tensor memory) but is untested here. (2) Works in the IN-PROCESS backward;
+  the SUBPROCESS path (S12a) trains masters in the child's address space, so §13+S12a
+  needs a cross-process publish (child → parent master sync) — that's the follow-up.
