@@ -173,3 +173,27 @@ re-run — marked separately). 8B backward will be heavier per fire than 1B
   is 56×94ms = 5.3s of backward on shared SMs in a 25s window → S12a (MPS) is the
   structural fix. vLLM cross-comparison still needs a vLLM re-run under the distinct-FT
   / radix-aware methodology before it's apples-to-apples.
+
+---
+
+### S12a-derisk — does MPS thread-% capping protect inference latency?   (2026-06-05, H200 ×1)
+
+**Reflection.** Before building the subprocess+IPC+MPS machinery (multi-hour, several
+failure modes), validate the premise cheaply: on THIS H200 + CUDA, does MPS honor a
+thread-% cap so a compute-hog co-tenant can't starve a latency-sensitive process?
+Synthetic proxies (victim = 8B-prefill-shaped GEMM bursts; hog = 32-layer
+backward-shaped GEMM sequence) on one GPU, 3 conditions. The in-process backward
+can't yield (it runs on the scheduler thread — gpu_grant.maybe_pause would deadlock),
+so a separate MPS-capped process is the only structural fix; this tests if it works.
+
+- Command: `bash scripts/mps_probe.sh` (victim alone / +hog no-MPS / +hog MPS@10%).
+- Predicted: no-MPS victim degrades ≥1.5×; MPS@10% recovers victim to ≲1.3× baseline
+  while hog keeps useful throughput. FALSIFIED if MPS@10% ≈ no-MPS (cap not honored).
+- **Actual:** victim mean latency — alone **5.10ms**, +hog no-MPS **10.03ms (1.97×)**,
+  +hog MPS@10% **5.95ms (1.17×)**. Hog throughput 4303→956 fires/14s under the cap
+  (still ~68/s, ample for FT). PASS — MPS honors the cap and protects the victim.
+- Decision: **S12a is GO.** Build the backward as an MPS-capped subprocess. Real win
+  is likely larger than this synthetic 1.97×→1.17× because the real 8B co-serving TTFT
+  hit was 4.2× (heavier/burstier backward) — more contention to recover. Next: solve
+  weight-sharing into the child (check first whether sglang's qkv layout == raw HF so
+  the child can load weights independently and safely, else use CUDA-IPC).
