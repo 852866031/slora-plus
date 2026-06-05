@@ -12,20 +12,34 @@ DeltaServe-vLLM stack on the same hardware.
 
 ## TL;DR
 
-| Engine | Stack | inf-only TTFT | co-serving TTFT | Δ TTFT | Δ latency |
-|---|---|---:|---:|---:|---:|
-| sglang | baseline | **18 ms** | — | — | — |
-| sglang | + 5 of 14 opts | — | 42 ms | **+130%** | **+234%** |
-| DSV-vLLM | baseline | 24 ms | — | — | — |
-| DSV-vLLM | + 14 of 14 opts | — | **22 ms** | -6% | -4% (≈ free) |
+**sglang DeltaServe, REAL LoRA backward (verified), Llama-3-8B, H200, tight timeline:**
 
-Bench config (both engines): H200 GPU, Llama-3-8B, tight timeline (224
-reqs / ~25s span, 80-token prompts × 80-token output).
+| Config | inf TTFT | co-serving TTFT | Δ TTFT | inf latency | co latency | Δ latency |
+|---|---:|---:|---:|---:|---:|---:|
+| sglang inf-only | 17 ms | — | — | 497 ms | — | — |
+| sglang + real bwd + prefill-gate | — | **72 ms** | +324% | — | **1391 ms** | +180% |
 
-> ⚠️ **These sglang co-serving numbers are with the *faux* backward** (~8 ms/fire
-> placeholder). The real LoRA backward is now implemented and verified (see
-> "Task A" below) but costs ~45 ms/fire on 1B — the real-backward apples-to-apples
-> re-run is in progress and will replace this table.
+The co-serving overhead is real backward work: **56 backward fires, ~94 ms each**
+(one per FT sample), contending for SMs with inference. That's the honest cost of
+training a LoRA adapter concurrently with serving, with 5 of 14 optimizations and
+**no SM isolation yet** (the backward shares the GPU with inference).
+
+For reference, DeltaServe-vLLM's fully-optimized stack (14/14 opts) achieves
+near-zero co-serving overhead (~22 ms co vs 24 ms inf TTFT) — but that comparison
+is **not yet apples-to-apples**: the vLLM reference predates the radix-cache /
+distinct-FT-sample methodology fixes below and needs a re-run before the numbers
+can be put head-to-head. See `EXPERIMENTS.md`.
+
+> **History:** an earlier version of this table reported +130%/+234% with a *faux*
+> backward (~8 ms/fire placeholder). Those numbers understated the real cost — a
+> real LoRA backward is ~94 ms/fire on 8B. The table above is the verified real
+> backward (see "Task A" below).
+
+> ⚠️ **Two benchmark-methodology fixes** (2026-06-05) that affect any co-serving
+> measurement here: (1) the backward now fires only on the FT **prefill**, not on
+> decode steps — a bug that was firing it 15× too often (7.3× latency win, see
+> `EXPERIMENTS.md` A-bench-1b-fix); (2) FT requests draw **distinct** prompts from
+> a real corpus (`--ft-corpus`) so they don't dedup in sglang's radix cache.
 
 Two facts worth highlighting:
 

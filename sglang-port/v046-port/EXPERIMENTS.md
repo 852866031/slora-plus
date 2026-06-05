@@ -146,3 +146,30 @@ to collapse toward the inf-only baseline — most of the 30× was spurious decod
   S12a (MPS isolation) and backward-compute opt (graph the real attention bwd). Next
   realism lever: FT requests are forward-only in real SFT — sending max_new_tokens=1
   for FT would remove their 80 pointless decode steps (still adds decode load now).
+
+---
+
+### A-bench-8b — real-backward co-serving on Llama-3-8B (honest headline numbers)   (2026-06-05, H200 ×1)
+
+**Reflection.** README TL;DR headline is still faux-backward on 8B. Now that the
+real backward is verified + the prefill-only gate landed, get the honest 8B
+inf-vs-co-real overhead (our own before/after; the vLLM cross-comparison is
+confounded by the same radix-cache/uniform-prompt issue and would need a vLLM
+re-run — marked separately). 8B backward will be heavier per fire than 1B
+(2× layers, 2× head_dim) → expect bigger residual.
+
+- Command: `auto_benchmark_sglang.py --tight --port 30501 --model <8B>` (inf) and
+  `--co --tight --real-backward --ft-fraction 0.25 --ft-corpus alpaca_1000_p95.txt
+   --port 30502 --model <8B>` (co).
+- Predicted: inf TTFT ~30-60ms; co TTFT 3-6× inf; fires ≈ 56 (gate working).
+  FALSIFIED if fires ≫ 56 (gate regressed) or OOM.
+- **Actual:** inf-only TTFT mean=**17ms** p95=20ms, latency mean=**497ms**.
+  co(real+gate) TTFT mean=**72ms** p95=137ms (**+324%**), latency mean=**1391ms**
+  (**+180%**). fires=**56** (gate works on 8B), steady **94.2ms/fire** (max 102).
+  Prediction hit (co TTFT 4.2× inf, in the 3-6× band).
+- Decision: honest 8B headline = +324% TTFT / +180% latency with REAL backward +
+  prefill gate (vs the old faux table's +130%/+234% — faux understated TTFT because
+  faux fires are 8ms vs real 94ms). Update README TL;DR to these real numbers. Residual
+  is 56×94ms = 5.3s of backward on shared SMs in a 25s window → S12a (MPS) is the
+  structural fix. vLLM cross-comparison still needs a vLLM re-run under the distinct-FT
+  / radix-aware methodology before it's apples-to-apples.
