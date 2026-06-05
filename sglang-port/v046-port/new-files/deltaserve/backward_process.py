@@ -1,19 +1,30 @@
 """DeltaServe backward subprocess — child entry point and parent-side spawner.
 
-Phase 6 scope: subprocess lifecycle + IPC round-trip only. The child binds a
-ZMQ PAIR socket; the parent (engine / test) connects to it. Messages are
-plain pickled dicts: ``{"op": "step", "acts": {...}}`` → ``{"key": tensor, ...}``.
+S12a: the child runs the REAL LoRA backward in its own process so it can be
+MPS-capped (CUDA_MPS_ACTIVE_THREAD_PERCENTAGE on the child only) and so its
+GPU work no longer shares the scheduler thread / inference SMs uncontrolled.
 
-The parent-side helper ``spawn_backward_process`` sets
-``CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`` in the child's env dict only — the
-parent's own environment is untouched so the inference scheduler keeps the
-full GPU partition.
+Protocol (pickled dicts over a ZMQ PAIR socket; the child binds, parent connects):
+  parent → child:
+    {"op":"init", "weights_path": <path>, "lora_rank":r, "lora_alpha":a,
+     "lr":lr, "weight_decay":wd}      # one-time: torch.load the base-weight
+                                       # state dumped by extract_base_state and
+                                       # build the backward from it
+    {"op":"backward", "snapshot": <dict of CPU tensors>}   # one FT prefill
+    {"op":"shutdown"}
+  child → parent:
+    {"ok":True, ...} for init/shutdown; {"loss":x,"n_valid":n,"ms":t} for backward.
+
+The parent should send "backward" fire-and-forget when it doesn't need to block
+on the result (the child runs the backward async w.r.t. inference). The standalone
+round-trip test uses request/reply to assert correctness.
 """
 
 import os
 import pickle
 import subprocess
 import sys
+import time
 from typing import Optional
 
 import zmq
@@ -21,29 +32,25 @@ import zmq
 _MPS_PERCENTAGE_ENV = "CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"
 
 
-def _build_service(model_name: str, mps_pct: int):
-    # Phase 6: only the Llama3 stub is wired up.
-    from sglang.srt.deltaserve.bwd_services.llama3 import Llama3BackwardService
-
-    return Llama3BackwardService(
-        model_name=model_name, device="cpu", mps_pct=mps_pct
-    )
-
-
 def main(channel_addr: str, model_name: str, mps_pct):
     mps_pct = int(mps_pct)
 
-    # Bind the IPC socket *before* the heavy sglang import so the parent's
-    # connect succeeds immediately. The first recv blocks until the import
-    # finishes (which can take >10s); after that round-trip latency is
-    # dominated by the actual service.step() call.
+    # Bind the IPC socket *before* the heavy torch/sglang import so the parent's
+    # connect succeeds immediately; the first recv blocks until import + (later)
+    # weight load finish.
     ctx = zmq.Context.instance()
     sock = ctx.socket(zmq.PAIR)
     sock.bind(channel_addr)
 
-    service = _build_service(model_name, mps_pct)
-    service.start()
+    import logging
+    logging.basicConfig(level=logging.WARNING)
+    log = logging.getLogger("ds.bwd_child")
+    log.warning(f"[bwd_child] up, mps_pct={os.environ.get(_MPS_PERCENTAGE_ENV)}")
 
+    import torch  # noqa: heavy import, after socket bind
+    from sglang.srt.deltaserve.real_backward import build_real_backward_from_state
+
+    rb = None
     try:
         while True:
             try:
@@ -52,22 +59,64 @@ def main(channel_addr: str, model_name: str, mps_pct):
                 break
             msg = pickle.loads(raw)
             op = msg.get("op")
+
             if op == "shutdown":
                 sock.send(pickle.dumps({"ok": True}))
                 break
-            if op == "step":
-                grads = service.step(msg.get("acts", {}))
-                sock.send(pickle.dumps(grads))
+
+            if op == "init":
+                t0 = time.monotonic()
+                state = torch.load(msg["weights_path"], map_location="cpu", weights_only=False)
+                rb = build_real_backward_from_state(
+                    state, device="cuda",
+                    lora_rank=msg.get("lora_rank", 16),
+                    lora_alpha=msg.get("lora_alpha", 32.0),
+                    lr=msg.get("lr", 5e-6),
+                    weight_decay=msg.get("weight_decay", 0.01),
+                )
+                log.warning(f"[bwd_child] init: loaded weights + built backward "
+                            f"in {time.monotonic()-t0:.1f}s")
+                sock.send(pickle.dumps({"ok": True, "L": rb.L, "D": rb.D}))
                 continue
-            if op == "apply_grads":
-                service.apply_grads(msg.get("grads", {}))
-                sock.send(pickle.dumps({"ok": True}))
+
+            if op == "backward":
+                if rb is None:
+                    sock.send(pickle.dumps({"error": "not initialized"}))
+                    continue
+                snap = msg["snapshot"]
+                # Move CPU snapshot tensors onto the child's GPU.
+                snap = _snapshot_to_cuda(snap)
+                sample_lens = msg.get("sample_lens", [])
+                t0 = time.monotonic()
+                elapsed = rb.process(snap, sample_lens=sample_lens)
+                ms = (time.monotonic() - t0) * 1000
+                # process() returns enqueue time; sync to report true GPU time when asked.
+                if msg.get("sync"):
+                    torch.cuda.synchronize()
+                    ms = (time.monotonic() - t0) * 1000
+                sock.send(pickle.dumps({
+                    "loss": float(rb._cum_loss / max(1, rb._call_count)),
+                    "last_call_ms": ms, "calls": rb._call_count,
+                }))
                 continue
+
             sock.send(pickle.dumps({"error": f"unknown op: {op!r}"}))
     finally:
-        service.stop()
         sock.close(linger=0)
         ctx.term()
+
+
+def _snapshot_to_cuda(snap: dict) -> dict:
+    import torch
+    out = dict(snap)
+    li = snap.get("layer_in")
+    if isinstance(li, dict):
+        out["layer_in"] = {k: (v.cuda() if hasattr(v, "cuda") else v) for k, v in li.items()}
+    for k in ("final_in", "final_hidden", "concat_input_ids"):
+        v = snap.get(k)
+        if hasattr(v, "cuda"):
+            out[k] = v.cuda()
+    return out
 
 
 def spawn_backward_process(
@@ -89,16 +138,11 @@ def spawn_backward_process(
 
 
 if __name__ == "__main__":
-    # When invoked as a script (subprocess.Popen([python, __file__, ...]))
-    # the in-tree sglang package is not on sys.path (a system-installed
-    # sglang may shadow it). Walk up three levels from this file
-    # (deltaserve/ -> srt/ -> sglang/) to land on the package root that
-    # *contains* sglang/, and prepend it so the bwd_services import below
-    # resolves to the in-tree code.
+    # When invoked as a script the in-tree sglang package may not be on
+    # sys.path; walk up to the package root (deltaserve/ -> srt/ -> sglang/ -> root).
     _pkg_root = os.path.abspath(
         os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
     )
     if _pkg_root not in sys.path:
         sys.path.insert(0, _pkg_root)
-    # argv: [script, channel_addr, model_name, mps_pct]
     main(sys.argv[1], sys.argv[2], int(sys.argv[3]))
