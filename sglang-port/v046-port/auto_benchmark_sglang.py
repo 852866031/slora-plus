@@ -309,6 +309,10 @@ def main():
                     help="Disable sglang's cuda-graph for inference batches too. By default inference batches DO use cuda graph (FT batches always bypass via _has_ft check in model_runner).")
     ap.add_argument("--real-backward", action="store_true",
                     help="Task A: use real LoRA backward kernels (vs faux). Slower per fire but produces real grads + loss curves.")
+    ap.add_argument("--backward-subprocess", action="store_true",
+                    help="S12a: run the real backward in an MPS-capped subprocess (needs MPS daemon). Tags output _sub.")
+    ap.add_argument("--backward-mps-pct", type=int, default=10,
+                    help="MPS thread %% for the backward child (with --backward-subprocess).")
     ap.add_argument("--ft-corpus", default="alpaca_1000_p95.txt",
                     help="File of distinct FT samples (one per line) for FT-tagged requests, "
                          "resolved against eval/llama3/data/. Distinct prompts avoid radix-cache "
@@ -357,6 +361,13 @@ def main():
             # Task A: real LoRA backward (instead of faux)
             if args.real_backward:
                 env["SGLANG_DS_REAL_BACKWARD"] = "1"
+            # S12a: run the real backward in an MPS-capped subprocess
+            if args.backward_subprocess:
+                env["SGLANG_DS_BACKWARD_SUBPROCESS"] = "1"
+                env["SGLANG_DS_BACKWARD_MPS_PCT"] = str(args.backward_mps_pct)
+                # the child + this server must be MPS clients
+                env.setdefault("CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps")
+                env.setdefault("CUDA_MPS_LOG_DIRECTORY", "/tmp/nvidia-mps-log")
         server_proc = subprocess.Popen(
             cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
             env=env, preexec_fn=os.setsid,
@@ -389,6 +400,8 @@ def main():
     suffix = f"_{shape}{'_co' if args.co else '_inf'}"
     if args.co and args.real_backward:
         suffix += "_real"
+    if args.co and args.backward_subprocess:
+        suffix += "_sub"
     out_csv = OUTPUT_DIR / f"timeline_results{suffix}.csv"
     write_csv(out_csv, results)
     print(f"[bench] wrote {out_csv}")

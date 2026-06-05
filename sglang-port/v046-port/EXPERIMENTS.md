@@ -197,3 +197,32 @@ so a separate MPS-capped process is the only structural fix; this tests if it wo
   hit was 4.2× (heavier/burstier backward) — more contention to recover. Next: solve
   weight-sharing into the child (check first whether sglang's qkv layout == raw HF so
   the child can load weights independently and safely, else use CUDA-IPC).
+
+---
+
+### S12a-inserver — backward in MPS-capped subprocess, in-server (1B)   (2026-06-05, H200 ×1)
+
+**Reflection.** M1 proved the subprocess backward is bit-exact + MPS-safe standalone.
+Now wire it into the server (model_runner spawns the child, ships snapshots
+fire-and-forget with drop-on-busy backpressure) and measure whether MPS isolation
+recovers the co-serving TTFT. Baseline = in-process real backward (A-bench-1b-fix):
+TTFT 35ms, latency 644ms vs inf-only TTFT 10ms / 158ms.
+
+- Command: `auto_benchmark_sglang.py --co --tight --real-backward --backward-subprocess
+  --backward-mps-pct 10 --ft-corpus alpaca_1000_p95.txt --port 30601` (MPS daemon up).
+- Predicted: subprocess+MPS TTFT < in-process 35ms (toward inf-only 10ms); some FT
+  samples dropped by backpressure. FALSIFIED if TTFT ≈ in-process (MPS not helping) or
+  child errors / no fires.
+- **Actual (ft0.25, matched):** co sub+MPS TTFT mean=**21ms** p95=30ms, latency
+  mean=**536ms**. vs in-process 35ms/644ms and inf-only 10ms/158ms.
+  child fires=**54** (of 56; 1 dropped by backpressure, ~96% trained), 0 errors,
+  "backward subprocess ready L=16 D=2048 mps=10%".
+  - **TTFT 35→21ms (−40%)**; co-serving TTFT overhead +250%→+110% over inf-only.
+    latency 644→536ms (−17%, decode-heavy so less MPS-sensitive).
+  - Bonus: backward in a separate address space → cannot corrupt inference memory
+    (the graph-pool NaN risk is structurally eliminated, not just avoided).
+- Decision: **S12a (first half) lands** — backward as MPS-capped subprocess, real
+  TTFT win, training throughput preserved (96%). Regenerate patch + new-file
+  drop-in (backward_client.py), update README. Second half (CUDA-IPC zero-copy
+  activations, vs the current CPU-roundtrip) is the next S12 lever; also an 8B
+  sub+MPS run to confirm the win scales.

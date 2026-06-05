@@ -3,7 +3,7 @@
 This port is **not a fork of sglang**. It is a thin overlay on the stock
 `sglang==0.4.6.post5` PyPI package:
 
-- **17 new drop-in files** — the `deltaserve/` package (13 files: co-serving
+- **18 new drop-in files** — the `deltaserve/` package (14 files: co-serving
   runtime — activation capture, real LoRA backward, GPU-grant, gates, the
   optional backward subprocess) plus 4 files that live elsewhere under `srt/`.
 - **10 patched files** — small hooks into stock sglang (request flag, per-token
@@ -34,7 +34,7 @@ The script will:
    CUDA). Falls back to PyPI only if the vendored wheel is missing. If a
    *different* sglang version is already installed it stops and asks you to pin
    the version first.
-2. Copy the 17 drop-in files into the installed package.
+2. Copy the 18 drop-in files into the installed package.
 3. Apply `sglang-046-port.patch` (`-p1` from the package root), backing up each
    original to `<file>.ds_orig` first.
 4. Import-check every deltaserve module and confirm the two new server flags

@@ -1,12 +1,12 @@
 # sglang DeltaServe port — co-serving benchmark report
 
-**Status:** working sglang co-serving prototype on H200. Real activation
-capture, real backward subprocess plumbing, 5 of 14 CO_SERVING_OPTIMIZATIONS
-sections implemented. Benchmarked apples-to-apples against the reference
-DeltaServe-vLLM stack on the same hardware.
+**Status:** working sglang co-serving prototype on H200. Verified real LoRA
+backward (gradcheck + in-server), 6 of 14 CO_SERVING_OPTIMIZATIONS sections
+implemented (incl. backward in an MPS-capped subprocess). See `EXPERIMENTS.md`
+for the full measured progression.
 
 > **Installing the port?** See [INSTALL.md](INSTALL.md). The repo ships the
-> delta over stock `sglang==0.4.6.post5` (17 drop-in files +
+> delta over stock `sglang==0.4.6.post5` (18 drop-in files +
 > `sglang-046-port.patch`), not a full sglang fork — `bash install.sh` applies
 > it to a stock install.
 
@@ -41,20 +41,10 @@ can be put head-to-head. See `EXPERIMENTS.md`.
 > `EXPERIMENTS.md` A-bench-1b-fix); (2) FT requests draw **distinct** prompts from
 > a real corpus (`--ft-corpus`) so they don't dedup in sglang's radix cache.
 
-Two facts worth highlighting:
-
-1. **Inference baseline favors sglang** — 18 ms vs 24 ms TTFT (24% faster).
-   That gap is just sglang's normal inference advantage over vLLM; not a
-   DeltaServe thing.
-2. **DSV-vLLM's full optimization stack achieves near-zero co-serving
-   overhead** — co-serving TTFT/latency are within noise of inference-only.
-   Their backward log shows 151 backward fires in 25s; inference never feels
-   it. This is what production DeltaServe looks like.
-
-Our sglang port currently pays +130% TTFT / +234% latency under the same
-load because we implemented 5 of 14 optimizations (Sections 2, 4, 6, 7, 11
-from `CO_SERVING_OPTIMIZATIONS.md`). The remaining 9 are blocked on real
-GQA backward kernels (Task A — see "Roadmap" below).
+With the backward isolated in an MPS-capped subprocess (S12a, below), the 1B
+co-serving TTFT overhead drops to +110% over inf-only while still training 96%
+of FT samples. DSV-vLLM's fully-optimized stack (14/14) reaches near-zero
+overhead; closing the rest of that gap is the roadmap below.
 
 ## Plots
 
@@ -132,12 +122,14 @@ From `CO_SERVING_OPTIMIZATIONS.md`:
 | 9 | Buffer / admission lifecycle | partial — `coordinator.reserve` exists | `new-files/finetune_coordinator.py` |
 | 10 | `forward_interruptible` (3-tier pre-emption) | ❌ | needs Task A |
 | 11 | `/start_finetuning` endpoint + `disable_log_stats` | ✅ (the endpoint) | `new-files/deltaserve/gates.py` + `http_server.py` patches |
-| 12 | CUDA-IPC zero-copy weight/activation sharing | ❌ | needs subprocess architecture |
+| 12 | Backward subprocess + MPS isolation | ✅ (first half) | `new-files/deltaserve/backward_process.py` + `backward_client.py` (CUDA-IPC zero-copy = second half, TODO) |
 | 13 | Served-LoRA hot-publish | ❌ | needs Task A + LoRAManager integration |
 | 14 | Eval tooling (`auto_benchmark.py`, plots) | ✅ | `auto_benchmark_sglang.py` + `auto_plot_sglang.py` |
 
-**5 of 14 sections fully implemented; 2 partial.** Bottleneck for the
-remaining 7: real GQA backward kernels (Task A in the roadmap below).
+**6 of 14 sections fully implemented; 2 partial.** Task A (real backward) is
+done and verified; §12 first-half (subprocess+MPS) landed. Remaining levers:
+§13 served-LoRA publish, §8 async scheduling, §10 forward_interruptible,
+§12 second-half (CUDA-IPC zero-copy).
 
 ## Task A — real LoRA backward: DONE & verified (2026-06-05)
 
@@ -176,9 +168,43 @@ motivation for the roadmap below (subprocess+MPS, backward-compute opt).
 
 **Still open after Task A:** the trained fp32 LoRA masters are **not yet
 published back into the forward path** (served-LoRA hot-publish, §13), so the
-adapter trains but inference doesn't yet see it; and the apples-to-apples TL;DR
-above is still a *faux*-backward measurement — the real-backward re-run is in
-progress.
+adapter trains but inference doesn't yet see it.
+
+## S12a — backward in an MPS-capped subprocess (done, first half)
+
+The in-process backward shares SMs with inference and can't yield (it runs on
+the scheduler thread). S12a moves it into a separate process capped via MPS:
+
+```bash
+# 1. start the MPS daemon (one-time, per box)
+export CUDA_VISIBLE_DEVICES=0
+nvidia-cuda-mps-control -d
+# 2. launch with the subprocess backward
+python -m sglang.launch_server --model-path <llama3> --enable-finetuning ...
+#   env: SGLANG_DS_REAL_BACKWARD=1 SGLANG_DS_BACKWARD_SUBPROCESS=1
+#        SGLANG_DS_BACKWARD_MPS_PCT=10
+# or via the benchmark: auto_benchmark_sglang.py --co --real-backward
+#        --backward-subprocess --backward-mps-pct 10
+```
+
+`model_runner` spawns the child, dumps its already-correct base weights to
+`/dev/shm`, and the child loads them and runs the **verified** backward
+(bit-exact vs in-process). Snapshots are shipped fire-and-forget with
+drop-on-busy backpressure, so the scheduler thread never waits.
+
+**Result (Llama-3.2-1B, tight, 25% FT):**
+
+| config | TTFT mean | latency mean | FT trained |
+|---|---:|---:|---:|
+| inf-only | 10 ms | 158 ms | — |
+| co, in-process backward | 35 ms | 644 ms | 56/56 |
+| **co, subprocess + MPS @10%** | **21 ms** | **536 ms** | 54/56 |
+
+Co-serving TTFT overhead drops from +250% to +110% over inf-only (−40% TTFT)
+while still training 96% of FT samples. The child runs in its own address
+space, so it **cannot corrupt inference memory** — the graph-pool NaN risk is
+structurally eliminated. The remaining cost is the CPU-roundtrip activation
+IPC; CUDA-IPC zero-copy (S12 second half) is the next lever.
 
 ## Roadmap (impact order)
 
