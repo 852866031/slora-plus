@@ -17,12 +17,14 @@ for the full measured progression.
 | Config | inf TTFT | co-serving TTFT | Δ TTFT | inf latency | co latency | Δ latency |
 |---|---:|---:|---:|---:|---:|---:|
 | sglang inf-only | 17 ms | — | — | 497 ms | — | — |
-| sglang + real bwd + prefill-gate | — | **72 ms** | +324% | — | **1391 ms** | +180% |
+| + real bwd, in-process | — | 72 ms | +324% | — | 1391 ms | +180% |
+| **+ real bwd, subprocess+MPS (S12a)** | — | **37 ms** | **+118%** | — | **1057 ms** | **+113%** |
 
-The co-serving overhead is real backward work: **56 backward fires, ~94 ms each**
-(one per FT sample), contending for SMs with inference. That's the honest cost of
-training a LoRA adapter concurrently with serving, with 5 of 14 optimizations and
-**no SM isolation yet** (the backward shares the GPU with inference).
+Each backward fire is real work (~94 ms on 8B, one per FT sample). In-process it
+contends for SMs with inference; **isolating it in an MPS-capped subprocess (S12a)
+nearly halves the TTFT overhead** (+324%→+118%). The tradeoff at 8B: under the
+bursty timeline, drop-on-busy backpressure sheds ~30% of FT samples (39/56 trained)
+to protect inference latency — cheaper IPC (§12 second half) would recover that.
 
 For reference, DeltaServe-vLLM's fully-optimized stack (14/14 opts) achieves
 near-zero co-serving overhead (~22 ms co vs 24 ms inf TTFT) — but that comparison

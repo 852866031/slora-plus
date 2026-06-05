@@ -226,3 +226,20 @@ TTFT 35ms, latency 644ms vs inf-only TTFT 10ms / 158ms.
   drop-in (backward_client.py), update README. Second half (CUDA-IPC zero-copy
   activations, vs the current CPU-roundtrip) is the next S12 lever; also an 8B
   sub+MPS run to confirm the win scales.
+
+---
+
+### S12a-8b — subprocess+MPS scales to 8B   (2026-06-05, H200 ×1)
+
+- Command: same as S12a-inserver but `--model <Llama-3-8B>` `--port 30603`.
+- **Actual (8B tight, ft0.25):** co sub+MPS TTFT mean=**37ms** p95=73ms, latency
+  mean=**1057ms**. vs in-process 72ms/1391ms and inf-only 17ms/497ms.
+  child fires=**39/56** (≈30% dropped by backpressure — 8B backward ~94ms vs bursty
+  FT arrivals), 0 errors, "subprocess ready L=32 D=4096 mps=10%".
+  - **TTFT 72→37ms (−49%)**; overhead +324%→+118% over inf-only. Win scales like 1B.
+  - Honest tradeoff: at 8B the heavier backward + drop-on-busy sheds ~30% of FT
+    training throughput under bursts to protect inference latency. Motivates the
+    next levers: CUDA-IPC zero-copy (cheaper per-fire IPC) and/or a small bounded
+    queue (train slightly stale instead of dropping).
+- Decision: S12a validated on both model sizes. Update README 8B TL;DR with the
+  isolated row. Next: §12 second-half (CUDA-IPC) or §13 served-LoRA publish.
