@@ -22,6 +22,11 @@ DeltaServe-vLLM stack on the same hardware.
 Bench config (both engines): H200 GPU, Llama-3-8B, tight timeline (224
 reqs / ~25s span, 80-token prompts × 80-token output).
 
+> ⚠️ **These sglang co-serving numbers are with the *faux* backward** (~8 ms/fire
+> placeholder). The real LoRA backward is now implemented and verified (see
+> "Task A" below) but costs ~45 ms/fire on 1B — the real-backward apples-to-apples
+> re-run is in progress and will replace this table.
+
 Two facts worth highlighting:
 
 1. **Inference baseline favors sglang** — 18 ms vs 24 ms TTFT (24% faster).
@@ -120,26 +125,46 @@ From `CO_SERVING_OPTIMIZATIONS.md`:
 **5 of 14 sections fully implemented; 2 partial.** Bottleneck for the
 remaining 7: real GQA backward kernels (Task A in the roadmap below).
 
-## What's NOT working yet — Task A
+## Task A — real LoRA backward: DONE & verified (2026-06-05)
 
-The current sglang backward is a "faux" — it runs backward-shaped GPU
-work (`new-files/deltaserve/faux_backward.py`) that consumes ~8 ms of warm
-compute per fire, sized to match a real LoRA backward at s_max=256 on
-Llama-3-8B. It does **not** compute real LoRA gradients and does **not**
-update the LoRA adapter.
+There are two backward paths, selected by `SGLANG_DS_REAL_BACKWARD`:
 
-The math layer is already ported (`new-files/deltaserve/bwd_services/llama3.py`
-has ~400 lines of pure-torch functions: `layer_forward`, `layer_backward`,
-`attn_backward_core`, `head_backward`, etc., copied from DSV-vLLM with
-imports rewired). What's missing is the **`Llama3BackwardService.process_backward`**
-loop that:
+- **faux** (default): `new-files/deltaserve/faux_backward.py` runs
+  backward-shaped GPU work (~8 ms/fire, sized to a real LoRA backward at
+  s_max=256 on Llama-3-8B). No real gradients. Useful for isolating the
+  scheduler/IPC plumbing from backward compute.
+- **real** (`SGLANG_DS_REAL_BACKWARD=1`): `new-files/deltaserve/real_backward.py`
+  — the full `process_backward` loop. Pulls base weights from
+  `model_runner.model.layers`, holds fp32 LoRA masters (q/k/v/o rank 16/layer),
+  walks `head_backward` + per-layer `layer_forward`/`layer_backward` over the
+  captured activations, accumulates grads, runs fused AdamW, all on a dedicated
+  `bwd_stream` that overlaps the next forward.
 
-1. Pulls base weights out of `model_runner.model.layers`
-2. Allocates LoRA fp32 master tensors (rank=16 on q/k/v/o per layer)
-3. Iterates `layer_backward` over the captured activations
-4. Calls fused AdamW + writes grads back to served-LoRA buffers
+**Verification (both pass, on H200):**
 
-Estimated effort: 5-8 hours of focused porting + debugging.
+- **Math correctness** — `scripts/verify_real_backward.py`. An autograd
+  gradcheck shows the manual `layer_backward`/`head_backward` grads match
+  `torch.autograd` to **2.5e-07** (worst relative error), across GQA (Hq≠Hkv),
+  multi-sample packed batches, RoPE, RMSNorm and the LM-head CE. An overfit test
+  shows manual-grad AdamW is numerically identical to autograd-grad AdamW
+  (max divergence **0.024%** of loss over 60 steps).
+- **In-server integration** — `scripts/integration_real_backward.py`. Launches
+  Llama-3.2-1B with `--enable-finetuning SGLANG_DS_REAL_BACKWARD=1`, fires the
+  real backward 24× on distinct FT samples: **0 NaN**, finite loss every fire,
+  and interleaved greedy inference is **byte-identical** before/during FT — i.e.
+  the backward's grad buffers / bwd_stream do not corrupt inference (the
+  graph-pool-aliasing NaN trap is avoided).
+
+**Cost:** steady-state **~45 ms/fire** on Llama-3.2-1B for a ~15-token prefill
+(fire #1 ≈ 240 ms, one-time init). That's ~5–6× the faux's ~8 ms, so real
+co-serving overhead is materially higher than the faux benchmark's +130% — the
+motivation for the roadmap below (subprocess+MPS, backward-compute opt).
+
+**Still open after Task A:** the trained fp32 LoRA masters are **not yet
+published back into the forward path** (served-LoRA hot-publish, §13), so the
+adapter trains but inference doesn't yet see it; and the apples-to-apples TL;DR
+above is still a *faux*-backward measurement — the real-backward re-run is in
+progress.
 
 ## Roadmap (impact order)
 
