@@ -151,9 +151,15 @@ watch its *served* logprob, vs an untrained control:
 
 The served model now fits the trained sample dramatically better (monotone over
 steps), while the control is untouched — training changed serving, specifically,
-with no global corruption and a stable feedback loop. Verified with CUDA graph off;
-works in the in-process backward (the subprocess path needs a child→parent master
-sync, a follow-up).
+with no global corruption and a stable feedback loop. Verified with CUDA graph off.
+
+**Publish also composes with S12a (MPS subprocess).** With
+`SGLANG_DS_BACKWARD_SUBPROCESS=1` + `SGLANG_DS_PUBLISH_LORA=1`, the child ships its
+trained masters back every `SGLANG_DS_PUBLISH_EVERY` fires and the parent applies
+them through the same hooks — so you get **MPS-isolated backward that also fine-tunes
+serving**. Verified: target served logprob −162→−143 (monotone), control flat. (Under
+the back-to-back overfit stress, drop-on-busy backpressure shed most fires, so the
+gain is smaller than the unthrottled in-process run — see `EXPERIMENTS.md`.)
 
 ## Task A — real LoRA backward: DONE & verified (2026-06-05)
 
