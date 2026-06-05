@@ -20,7 +20,7 @@ import torch
 import zmq
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, os.path.join(_HERE, "..", "new-files"))
+sys.path.insert(0, os.path.join(_HERE, "..", "sglang-fork", "sglang", "srt"))
 from deltaserve.real_backward import build_real_backward_from_state  # noqa
 from deltaserve.backward_process import spawn_backward_process       # noqa
 

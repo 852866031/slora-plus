@@ -1,22 +1,21 @@
 # Installation — DeltaServe sglang port (v0.4.6.post5)
 
-This port is **not a fork of sglang**. It is a thin overlay on the stock
-`sglang==0.4.6.post5` PyPI package:
+This port is a **fork of sglang `0.4.6.post5`**: the full sglang source tree,
+with the DeltaServe co-serving changes already applied, lives in this repo at
+[`sglang-fork/`](sglang-fork/). You install it directly — **no patch step**:
 
-- **18 new drop-in files** — the `deltaserve/` package (14 files: co-serving
-  runtime — activation capture, real LoRA backward, GPU-grant, gates, the
-  optional backward subprocess) plus 4 files that live elsewhere under `srt/`.
-- **10 patched files** — small hooks into stock sglang (request flag, per-token
-  finetuning mask, scheduler admission, forward→backward dispatch, the
-  `/start_finetuning` HTTP endpoints, two new server flags). Captured in
-  `sglang-046-port.patch`.
+- **`sglang-fork/`** — the complete, browsable sglang source with our changes
+  in place: the `deltaserve/` co-serving runtime (`sglang/srt/deltaserve/` —
+  activation capture, real LoRA backward, MPS-subprocess backward, served-LoRA
+  publish) plus 4 files under `srt/{configs,managers}/`, and the 10 stock files
+  hooked for the co-serving path (request flag, per-token FT mask, scheduler
+  admission, forward→backward dispatch, `/start_finetuning` endpoints, two new
+  server flags).
+- **`sglang-046-port.patch`** — kept as a concise **"what we changed vs stock
+  sglang"** reference (the 10 modified files); not needed to install.
 
-**sglang itself ships in the repo** as a vendored wheel at
-`vendor/sglang-0.4.6.post5-py3-none-any.whl` (pinned, so the build is
-reproducible even if PyPI yanks that version). The only thing the installer
-pulls from the network is the heavy GPU stack (torch / flashinfer), which is
-arch-specific and not vendorable. So one script — `install.sh` — sets up
-everything: vendored sglang + deps + the DeltaServe overlay.
+The only thing the installer pulls from the network is the heavy GPU stack
+(torch / flashinfer / sgl-kernel), which is arch-specific and not vendorable.
 
 ---
 
@@ -27,25 +26,18 @@ cd sglang-port/v046-port
 bash install.sh
 ```
 
-The script will:
-
-1. Install the **vendored** `vendor/sglang-0.4.6.post5-*.whl` if sglang isn't
-   already present (pip still pulls torch + flashinfer — several minutes, needs
-   CUDA). Falls back to PyPI only if the vendored wheel is missing. If a
-   *different* sglang version is already installed it stops and asks you to pin
-   the version first.
-2. Copy the 18 drop-in files into the installed package.
-3. Apply `sglang-046-port.patch` (`-p1` from the package root), backing up each
-   original to `<file>.ds_orig` first.
-4. Import-check every deltaserve module and confirm the two new server flags
-   (`--enable-finetuning`, `--backward-mps-percentage`) exist.
-
-It is **idempotent**: re-running refreshes the drop-ins and skips the patch if
-the tree already shows the edits. To revert:
+The script just runs `pip install -e sglang-fork[all]` — an **editable install**
+of the patched fork (pip resolves torch / flashinfer / sgl-kernel from PyPI;
+several minutes, needs CUDA) — then import-checks the `deltaserve` modules and
+confirms the two new server flags (`--enable-finetuning`,
+`--backward-mps-percentage`). To revert:
 
 ```bash
-bash install.sh --uninstall   # restores *.ds_orig, removes drop-ins (leaves sglang itself)
+bash install.sh --uninstall   # pip uninstall sglang
 ```
+
+Because it's an editable install, any edit you make under `sglang-fork/` is live
+immediately — no reinstall.
 
 ---
 
@@ -55,7 +47,6 @@ bash install.sh --uninstall   # restores *.ds_orig, removes drop-ins (leaves sgl
   benchmarked on **H200**; any Hopper/Ampere card with enough memory for your
   model works.
 - Python 3.10–3.12 (the reference env is 3.12).
-- `patch` available on `PATH` (standard on Linux).
 - For the **subprocess backward + MPS isolation** path, the
   [CUDA MPS daemon](https://docs.nvidia.com/deploy/mps/) should be running so
   `--backward-mps-percentage` can carve out a GPU slice for the child:
@@ -71,23 +62,12 @@ bash install.sh --uninstall   # restores *.ds_orig, removes drop-ins (leaves sgl
 ## Manual install (if you don't want the script)
 
 ```bash
-pip install "vendor/sglang-0.4.6.post5-py3-none-any.whl[all]"   # or: sglang[all]==0.4.6.post5
-SG=$(python -c 'import os,sglang;print(os.path.dirname(sglang.__file__))')
-
-# 1. drop-in package
-cp -r new-files/deltaserve "$SG/srt/deltaserve"
-
-# 2. the 4 files that live elsewhere under srt/
-cp new-files/finetune.py                 "$SG/srt/configs/"
-cp new-files/finetune_coordinator.py     "$SG/srt/managers/"
-cp new-files/finetune_scheduler_mixin.py "$SG/srt/managers/"
-cp new-files/step_time_estimator.py      "$SG/srt/managers/"
-
-# 3. patch the 10 stock files
-( cd "$SG" && patch -p1 < /path/to/sglang-046-port.patch )
+pip install -e "sglang-fork[all]"
 ```
 
-Patched files (all under `srt/`): `entrypoints/engine.py`,
+That's it — the fork's `pyproject.toml` carries the same dependencies as stock
+sglang 0.4.6.post5. The DeltaServe changes touch these stock files under
+`sglang/srt/` (see `sglang-046-port.patch` for the exact diff): `entrypoints/engine.py`,
 `entrypoints/http_server.py`, `managers/io_struct.py`, `managers/scheduler.py`,
 `managers/schedule_batch.py`, `managers/tokenizer_manager.py`,
 `mem_cache/paged_allocator.py`, `model_executor/forward_batch_info.py`,

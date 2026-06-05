@@ -32,14 +32,14 @@ import torch
 import torch.nn.functional as F
 
 # Make the installed sglang package importable (the math layer lives there
-# after install.sh; fall back to the repo's new-files/ if running pre-install).
+# after install.sh; fall back to the in-repo sglang-fork/ tree if running pre-install).
 try:
     from sglang.srt.deltaserve.bwd_services.llama3 import (
         layer_forward, layer_backward, head_backward, rope_cos_sin, rmsnorm,
     )
 except Exception:
     _HERE = os.path.dirname(os.path.abspath(__file__))
-    sys.path.insert(0, os.path.join(_HERE, "..", "new-files"))
+    sys.path.insert(0, os.path.join(_HERE, "..", "sglang-fork", "sglang", "srt"))
     from deltaserve.bwd_services.llama3 import (  # type: ignore
         layer_forward, layer_backward, head_backward, rope_cos_sin, rmsnorm,
     )

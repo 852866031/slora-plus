@@ -1,0 +1,535 @@
+/mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.3.0) or chardet (7.4.3)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+INFO 06-05 18:27:34 [importing.py:53] Triton module has been replaced with a placeholder.
+INFO 06-05 18:27:35 [__init__.py:239] Automatically detected platform cuda.
+[2026-06-05 18:27:38] [DeltaServe] backward subprocess spawned: pid=3806090, channel=tcp://127.0.0.1:59727, mps_pct=10
+[2026-06-05 18:27:38] server_args=ServerArgs(model_path='/mnt/weka/home/jianshu.she/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6', tokenizer_path='/mnt/weka/home/jianshu.she/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6', tokenizer_mode='auto', skip_tokenizer_init=False, load_format='auto', trust_remote_code=False, dtype='auto', kv_cache_dtype='auto', quantization=None, quantization_param_path=None, context_length=None, device='cuda', served_model_name='/mnt/weka/home/jianshu.she/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6', chat_template=None, completion_template=None, is_embedding=False, enable_multimodal=None, revision=None, host='127.0.0.1', port=30321, mem_fraction_static=0.5, max_running_requests=None, max_total_tokens=None, chunked_prefill_size=8192, max_prefill_tokens=16384, schedule_policy='fcfs', schedule_conservativeness=1.0, cpu_offload_gb=0, page_size=1, tp_size=1, pp_size=1, max_micro_batch_size=None, stream_interval=1, stream_output=False, random_seed=919669509, constrained_json_whitespace_pattern=None, watchdog_timeout=300, dist_timeout=None, download_dir=None, base_gpu_id=0, gpu_id_step=1, log_level='info', log_level_http=None, log_requests=False, log_requests_level=0, show_time_cost=False, enable_metrics=False, bucket_time_to_first_token=None, bucket_e2e_request_latency=None, bucket_inter_token_latency=None, collect_tokens_histogram=False, decode_log_interval=40, enable_request_time_stats_logging=False, kv_events_config=None, api_key=None, file_storage_path='sglang_storage', enable_cache_report=False, reasoning_parser=None, dp_size=1, load_balance_method='round_robin', ep_size=1, dist_init_addr=None, nnodes=1, node_rank=0, json_model_override_args='{}', preferred_sampling_params=None, lora_paths=None, max_loras_per_batch=8, lora_backend='triton', attention_backend=None, sampling_backend='flashinfer', grammar_backend='xgrammar', speculative_algorithm=None, speculative_draft_model_path=None, speculative_num_steps=None, speculative_eagle_topk=None, speculative_num_draft_tokens=None, speculative_accept_threshold_single=1.0, speculative_accept_threshold_acc=1.0, speculative_token_map=None, enable_double_sparsity=False, ds_channel_config_path=None, ds_heavy_channel_num=32, ds_heavy_token_num=256, ds_heavy_channel_type='qk', ds_sparse_decode_threshold=4096, disable_radix_cache=True, disable_cuda_graph=True, disable_cuda_graph_padding=False, enable_nccl_nvls=False, enable_tokenizer_batch_encode=False, disable_outlines_disk_cache=False, disable_custom_all_reduce=False, disable_overlap_schedule=False, enable_mixed_chunk=False, enable_dp_attention=False, enable_dp_lm_head=False, enable_ep_moe=False, enable_deepep_moe=False, deepep_mode='auto', ep_num_redundant_experts=0, ep_dispatch_algorithm=None, init_expert_location='trivial', enable_eplb=False, eplb_rebalance_num_iterations=1000, expert_distribution_recorder_mode=None, expert_distribution_recorder_buffer_size=None, enable_expert_distribution_metrics=False, deepep_config=None, enable_torch_compile=False, torch_compile_max_bs=32, cuda_graph_max_bs=None, cuda_graph_bs=None, torchao_config='', enable_nan_detection=False, enable_p2p_check=False, triton_attention_reduce_in_fp32=False, triton_attention_num_kv_splits=8, num_continuous_decode_steps=1, delete_ckpt_after_loading=False, enable_memory_saver=False, allow_auto_truncate=False, enable_custom_logit_processor=False, tool_call_parser=None, enable_hierarchical_cache=False, hicache_ratio=2.0, hicache_size=0, hicache_write_policy='write_through_selective', flashinfer_mla_disable_ragged=False, warmups=None, moe_dense_tp_size=None, n_share_experts_fusion=0, disable_chunked_prefix_cache=False, disable_fast_image_processor=False, mm_attention_backend=None, debug_tensor_dump_output_folder=None, debug_tensor_dump_input_file=None, debug_tensor_dump_inject=False, disaggregation_mode='null', disaggregation_bootstrap_port=8998, disaggregation_transfer_backend='mooncake', disaggregation_ib_device=None, pdlb_url=None, enable_finetuning=True, backward_mps_percentage=10, finetune_config=None)
+WARNING:ds.bwd_child:[bwd_child] up, mps_pct=10
+/mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.3.0) or chardet (7.4.3)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+/mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.3.0) or chardet (7.4.3)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+/mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.3.0) or chardet (7.4.3)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+INFO 06-05 18:27:48 [importing.py:53] Triton module has been replaced with a placeholder.
+INFO 06-05 18:27:48 [importing.py:53] Triton module has been replaced with a placeholder.
+INFO 06-05 18:27:48 [__init__.py:239] Automatically detected platform cuda.
+INFO 06-05 18:27:48 [__init__.py:239] Automatically detected platform cuda.
+[2026-06-05 18:27:52] Attention backend not set. Use fa3 backend by default.
+[2026-06-05 18:27:52] Init torch distributed begin.
+[2026-06-05 18:27:52] Init torch distributed ends. mem usage=0.00 GB
+[2026-06-05 18:27:52] init_expert_location from trivial
+[2026-06-05 18:27:52,453] [INFO] [real_accelerator.py:260:get_accelerator] Setting ds_accelerator to cuda (auto detect)
+[2026-06-05 18:27:53,314] [INFO] [logging.py:107:log_dist] [Rank -1] [TorchCheckpointEngine] Initialized with serialization = False
+[2026-06-05 18:27:53] Load weight begin. avail mem=139.15 GB
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.33s/it]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:01<00:00,  1.33s/it]
+
+[2026-06-05 18:27:55] Load weight end. type=LlamaForCausalLM, dtype=torch.bfloat16, avail mem=136.79 GB, mem usage=2.36 GB.
+[2026-06-05 18:27:55] [DeltaServe] FinetuneAccumulator attached: 34 forward hooks
+[2026-06-05 18:27:55] [DeltaServe] backward CUDA graph PRE-CAPTURED at startup (s=256, D=2048, L=16)
+[2026-06-05 18:27:55] [DeltaServe] starting backward SUBPROCESS (S12a)…
+[2026-06-05 18:27:55] [DeltaServe] real_backward state built: D=2048 L=16 Hq=32 Hkv=8 Hd=64 inter=8192 vocab=128256 lora_rank=16 params=3.41M
+WARNING:ds.bwd_child:[bwd_child] up, mps_pct=10
+/mnt/weka/home/jianshu.she/miniconda3/lib/python3.12/site-packages/requests/__init__.py:113: RequestsDependencyWarning: urllib3 (2.3.0) or chardet (7.4.3)/charset_normalizer (3.3.2) doesn't match a supported version!
+  warnings.warn(
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward state built: D=2048 L=16 Hq=32 Hkv=8 Hd=64 inter=8192 vocab=128256 lora_rank=16 params=3.41M
+WARNING:ds.bwd_child:[bwd_child] init: loaded weights + built backward in 3.8s
+[2026-06-05 18:28:06] [DeltaServe] backward subprocess ready (L=16 D=2048 mps=10%)
+[2026-06-05 18:28:06] [DeltaServe] real_backward state built: D=2048 L=16 Hq=32 Hkv=8 Hd=64 inter=8192 vocab=128256 lora_rank=16 params=3.41M
+[2026-06-05 18:28:06] [DeltaServe] §13 publish ON: 32 LoRA inference hooks attached (16 layers × qkv+o)
+[2026-06-05 18:28:06] [DeltaServe] §13 publish under MPS: parent publisher built, syncing masters every 5 fires
+[2026-06-05 18:28:06] KV Cache is allocated. #tokens: 2111419, K size: 32.22 GB, V size: 32.22 GB
+[2026-06-05 18:28:06] Memory pool end. avail mem=67.60 GB
+[2026-06-05 18:28:06] max_total_num_tokens=2111419, chunked_prefill_size=8192, max_prefill_tokens=16384, max_running_requests=4097, context_len=131072
+[2026-06-05 18:28:06] INFO:     Started server process [3805791]
+[2026-06-05 18:28:06] INFO:     Waiting for application startup.
+[2026-06-05 18:28:06] INFO:     Application startup complete.
+[2026-06-05 18:28:06] INFO:     Uvicorn running on http://127.0.0.1:30321 (Press CTRL+C to quit)
+[2026-06-05 18:28:07] INFO:     127.0.0.1:49834 - "GET /health HTTP/1.1" 200 OK
+[2026-06-05 18:28:07] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:07] INFO:     127.0.0.1:49862 - "GET /get_model_info HTTP/1.1" 200 OK
+[2026-06-05 18:28:08] Prefill batch. #new-seq: 1, #new-token: 7, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:49850 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 23, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50852 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50862 - "POST /start_finetuning HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50866 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0
+[2026-06-05 18:28:10] [DeltaServe] backward subprocess busy — dropped 1 FT samples so far (throttle)
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50874 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 1, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:49874 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] The server is fired up and ready to roll!
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50882 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50884 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50898 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50900 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50914 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50920 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50926 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50930 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50946 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50948 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50964 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50970 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50984 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50992 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:10] INFO:     127.0.0.1:50998 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:10] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51014 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51018 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51032 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51034 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51048 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51056 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #1: 538.9ms loss=6.4727 n_valid=25 cum_tokens=25
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51058 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51064 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51076 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #2: 72.9ms loss=6.4727 n_valid=25 cum_tokens=50
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51092 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51106 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51120 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51132 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #3: 71.5ms loss=6.4727 n_valid=25 cum_tokens=75
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51146 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51148 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51162 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51174 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #4: 72.0ms loss=6.4727 n_valid=25 cum_tokens=100
+[2026-06-05 18:28:11] Decode batch. #running-req: 1, #token: 0, token usage: 0.00, cuda graph: False, gen throughput (token/s): 8.52, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51182 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51198 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51200 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #5: 70.6ms loss=6.4727 n_valid=25 cum_tokens=125
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51208 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51212 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51218 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51222 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51224 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #6: 71.0ms loss=6.4727 n_valid=25 cum_tokens=150
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51230 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51240 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51256 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51272 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #7: 71.4ms loss=6.4459 n_valid=25 cum_tokens=175
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51276 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51290 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51292 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51306 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #8: 70.8ms loss=6.4459 n_valid=25 cum_tokens=200
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51318 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51330 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:11] INFO:     127.0.0.1:51336 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:11] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51352 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #9: 70.5ms loss=6.4459 n_valid=25 cum_tokens=225
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51358 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51364 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51366 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #10: 70.7ms loss=6.4459 n_valid=25 cum_tokens=250
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51382 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51394 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51396 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51410 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51416 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #11: 70.0ms loss=6.4459 n_valid=25 cum_tokens=275
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51418 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] [DeltaServe] backward subprocess busy — dropped 51 FT samples so far (throttle)
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51422 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51434 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #12: 71.1ms loss=6.4079 n_valid=25 cum_tokens=300
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51444 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51454 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51456 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #13: 70.2ms loss=6.4079 n_valid=25 cum_tokens=325
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51472 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51486 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51496 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #14: 69.9ms loss=6.4079 n_valid=25 cum_tokens=350
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51498 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51512 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51526 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #15: 70.1ms loss=6.4079 n_valid=25 cum_tokens=375
+[2026-06-05 18:28:12] Decode batch. #running-req: 1, #token: 0, token usage: 0.00, cuda graph: False, gen throughput (token/s): 36.45, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51528 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51530 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51542 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51552 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #16: 70.2ms loss=6.4079 n_valid=25 cum_tokens=400
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51558 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51574 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #17: 70.0ms loss=6.3416 n_valid=25 cum_tokens=425
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51586 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51600 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51608 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51610 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51618 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51634 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51648 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #18: 153.3ms loss=6.3416 n_valid=25 cum_tokens=450
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51652 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51658 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:12] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:12] INFO:     127.0.0.1:51662 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51666 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #19: 70.6ms loss=6.3416 n_valid=25 cum_tokens=475
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51678 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51694 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51700 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51706 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #20: 74.4ms loss=6.3416 n_valid=25 cum_tokens=500
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51714 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51718 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51728 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51744 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #21: 72.7ms loss=6.3416 n_valid=25 cum_tokens=525
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51756 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51772 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51788 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51792 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #22: 70.8ms loss=6.2615 n_valid=25 cum_tokens=550
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51796 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51798 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51814 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51830 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #23: 70.6ms loss=6.2615 n_valid=25 cum_tokens=575
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51840 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51852 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51866 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #24: 70.1ms loss=6.2615 n_valid=25 cum_tokens=600
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51868 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51872 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51874 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #25: 73.8ms loss=6.2615 n_valid=25 cum_tokens=625
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51876 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] Decode batch. #running-req: 1, #token: 0, token usage: 0.00, cuda graph: False, gen throughput (token/s): 36.22, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51886 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51894 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51902 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51912 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #26: 73.3ms loss=6.2615 n_valid=25 cum_tokens=650
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51920 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51928 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51934 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51938 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #27: 70.6ms loss=6.1848 n_valid=25 cum_tokens=675
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51952 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51966 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51982 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:13] INFO:     127.0.0.1:51986 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:13] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #28: 71.8ms loss=6.1848 n_valid=25 cum_tokens=700
+[2026-06-05 18:28:14] INFO:     127.0.0.1:51990 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52000 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52010 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #29: 70.9ms loss=6.1848 n_valid=25 cum_tokens=725
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52014 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52020 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52028 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #30: 70.2ms loss=6.1848 n_valid=25 cum_tokens=750
+[2026-06-05 18:28:14] [DeltaServe] backward subprocess busy — dropped 101 FT samples so far (throttle)
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52036 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52048 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52058 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52074 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52090 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #31: 71.1ms loss=6.1848 n_valid=25 cum_tokens=775
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52102 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52116 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52126 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52142 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #32: 70.2ms loss=6.0965 n_valid=25 cum_tokens=800
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52148 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52158 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52174 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #33: 70.6ms loss=6.0965 n_valid=25 cum_tokens=825
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52182 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52190 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52206 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #34: 70.6ms loss=6.0965 n_valid=25 cum_tokens=850
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52216 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52228 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #35: 72.5ms loss=6.0965 n_valid=25 cum_tokens=875
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52234 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52250 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52256 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52272 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52286 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #36: 71.4ms loss=6.0965 n_valid=25 cum_tokens=900
+[2026-06-05 18:28:14] Decode batch. #running-req: 1, #token: 0, token usage: 0.00, cuda graph: False, gen throughput (token/s): 35.19, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52300 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52308 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52312 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52326 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #37: 71.3ms loss=6.0093 n_valid=25 cum_tokens=925
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52340 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52352 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:14] INFO:     127.0.0.1:52356 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:14] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #38: 70.7ms loss=6.0093 n_valid=25 cum_tokens=950
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52362 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52368 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52376 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #39: 71.0ms loss=6.0093 n_valid=25 cum_tokens=975
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52392 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52396 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52404 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #40: 71.4ms loss=6.0093 n_valid=25 cum_tokens=1000
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52406 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52420 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52424 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52436 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #41: 72.2ms loss=6.0093 n_valid=25 cum_tokens=1025
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52444 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52456 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52470 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52484 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #42: 70.6ms loss=5.9104 n_valid=25 cum_tokens=1050
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52500 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52514 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52522 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #43: 70.7ms loss=5.9104 n_valid=25 cum_tokens=1075
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52538 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52542 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52554 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #44: 70.9ms loss=5.9104 n_valid=25 cum_tokens=1100
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52566 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52574 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52582 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #45: 70.7ms loss=5.9104 n_valid=25 cum_tokens=1125
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52584 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52600 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52610 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52614 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #46: 72.4ms loss=5.9104 n_valid=25 cum_tokens=1150
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52626 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52636 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52646 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #47: 70.8ms loss=5.8220 n_valid=25 cum_tokens=1175
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52652 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52658 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52664 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #48: 70.8ms loss=5.8220 n_valid=25 cum_tokens=1200
+[2026-06-05 18:28:15] Decode batch. #running-req: 1, #token: 0, token usage: 0.00, cuda graph: False, gen throughput (token/s): 36.41, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52666 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52672 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52688 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #49: 70.0ms loss=5.8220 n_valid=25 cum_tokens=1225
+[2026-06-05 18:28:15] INFO:     127.0.0.1:52700 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:15] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52706 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52708 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #50: 73.1ms loss=5.8220 n_valid=25 cum_tokens=1250
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52720 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52730 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52734 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52738 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 26, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+WARNING:sglang.srt.deltaserve.real_backward:[DeltaServe] real_backward #51: 72.5ms loss=5.8220 n_valid=25 cum_tokens=1275
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52752 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] Prefill batch. #new-seq: 1, #new-token: 23, #cached-token: 0, token usage: 0.00, #running-req: 0, #queue-req: 0
+[2026-06-05 18:28:16] INFO:     127.0.0.1:52754 - "POST /generate HTTP/1.1" 200 OK
+[2026-06-05 18:28:16] SIGTERM received. signum=None frame=None. Draining requests and shutting down...
+[2026-06-05 18:28:16] Child process unexpectedly failed with an exit code 15. pid=3806090
+[2026-06-05 18:28:16] Child process unexpectedly failed with an exit code 15. pid=3806093
+[2026-06-05 18:28:16] Child process unexpectedly failed with an exit code 15. pid=3806092
+[2026-06-05 18:28:17] Gracefully exiting... remaining number of requests 0

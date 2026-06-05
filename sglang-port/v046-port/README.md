@@ -5,10 +5,11 @@ backward (gradcheck + in-server), 6 of 14 CO_SERVING_OPTIMIZATIONS sections
 implemented (incl. backward in an MPS-capped subprocess). See `EXPERIMENTS.md`
 for the full measured progression.
 
-> **Installing the port?** See [INSTALL.md](INSTALL.md). The repo ships the
-> delta over stock `sglang==0.4.6.post5` (18 drop-in files +
-> `sglang-046-port.patch`), not a full sglang fork — `bash install.sh` applies
-> it to a stock install.
+> **Installing the port?** See [INSTALL.md](INSTALL.md). This is a **fork of
+> sglang `0.4.6.post5`** — the full patched source lives in [`sglang-fork/`](sglang-fork/)
+> and `bash install.sh` just `pip install -e`'s it (no patch step). The
+> `sglang-046-port.patch` is kept only as a concise diff of what we changed vs
+> stock sglang.
 
 ## TL;DR
 
@@ -83,15 +84,11 @@ overhead; closing the rest of that gap is the roadmap below.
 ### sglang port
 
 ```bash
-# Apply the port to a system sglang 0.4.6.post5 install
-SYS=$(python -c "import sglang, os; print(os.path.dirname(sglang.__file__))")
-patch -p1 -d "$SYS/.." < sglang-port/v046-port/sglang-046-port.patch
-cp -r sglang-port/v046-port/new-files/deltaserve "$SYS/srt/"
-cp sglang-port/v046-port/new-files/finetune.py "$SYS/srt/configs/"
-cp sglang-port/v046-port/new-files/finetune_*.py sglang-port/v046-port/new-files/step_time_estimator.py "$SYS/srt/managers/"
+# Install the patched sglang fork (editable; no patch step)
+cd sglang-port/v046-port
+bash install.sh                 # or: pip install -e "sglang-fork[all]"
 
 # Run the benchmark (inf-only baseline)
-cd sglang-port/v046-port
 python auto_benchmark_sglang.py --tight --port 30401
 
 # Run co-serving (10% / 25% / 50% FT)
@@ -131,18 +128,18 @@ From `CO_SERVING_OPTIMIZATIONS.md`:
 
 | § | Section | Status | Where |
 |---|---|---|---|
-| 1 | Activation saves (memory-for-compute) | partial — 5 of 7 types | `new-files/deltaserve/accumulate.py` |
-| 2 | CUDA graphs for backward (pre-captured) | ✅ | `new-files/deltaserve/faux_backward.py` `precapture_graph` |
+| 1 | Activation saves (memory-for-compute) | partial — 5 of 7 types | `sglang-fork/sglang/srt/deltaserve/accumulate.py` |
+| 2 | CUDA graphs for backward (pre-captured) | ✅ | `sglang-fork/sglang/srt/deltaserve/faux_backward.py` `precapture_graph` |
 | 3 | Defer LM-head to backward | ❌ | needs Task A |
-| 4 | FT admission (admit-rate + fire-throttle) | ✅ (heuristic) | `new-files/deltaserve/faux_backward.py` + scheduler.py |
+| 4 | FT admission (admit-rate + fire-throttle) | ✅ (heuristic) | `sglang-fork/sglang/srt/deltaserve/faux_backward.py` + scheduler.py |
 | 5 | Backward compute optimizations | ❌ | needs Task A |
-| 6 | `_maybe_pause` GPU yield | ✅ (primitive only) | `new-files/deltaserve/gpu_grant.py` |
-| 7 | Slice-based activation save fast path | ✅ | `new-files/deltaserve/accumulate.py` `_contig_slice_from_mask` |
+| 6 | `_maybe_pause` GPU yield | ✅ (primitive only) | `sglang-fork/sglang/srt/deltaserve/gpu_grant.py` |
+| 7 | Slice-based activation save fast path | ✅ | `sglang-fork/sglang/srt/deltaserve/accumulate.py` `_contig_slice_from_mask` |
 | 8 | Async scheduling + reserve-at-inject | ❌ | needs Task A |
-| 9 | Buffer / admission lifecycle | partial — `coordinator.reserve` exists | `new-files/finetune_coordinator.py` |
+| 9 | Buffer / admission lifecycle | partial — `coordinator.reserve` exists | `sglang-fork/sglang/srt/managers/finetune_coordinator.py` |
 | 10 | `forward_interruptible` (3-tier pre-emption) | ❌ | needs Task A |
-| 11 | `/start_finetuning` endpoint + `disable_log_stats` | ✅ (the endpoint) | `new-files/deltaserve/gates.py` + `http_server.py` patches |
-| 12 | Backward subprocess + MPS isolation | ✅ (first half) | `new-files/deltaserve/backward_process.py` + `backward_client.py` (CUDA-IPC zero-copy = second half, TODO) |
+| 11 | `/start_finetuning` endpoint + `disable_log_stats` | ✅ (the endpoint) | `sglang-fork/sglang/srt/deltaserve/gates.py` + `http_server.py` patches |
+| 12 | Backward subprocess + MPS isolation | ✅ (first half) | `sglang-fork/sglang/srt/deltaserve/backward_process.py` + `backward_client.py` (CUDA-IPC zero-copy = second half, TODO) |
 | 13 | Served-LoRA hot-publish | ✅ (in-process) | `real_backward.attach_inference_hooks` — `SGLANG_DS_PUBLISH_LORA=1`; subprocess publish = follow-up |
 | 14 | Eval tooling (`auto_benchmark.py`, plots) | ✅ | `auto_benchmark_sglang.py` + `auto_plot_sglang.py` |
 
@@ -183,11 +180,11 @@ gain is smaller than the unthrottled in-process run — see `EXPERIMENTS.md`.)
 
 There are two backward paths, selected by `SGLANG_DS_REAL_BACKWARD`:
 
-- **faux** (default): `new-files/deltaserve/faux_backward.py` runs
+- **faux** (default): `sglang-fork/sglang/srt/deltaserve/faux_backward.py` runs
   backward-shaped GPU work (~8 ms/fire, sized to a real LoRA backward at
   s_max=256 on Llama-3-8B). No real gradients. Useful for isolating the
   scheduler/IPC plumbing from backward compute.
-- **real** (`SGLANG_DS_REAL_BACKWARD=1`): `new-files/deltaserve/real_backward.py`
+- **real** (`SGLANG_DS_REAL_BACKWARD=1`): `sglang-fork/sglang/srt/deltaserve/real_backward.py`
   — the full `process_backward` loop. Pulls base weights from
   `model_runner.model.layers`, holds fp32 LoRA masters (q/k/v/o rank 16/layer),
   walks `head_backward` + per-layer `layer_forward`/`layer_backward` over the
@@ -292,24 +289,24 @@ Total to close the gap: ~16-25 hours of focused work.
 sglang-port/v046-port/
 ├── README.md                            ← you are here
 ├── BENCHMARK_RESULTS.md                 ← detailed run-by-run analysis
-├── sglang-046-port.patch                ← 377-line diff against system sglang
-├── new-files/                           ← 13 new files to drop into sglang
-│   ├── finetune.py                      Phase 1 FinetuneConfig
-│   ├── finetune_coordinator.py          Phase 7 coordinator (S4, S9)
-│   ├── finetune_scheduler_mixin.py      Phase 7 scheduler mixin
-│   ├── step_time_estimator.py           Phase 8 estimator (stub)
-│   └── deltaserve/
-│       ├── accumulate.py                Section 1 + Section 7 hooks
-│       ├── faux_backward.py             Section 2 graph + Section 4 throttle
-│       ├── gates.py                     Section 11 /start_finetuning
-│       ├── gpu_grant.py                 Section 6 maybe_pause primitive
-│       ├── backward_process.py          Phase 6 subprocess scaffold
-│       ├── ft_injector.py               Phase 3 injector
-│       ├── finetuning_store.py          Phase 5 store
-│       ├── finetuning_store_stub.py
-│       └── bwd_services/
-│           ├── base.py                  ABC
-│           └── llama3.py                ← math layer ported, service class stub
+├── EXPERIMENTS.md                       ← experiment log (prediction vs actual)
+├── INSTALL.md                           ← one-command install
+├── install.sh                           ← pip install -e sglang-fork[all]
+├── sglang-046-port.patch                ← diff of our changes vs stock sglang (reference)
+├── sglang-fork/                         ← FULL patched sglang 0.4.6.post5 source (the fork)
+│   ├── pyproject.toml                   sglang's own build/deps
+│   └── sglang/srt/
+│       ├── deltaserve/                  ← our co-serving runtime
+│       │   ├── real_backward.py         Task A real LoRA backward + §13 publish hooks
+│       │   ├── backward_process.py      S12a MPS-subprocess child
+│       │   ├── backward_client.py       S12a parent + child→parent master sync
+│       │   ├── accumulate.py            activation capture (Section 1/7)
+│       │   ├── faux_backward.py         faux backward (Section 2 graph + Section 4 throttle)
+│       │   ├── gates.py / gpu_grant.py / ft_injector.py / finetuning_store*.py
+│       │   └── bwd_services/{base,llama3}.py   GQA backward math layer
+│       ├── configs/finetune.py          FinetuneConfig
+│       ├── managers/finetune_*.py       coordinator / scheduler mixin / step estimator
+│       └── ...                          (the 10 stock files hooked for co-serving)
 ├── auto_benchmark_sglang.py             ← our sglang-targeted benchmark
 ├── auto_plot_sglang.py                  ← 5-panel plot matching DSV-vLLM layout
 ├── plot_co_serving.py                   ← 3-panel sweep CDF plot

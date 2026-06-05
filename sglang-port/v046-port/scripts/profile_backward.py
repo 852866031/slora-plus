@@ -22,7 +22,7 @@ try:
     from sglang.srt.deltaserve.bwd_services.llama3 import (
         head_backward, layer_forward, layer_backward, rope_cos_sin)
 except Exception:
-    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "new-files"))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "sglang-fork", "sglang", "srt"))
     from deltaserve.bwd_services.llama3 import (  # type: ignore
         head_backward, layer_forward, layer_backward, rope_cos_sin)
 
