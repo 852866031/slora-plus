@@ -331,3 +331,31 @@ same alpaca corpus, same rank-16, both under MPS. Compared to sglang subprocess+
   the unimplemented §8 (async sched) + §10 (forward_interruptible). Caveat retained: FT
   injection differs (continuous store-driven vs request-tagged) → ~6× FT-volume gap; a
   fully FT-volume-matched run would need the sglang port to drive continuous store FT.
+
+---
+
+### install-from-scratch — true clean-env install (found+fixed a dep bug)   (2026-06-06, H200 ×1)
+
+**Reflection.** Earlier install checks used `--system-site-packages` (reused base
+torch) or `--no-deps` (only proved the fork tree resolves). Neither is a true
+from-scratch install. Did one: brand-new venv (no system packages),
+`pip install -e sglang-fork[all]` pulling the entire stack from PyPI, then launch
+a server and serve a request.
+
+- **Bug found:** server crashed at model load with
+  `ModuleNotFoundError: No module named 'transformers.masking_utils'`. Root cause:
+  stock sglang 0.4.6.post5 leaves `compressed-tensors` UNPINNED, so a fresh resolve
+  (2026-06) grabs `compressed-tensors==0.15.0.1`, which imports `transformers.masking_utils`
+  — absent in sglang's pinned `transformers==4.51.1`. Base env only worked because it
+  had the older compatible 0.9.x. The `--no-deps`/system-site-packages checks all
+  missed it.
+- **Fix:** pin `compressed-tensors<0.10` in the fork's pyproject (commit 7b10047).
+- **Verified after fix:**
+  - clean venv + `pip install -e sglang-fork[all]` → compressed-tensors resolves to
+    **0.9.4**, `import sglang` + deltaserve + compressed_tensors all clean.
+  - server boots Llama-3.2-1B `--enable-finetuning --backward-mps-percentage 10`:
+    backward subprocess spawned (mps_pct=10), FinetuneAccumulator attached (34 hooks),
+    "server is fired up", and `/generate` returns a coherent completion
+    ("The capital of France is" → " Paris. The Eiffel Tower is located in Paris.").
+- Decision: from-scratch install is now genuinely verified end-to-end (deps → import →
+  server boot → serve). The dep-pin is the kind of bug only a true clean install catches.
