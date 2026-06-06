@@ -17,7 +17,11 @@ dependencies = ["aiohttp", "requests", "tqdm", "numpy", "IPython", "setproctitle
 
 [project.optional-dependencies]
 runtime_common = [
-    "compressed-tensors",
+    # DeltaServe fork pin: stock sglang 0.4.6.post5 leaves this unpinned, but a
+    # fresh install now resolves compressed-tensors>=0.15 which requires a newer
+    # transformers than sglang's pinned 4.51.1 (ImportError: transformers.masking_utils).
+    # 0.9.x is the version sglang 0.4.6.post5 actually shipped against.
+    "compressed-tensors<0.10",
     "datasets",
     "fastapi",
     "hf_transfer",
