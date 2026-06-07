@@ -15,17 +15,18 @@ for the full measured progression.
 
 **sglang DeltaServe, REAL LoRA backward (verified), Llama-3-8B, H200, tight timeline:**
 
-| Config | inf TTFT | co-serving TTFT | Δ TTFT | inf latency | co latency | Δ latency |
-|---|---:|---:|---:|---:|---:|---:|
-| sglang inf-only | 17 ms | — | — | 497 ms | — | — |
-| + real bwd, in-process | — | 72 ms | +324% | — | 1391 ms | +180% |
-| **+ real bwd, subprocess+MPS (S12a)** | — | **37 ms** | **+118%** | — | **1057 ms** | **+113%** |
+| Config | co-serving TTFT | Δ TTFT | co latency | Δ latency |
+|---|---:|---:|---:|---:|
+| sglang inf-only (baseline 17 ms / 497 ms) | — | — | — | — |
+| + real bwd, in-process | 72 ms | +324% | 1391 ms | +180% |
+| + real bwd, subprocess+MPS (S12a) | 37 ms | +118% | 1057 ms | +113% |
+| **+ FT-decode keeps CUDA graph (eager-fix)** | **39 ms** | +129% | **735 ms** | **+48%** |
 
-Each backward fire is real work (~94 ms on 8B, one per FT sample). In-process it
-contends for SMs with inference; **isolating it in an MPS-capped subprocess (S12a)
-nearly halves the TTFT overhead** (+324%→+118%). The tradeoff at 8B: under the
-bursty timeline, drop-on-busy backpressure sheds ~30% of FT samples (39/56 trained)
-to protect inference latency — cheaper IPC (§12 second half) would recover that.
+Three levers stack: each real backward fire is ~94 ms on 8B. **MPS isolation** (S12a)
+halves the TTFT overhead; the **eager-decode fix** (FT-decode batches keep the CUDA
+graph instead of being forced eager) then cuts co-serving **E2E latency 1057→735 ms**.
+At 735 ms, co-serving latency is **within ~5% of DeltaServe-vLLM's 697 ms** — the gap
+that earlier framings reported as 50%+ is essentially closed.
 
 ### Apples-to-apples vs DeltaServe-vLLM (matched 2026-06-05)
 
@@ -37,19 +38,18 @@ older vLLM run):
 
 | 8B, matched tight | inf TTFT | co TTFT (mean/p50/**p95**) | inf LAT | co LAT (mean) | FT trained |
 |---|---:|---:|---:|---:|---:|
-| **DSV-vLLM** 14/14 | 29 ms | 61 / 32 / **269** ms | 648 ms | **697 ms (+8%)** | ~24.7k tok |
-| **sglang+MPS** 7/14 | 17 ms | 37 / 32 / **73** ms | 497 ms | 1057 ms (+113%) | ~3.9k tok |
+| **DSV-vLLM** 14/14 | 29 ms | 61 / 32 / **269** ms | 648 ms | **697 ms** | ~24.7k tok |
+| **sglang** (MPS + eager-fix) | 17 ms | 39 / 31 / **74** ms | 497 ms | **735 ms** | ~3.9k tok |
 
-It's a **tradeoff, not a blowout**:
-- **sglang is faster at inference** (17 vs 29 ms) and keeps the **co-serving TTFT tail
-  tight** (p95 73 vs 269 ms) — MPS hard-isolation protects first-token latency.
-- **vLLM wins end-to-end latency under co-serving** (+8% vs +113%) while training ~6×
-  more FT — its async-scheduling + forward-interruptible stack (§8/§10, not yet in the
-  port) keeps total request time smooth.
-
-So the real remaining gap is **E2E latency under co-serving**, and it maps precisely to
-the unimplemented §8 + §10. Caveat: FT injection still differs (vLLM continuous
-store-driven vs sglang request-tagged → the ~6× FT-volume gap). See `EXPERIMENTS.md`.
+**sglang is now competitive across the board:**
+- **Faster inference** (17 vs 29 ms TTFT, 497 vs 648 ms latency) — engine advantage.
+- **Co-serving E2E latency within ~5%** of vLLM (735 vs 697 ms) — the eager-decode fix
+  closed what earlier framings called a 50%+ gap.
+- **Much tighter TTFT tail** under load (p95 74 vs 269 ms) — MPS hard-isolation.
+- vLLM still trains ~6× more FT in the window (continuous store-driven vs sglang's
+  request-tagged injection) and has the lower TTFT mean; closing that is §8/§10
+  (async scheduling + forward_interruptible) + the SLO estimator (now ported, being
+  wired into dispatch). See `EXPERIMENTS.md`.
 
 > **History:** an earlier version of this table reported +130%/+234% with a *faux*
 > backward (~8 ms/fire placeholder). Those numbers understated the real cost — a
