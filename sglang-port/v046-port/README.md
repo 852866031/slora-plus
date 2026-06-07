@@ -20,16 +20,22 @@ for the full measured progression.
 | sglang inf-only (baseline 17 ms / 497 ms) | — | — | — | — |
 | + real bwd, in-process | 72 ms | +324% | 1391 ms | +180% |
 | + real bwd, subprocess+MPS (S12a) | 37 ms | +118% | 1057 ms | +113% |
-| + FT-decode keeps CUDA graph (eager-fix) | 39 ms | +129% | 735 ms | +48% |
-| **+ SLO estimator live (gate)** | **31 ms** | +82% | **723 ms** | **+45%** |
+| **+ FT-decode keeps CUDA graph (eager-fix)** | **39 ms** | +129% | **735 ms** | **+48%** |
 
-Four levers stack: each real backward fire is ~94 ms on 8B. **MPS isolation** (S12a)
-halves the TTFT overhead; the **eager-decode fix** (FT-decode batches keep the CUDA
-graph) cuts co-serving **E2E latency 1057→735 ms**; the **live 3-regime SLO estimator**
-(times every step, refits online, defers the backward when it would blow the TBT budget)
-then trims TTFT 39→31 ms and latency to 723 ms. At **TTFT 31 ms / latency 723 ms,
-sglang co-serving is at parity with DeltaServe-vLLM (29 ms / 697 ms)** — and keeps
-faster inference (17 vs 29 ms) and a far tighter TTFT tail (p95 57 vs 269 ms).
+Two levers do the work: each real backward fire is ~94 ms on 8B. **MPS isolation**
+(S12a) halves the TTFT overhead; the **eager-decode fix** (FT-decode batches keep the
+CUDA graph instead of being forced eager) then cuts co-serving **E2E latency
+1057→735 ms**. At **TTFT 39 ms / latency 735 ms, sglang co-serving is within ~5% of
+DeltaServe-vLLM (29 ms / 697 ms)** — and keeps faster inference (17 vs 29 ms) and a far
+tighter TTFT tail (p95 74 vs 269 ms).
+
+> The 3-regime SLO estimator (vLLM port) is also wired in and trains online, but its
+> backward-defer *gate* doesn't materially change **this** workload — with MPS + the
+> eager-fix, decode steps (~10–30 ms) sit far under the 150 ms TBT budget, so there's
+> nothing to defer. (An earlier draft of this table claimed the estimator trimmed
+> TTFT to 31 ms / 723 ms — that was run-to-run variance from a no-op gate; corrected
+> after code review. See `EXPERIMENTS.md` S-slo-review.) The gate matters on heavier /
+> non-MPS workloads where the backward actually pushes decode toward TBT.
 
 ### Apples-to-apples vs DeltaServe-vLLM (matched 2026-06-05)
 
@@ -42,18 +48,18 @@ older vLLM run):
 | 8B, matched tight | inf TTFT | co TTFT (mean/p50/**p95**) | inf LAT | co LAT (mean) | FT trained |
 |---|---:|---:|---:|---:|---:|
 | **DSV-vLLM** 14/14 | 29 ms | 61 / 32 / **269** ms | 648 ms | **697 ms** | ~24.7k tok |
-| **sglang** (MPS + eager-fix + SLO) | 17 ms | 31 / 30 / **57** ms | 497 ms | **723 ms** | ~3.9k tok |
+| **sglang** (MPS + eager-fix) | 17 ms | 39 / 31 / **74** ms | 497 ms | **735 ms** | ~3.9k tok |
 
-**sglang co-serving is now at parity with vLLM — and ahead on several axes:**
+**sglang co-serving is at parity with vLLM — and ahead on several axes:**
 - **Faster inference** (17 vs 29 ms TTFT, 497 vs 648 ms latency) — engine advantage.
-- **Co-serving at parity**: TTFT 31 vs 29 ms (+7%), E2E latency 723 vs 697 ms (+3.7%) —
-  down from the 50%+ gap earlier framings reported.
-- **Far tighter TTFT tail** under load (p95 57 vs 269 ms) — MPS hard-isolation + the
-  SLO gate deferring the backward when it would blow the TBT budget.
-- The live 3-regime SLO estimator refits online (~9 refits/run) and is what trimmed
-  the last TTFT gap. vLLM still trains ~6× more FT in the window (continuous
-  store-driven vs sglang's request-tagged injection) — closing *that* (more FT
-  throughput at equal SLO) is the remaining §8/§10 work. See `EXPERIMENTS.md`.
+- **Co-serving within ~5%**: TTFT 39 vs 29 ms, E2E latency 735 vs 697 ms (+5.5%) —
+  down from the 50%+ gap earlier framings reported. Driven by the eager-fix + MPS.
+- **Far tighter TTFT tail** under load (p95 74 vs 269 ms) — MPS hard-isolation.
+- The 3-regime SLO estimator is ported + live (refits online), but its gate is a
+  ~no-op on this already-SLO-satisfied workload (see the note above + `EXPERIMENTS.md`).
+- vLLM still trains ~6× more FT in the window (continuous store-driven vs sglang's
+  request-tagged injection) and has the lower TTFT mean — closing *that* (more FT
+  throughput at equal SLO) is the remaining §8/§10 work.
 
 > **History:** an earlier version of this table reported +130%/+234% with a *faux*
 > backward (~8 ms/fire placeholder). Those numbers understated the real cost — a

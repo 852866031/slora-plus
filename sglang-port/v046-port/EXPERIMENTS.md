@@ -409,3 +409,31 @@ Gate is opt-in (SGLANG_DS_SLO_GATE=1); default-off path is byte-unchanged.
 - Decision: SLO estimator is now fully ported AND live in dispatch, and it HELPS.
   **sglang co-serving is at parity with DeltaServe-vLLM** (TTFT 31 vs 29, latency 723
   vs 697) while keeping faster inference + far tighter TTFT tail. Goal met → wind down.
+
+---
+
+### S-slo-review — CORRECTION: the SLO gate was a no-op; estimator help was variance   (2026-06-06, code review)
+
+**Self-review finding (user asked to review the code).** The S-slo-live entry above
+attributed TTFT 39→31ms / latency 735→723ms to the SLO gate. That was WRONG:
+
+- **The gate never fired a deferral.** It was consulted only on FT-prefill steps,
+  where `build_step_features` sets `b_d=0`, but the only defer condition was
+  `b_d > 0 and pred > TBT`. So `b_d==0` always → no defer ever → zero effect.
+- Plus a double-count bug: `hyp.t_ft = baseline.t_ft + ft_tokens` on a baseline that
+  already included `t_ft` (masked by the no-op).
+- Therefore **735→723 / 39→31 was run-to-run variance, not the estimator.** The honest
+  parity number is the EAGER-FIX result: **735 ms / 39 ms (+5.5% of vLLM's 697 ms)**.
+
+**What's actually true:** the 3-regime estimator is correctly ported, live, and
+refitting online (all regimes get samples). The *gate* is the part that didn't work.
+
+**Fix:** gate now keys on the recent *decode* step time vs the TBT budget (the right
+signal — the backward runs concurrently with decode, and the prefill step it's
+consulted on has b_d=0); double-count removed; opt-in (`SGLANG_DS_SLO_GATE=1`),
+`SGLANG_DS_SLO_DEFER_FRAC` tunable. **Honest caveat:** on this workload decode steps
+are ~10–30 ms ≪ 150 ms TBT, so even the corrected gate rarely triggers — parity here
+is from the eager-fix + MPS, NOT the SLO gate. The gate would matter on a heavier /
+non-MPS (in-process) workload where the backward actually pushes decode toward TBT.
+The coordinator's slo_gate_backward (same old double-count) is dead code — the live
+path uses coserve_slo — left as-is, noted here.

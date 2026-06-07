@@ -56,7 +56,14 @@ class _CoServeSLO:
         self.max_tbt_slo = float(os.environ.get("SGLANG_DS_MAX_TBT_SLO", "0.15"))
         # Gate is opt-in; training is always on so the estimator is warm.
         self.gate_enabled = os.environ.get("SGLANG_DS_SLO_GATE", "0") == "1"
+        # Fraction of the TBT budget the *recent decode* step time may reach
+        # before we defer a backward (inference already SLO-stressed → don't pile
+        # on). Decode load is the right signal: the backward-fire decision is
+        # consulted on FT-prefill steps (b_d=0), so we must look at the
+        # surrounding decode steps, not the prefill step's own (b_d=0) features.
+        self.defer_frac = float(os.environ.get("SGLANG_DS_SLO_DEFER_FRAC", "0.8"))
         self._pending = deque()      # (start_evt, end_evt, features)
+        self._last_decode_dur: Optional[float] = None
         self.fires = 0
         self.defers = 0
         self._n_recorded = 0
@@ -88,6 +95,8 @@ class _CoServeSLO:
 
     def _record(self, features: StepFeatures, duration_s: float):
         self.tracker.add(features, duration_s)
+        if features.b_d > 0 and features.t_in == 0:   # a decode-only step
+            self._last_decode_dur = duration_s
         self._n_recorded += 1
         if self.tracker.check_refit():
             self.estimator.data_fit(self.tracker)
@@ -97,17 +106,21 @@ class _CoServeSLO:
 
     # ---- the gate ----
     def should_fire_backward(self, baseline: StepFeatures, ft_tokens: int) -> bool:
-        """Return True to fire the backward now. When the gate is enabled and
-        the estimator is warm, defer (False) if firing the FT prefill would push
-        the predicted EAGER-regime step time over the TBT budget."""
+        """Return True to fire the backward now, False to defer it (drop this
+        fire). When the gate is enabled and the estimator is warm, defer if the
+        recent inference decode step time is already a large fraction of the TBT
+        budget — adding the backward's GPU contention would risk blowing TBT.
+
+        Signal is the recent *decode* step time, not the FT-prefill step's own
+        features (which have b_d=0): the backward runs concurrently with the
+        decode steps it would slow down. On the MPS-isolated path this is a soft
+        throttle layered on the subprocess backpressure; it only triggers when
+        decode is genuinely SLO-stressed."""
         if not self.gate_enabled or not self.estimator.is_ready:
             self.fires += 1
             return True
-        hyp = StepFeatures(
-            t_in=baseline.t_in + ft_tokens, p=baseline.p + 1,
-            t_ft=baseline.t_ft + ft_tokens, b_d=baseline.b_d, k=baseline.k)
-        t_with_ft = self.estimator.predict(hyp, regime=REGIME_EAGER)
-        if baseline.b_d > 0 and t_with_ft > self.max_tbt_slo:
+        recent = self._last_decode_dur
+        if recent is not None and recent > self.defer_frac * self.max_tbt_slo:
             self.defers += 1
             return False
         self.fires += 1
