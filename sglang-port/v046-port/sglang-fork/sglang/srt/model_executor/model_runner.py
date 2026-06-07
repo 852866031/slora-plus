@@ -1229,6 +1229,22 @@ class ModelRunner:
                 input_ids=forward_batch.input_ids,
             )
 
+        # DeltaServe SLO estimator: build step features (python ints, ~no sync)
+        # and start deferred CUDA-event timing of this step. Always-on when FT
+        # is enabled so the 3-regime estimator trains online; the gate below is
+        # opt-in (SGLANG_DS_SLO_GATE=1).
+        _slo = _slo_feats = _slo_handle = None
+        if getattr(self, "finetune_accumulator", None) is not None:
+            try:
+                from sglang.srt.deltaserve.coserve_slo import get_slo, build_step_features
+                _slo = get_slo()
+                _ft_tok = int(_ft_mask.sum().item()) if _ft_prefill else 0
+                _slo_feats = build_step_features(forward_batch, _ft_tok)
+                _slo_handle = _slo.begin_step(_slo_feats)
+            except Exception as e:
+                logger.warning(f"[DeltaServe] SLO feature/timing setup failed: {e}")
+                _slo = None
+
         with get_global_expert_distribution_recorder().with_forward_pass(
             self.forward_pass_id,
             forward_batch,
@@ -1236,6 +1252,12 @@ class ModelRunner:
             output = self._forward_raw(
                 forward_batch, skip_attn_backend_init, pp_proxy_tensors
             )
+
+        if _slo is not None and _slo_handle is not None:
+            try:
+                _slo.end_step(_slo_handle)
+            except Exception:
+                pass
 
         if self.eplb_manager is not None:
             self.eplb_manager.on_forward_pass_end(self.forward_pass_id)
@@ -1246,7 +1268,14 @@ class ModelRunner:
         if _ft_prefill and getattr(self, "finetune_accumulator", None) is not None:
             try:
                 snapshot = self.finetune_accumulator.pop_step()
-                if getattr(self, "_ds_bwd_client", None) is not None:
+                # SLO gate (opt-in): defer the backward when the estimator
+                # predicts firing it would blow the TBT budget. Cold-start /
+                # gate-off always fires (default path unchanged).
+                _fire = (_slo is None) or _slo.should_fire_backward(
+                    _slo_feats, int(_slo_feats.t_ft) if _slo_feats else 0)
+                if not _fire:
+                    pass  # SLO-deferred this fire (drop, like backpressure)
+                elif getattr(self, "_ds_bwd_client", None) is not None:
                     # S12a: ship to the MPS-capped backward subprocess (non-blocking,
                     # drops if the child is still busy). Scheduler thread never waits.
                     self._ds_bwd_client.submit(snapshot)
