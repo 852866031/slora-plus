@@ -359,3 +359,28 @@ a server and serve a request.
     ("The capital of France is" → " Paris. The Eiffel Tower is located in Paris.").
 - Decision: from-scratch install is now genuinely verified end-to-end (deps → import →
   server boot → serve). The dep-pin is the kind of bug only a true clean install catches.
+
+---
+
+### S-eagerfix — let FT-decode batches keep the CUDA graph (co latency)   (2026-06-06, H200 ×1)
+
+**Reflection (loop iter 2).** Hunting the +113% co-serving E2E latency gap vs vLLM
+(+8%). Found it's not mainly backward SM contention (that's MPS-isolated) — it's that
+`_forward_raw` forced EAGER for ANY batch carrying FT tokens, including FT *decode*
+steps. Since the prefill-only gate means decode captures nothing, forcing FT-decode
+batches eager just strips the CUDA graph off the whole co-located batch → decode for
+everyone in that batch slows down. Fix: gate eager on FT *prefill* only
+(`not _ft_prefill`), matching the capture gate.
+
+- Command: `auto_benchmark_sglang.py --co --tight --real-backward --backward-subprocess
+  --backward-mps-pct 10 --ft-fraction 0.25 --ft-corpus alpaca_1000_p95.txt --port 30701` (8B, MPS up).
+- Baselines: inf-only 17/497ms; co (before this fix) 37/1057ms; vLLM 29/697ms.
+- Predicted: co latency drops from 1057 toward ~650-750ms (FT-decode now graphed),
+  TTFT ~unchanged. FALSIFIED if latency stays ~1057.
+- **Actual:** co latency mean=**735ms** (p50 768, p95 862), TTFT mean=39ms p50=31 p95=74.
+  53 backward fires, 0 errors. vs co-before-fix 1057ms and vLLM 697ms.
+  - **Co latency 1057→735ms (−30%)**; overhead vs sglang inf-only +113%→**+48%**.
+  - **Now within +5.5% of vLLM's 697ms** (was +52%). sglang TTFT p95 73ms still far
+    beats vLLM's 269ms. The eager-decode fix was the dominant lever — bigger than MPS.
+- Decision: latency gap with vLLM essentially closed by this one fix. Commit+push+README.
+  Remaining: estimator-gated dispatch (TTFT polish + honor the explicit SLO-port ask).
