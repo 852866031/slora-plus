@@ -20,13 +20,16 @@ for the full measured progression.
 | sglang inf-only (baseline 17 ms / 497 ms) | — | — | — | — |
 | + real bwd, in-process | 72 ms | +324% | 1391 ms | +180% |
 | + real bwd, subprocess+MPS (S12a) | 37 ms | +118% | 1057 ms | +113% |
-| **+ FT-decode keeps CUDA graph (eager-fix)** | **39 ms** | +129% | **735 ms** | **+48%** |
+| + FT-decode keeps CUDA graph (eager-fix) | 39 ms | +129% | 735 ms | +48% |
+| **+ SLO estimator live (gate)** | **31 ms** | +82% | **723 ms** | **+45%** |
 
-Three levers stack: each real backward fire is ~94 ms on 8B. **MPS isolation** (S12a)
+Four levers stack: each real backward fire is ~94 ms on 8B. **MPS isolation** (S12a)
 halves the TTFT overhead; the **eager-decode fix** (FT-decode batches keep the CUDA
-graph instead of being forced eager) then cuts co-serving **E2E latency 1057→735 ms**.
-At 735 ms, co-serving latency is **within ~5% of DeltaServe-vLLM's 697 ms** — the gap
-that earlier framings reported as 50%+ is essentially closed.
+graph) cuts co-serving **E2E latency 1057→735 ms**; the **live 3-regime SLO estimator**
+(times every step, refits online, defers the backward when it would blow the TBT budget)
+then trims TTFT 39→31 ms and latency to 723 ms. At **TTFT 31 ms / latency 723 ms,
+sglang co-serving is at parity with DeltaServe-vLLM (29 ms / 697 ms)** — and keeps
+faster inference (17 vs 29 ms) and a far tighter TTFT tail (p95 57 vs 269 ms).
 
 ### Apples-to-apples vs DeltaServe-vLLM (matched 2026-06-05)
 
@@ -39,17 +42,18 @@ older vLLM run):
 | 8B, matched tight | inf TTFT | co TTFT (mean/p50/**p95**) | inf LAT | co LAT (mean) | FT trained |
 |---|---:|---:|---:|---:|---:|
 | **DSV-vLLM** 14/14 | 29 ms | 61 / 32 / **269** ms | 648 ms | **697 ms** | ~24.7k tok |
-| **sglang** (MPS + eager-fix) | 17 ms | 39 / 31 / **74** ms | 497 ms | **735 ms** | ~3.9k tok |
+| **sglang** (MPS + eager-fix + SLO) | 17 ms | 31 / 30 / **57** ms | 497 ms | **723 ms** | ~3.9k tok |
 
-**sglang is now competitive across the board:**
+**sglang co-serving is now at parity with vLLM — and ahead on several axes:**
 - **Faster inference** (17 vs 29 ms TTFT, 497 vs 648 ms latency) — engine advantage.
-- **Co-serving E2E latency within ~5%** of vLLM (735 vs 697 ms) — the eager-decode fix
-  closed what earlier framings called a 50%+ gap.
-- **Much tighter TTFT tail** under load (p95 74 vs 269 ms) — MPS hard-isolation.
-- vLLM still trains ~6× more FT in the window (continuous store-driven vs sglang's
-  request-tagged injection) and has the lower TTFT mean; closing that is §8/§10
-  (async scheduling + forward_interruptible) + the SLO estimator (now ported, being
-  wired into dispatch). See `EXPERIMENTS.md`.
+- **Co-serving at parity**: TTFT 31 vs 29 ms (+7%), E2E latency 723 vs 697 ms (+3.7%) —
+  down from the 50%+ gap earlier framings reported.
+- **Far tighter TTFT tail** under load (p95 57 vs 269 ms) — MPS hard-isolation + the
+  SLO gate deferring the backward when it would blow the TBT budget.
+- The live 3-regime SLO estimator refits online (~9 refits/run) and is what trimmed
+  the last TTFT gap. vLLM still trains ~6× more FT in the window (continuous
+  store-driven vs sglang's request-tagged injection) — closing *that* (more FT
+  throughput at equal SLO) is the remaining §8/§10 work. See `EXPERIMENTS.md`.
 
 > **History:** an earlier version of this table reported +130%/+234% with a *faux*
 > backward (~8 ms/fire placeholder). Those numbers understated the real cost — a
@@ -131,7 +135,7 @@ From `CO_SERVING_OPTIMIZATIONS.md`:
 | 1 | Activation saves (memory-for-compute) | partial — 5 of 7 types | `sglang-fork/sglang/srt/deltaserve/accumulate.py` |
 | 2 | CUDA graphs for backward (pre-captured) | ✅ | `sglang-fork/sglang/srt/deltaserve/faux_backward.py` `precapture_graph` |
 | 3 | Defer LM-head to backward | ❌ | needs Task A |
-| 4 | FT admission (admit-rate + fire-throttle) | ✅ (heuristic) | `sglang-fork/sglang/srt/deltaserve/faux_backward.py` + scheduler.py |
+| 4 | SLO-aware FT admission (3-regime estimator) | ✅ | `sglang-fork/sglang/srt/deltaserve/estimator.py` (ported) + `coserve_slo.py` (live in model_runner; opt-in gate `SGLANG_DS_SLO_GATE=1`) |
 | 5 | Backward compute optimizations | ❌ | needs Task A |
 | 6 | `_maybe_pause` GPU yield | ✅ (primitive only) | `sglang-fork/sglang/srt/deltaserve/gpu_grant.py` |
 | 7 | Slice-based activation save fast path | ✅ | `sglang-fork/sglang/srt/deltaserve/accumulate.py` `_contig_slice_from_mask` |
