@@ -9,7 +9,6 @@
 # any *nutanix* CSV anywhere in the repo.
 !eval/llama3/timelines/**/timeline_*.csv
 *nutanix*
-*.png
 S-LoRA/test/llama3/adapters/llama3-toy-lora/*
 S-LoRA/test/llama3/adapters/llama3-toy-lora-ft/*
 __pycache__/
