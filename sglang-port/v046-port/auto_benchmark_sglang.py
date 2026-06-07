@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import csv
 import json
 import os
@@ -34,7 +35,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
-
+import random
+import string
 import aiohttp
 
 _HERE = Path(__file__).resolve().parent
@@ -136,10 +138,16 @@ def wait_for_health(port: int, timeout_s: float = 180) -> bool:
 _PROMPT_FILLER = " hello" * 2048
 
 
-def make_prompt(prompt_length: int) -> str:
+def make_prompt_1(prompt_length: int) -> str:
     # Each " hello" is ~1 token after BPE; chain enough to exceed target.
     return _PROMPT_FILLER[:prompt_length * 6][: prompt_length * 6]
 
+def make_prompt(length: int) -> str:
+    words = []
+    for _ in range(max(1, length)):
+        word = "".join(random.choices(string.ascii_lowercase, k=random.randint(3, 5)))
+        words.append(word)
+    return " ".join(words).capitalize() + "."
 
 # Distinct FT prompts drawn from a real finetuning corpus. The timeline's
 # inference prompts are all one fixed length (→ identical text → radix-cached),
@@ -291,6 +299,55 @@ def write_csv(path: Path, results: List[RequestResult]):
             ])
 
 
+# --- server lifecycle ------------------------------------------------------
+# The launched server and its children (sglang::scheduler, sglang::detokenizer,
+# the backward subprocess) all share the server's process group via setsid, so
+# killing the group reaps the whole tree. We register cleanup on atexit AND on
+# SIGINT/SIGTERM so a Ctrl+C, a kill, or an unhandled exception can't leave
+# orphans holding the port + GPU memory (the old end-of-main kill only ran on a
+# clean exit).
+_server_proc: Optional[subprocess.Popen] = None
+
+
+def _kill_server() -> None:
+    global _server_proc
+    p = _server_proc
+    _server_proc = None  # idempotent: a second call (atexit after a signal) no-ops
+    if p is None or p.poll() is not None:
+        return
+    try:
+        pgid = os.getpgid(p.pid)
+    except ProcessLookupError:
+        return
+    print(f"[bench] cleaning up server process group {pgid}...", file=sys.stderr)
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        p.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _install_cleanup_handlers(server_proc: subprocess.Popen) -> None:
+    global _server_proc
+    _server_proc = server_proc
+    atexit.register(_kill_server)
+
+    def _on_signal(signum, _frame):
+        # Kill the server, then exit so atexit/finally unwind normally. Exit code
+        # follows the shell convention (128 + signal number).
+        _kill_server()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="/mnt/weka/home/jianshu.she/.cache/huggingface/hub/models--meta-llama--Llama-3.2-1B-Instruct/snapshots/9213176726f574b556790deb65791e0c5aa438b6",
@@ -372,14 +429,15 @@ def main():
             cmd, stdout=open(log_path, "w"), stderr=subprocess.STDOUT,
             env=env, preexec_fn=os.setsid,
         )
-        print(f"[bench] server pid={server_proc.pid} log={log_path}")
+        print(f"[bench] server pid={server_proc.pid} log= {log_path}")
+        _install_cleanup_handlers(server_proc)
         if not wait_for_health(args.port):
             print("[bench] server failed to come up; tail log:", file=sys.stderr)
             try:
                 print("".join(open(log_path).readlines()[-40:]), file=sys.stderr)
             except Exception:
                 pass
-            os.killpg(server_proc.pid, signal.SIGTERM)
+            _kill_server()
             sys.exit(3)
         print(f"[bench] server healthy")
 
@@ -419,12 +477,7 @@ def main():
         print(f"[bench] latency_s: mean={sum(lats)/len(lats):.3f}  p50={lats[len(lats)//2]:.3f}  p95={lats[int(len(lats)*0.95)]:.3f}")
     print(f"[bench] reqs ok={n_ok} err={n_err}; ft_tagged={ft_count}")
 
-    if server_proc is not None:
-        os.killpg(server_proc.pid, signal.SIGTERM)
-        try:
-            server_proc.wait(timeout=15)
-        except subprocess.TimeoutExpired:
-            os.killpg(server_proc.pid, signal.SIGKILL)
+    _kill_server()
 
 
 if __name__ == "__main__":

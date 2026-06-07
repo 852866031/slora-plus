@@ -1271,6 +1271,68 @@ class Scheduler(
             self.metrics_collector.log_stats(self.stats)
         self._publish_kv_events()
 
+    def _log_ft_batch(self, can_run_list: List[Req], running_bs: int):
+        """DeltaServe: one log line per prefill batch that carries FT tokens.
+
+        Fires only when ``can_run_list`` contains >=1 ``is_finetuning`` req —
+        i.e. exactly when FT tokens are admitted into a (prefill/extend) batch,
+        which is where ``model_runner`` captures activations and dispatches the
+        backward. Disable with ``SGLANG_DS_LOG_FT_BATCH=0``.
+
+        Field map (sglang separates prefill and decode batches, so this fires on
+        the prefill that admits FT; the ``decode=`` view is the *running* decode
+        batch this prefill will merge into):
+          prefill=  inference (non-FT) new tokens in this prefill batch
+          ft=       FT new tokens in this prefill batch
+          decode=   current seq lengths of the running inference decode reqs
+          running=  running decode batch size, inf= the non-FT subset of it
+          waiting=  waiting-queue depth
+          FT OPEN/CLOSED  the /start_finetuning admission gate
+          buf=X/Y   X = FT tokens this batch, Y = max_saved_finetuning_tokens
+                    (the per-backward token budget / FFN graph capture size)
+        """
+        import os
+        if os.environ.get("SGLANG_DS_LOG_FT_BATCH", "1") != "1":
+            return
+        ft_reqs = [r for r in can_run_list if getattr(r, "is_finetuning", False)]
+        if not ft_reqs:
+            return
+
+        from datetime import datetime
+        from sglang.srt.deltaserve.gates import is_finetuning_started
+
+        def _new_tok(r: Req) -> int:
+            n = getattr(r, "extend_input_len", 0) or 0
+            if n <= 0 and getattr(r, "fill_ids", None) is not None:
+                n = len(r.fill_ids) - len(getattr(r, "prefix_indices", []) or [])
+            return max(0, n)
+
+        ft_tok = sum(_new_tok(r) for r in ft_reqs)
+        inf_tok = sum(
+            _new_tok(r) for r in can_run_list if not getattr(r, "is_finetuning", False)
+        )
+
+        running_reqs = list(self.running_batch.reqs) if self.running_batch else []
+        inf_running = [r for r in running_reqs if not getattr(r, "is_finetuning", False)]
+        decode_lens = [
+            len(r.origin_input_ids) + len(r.output_ids) for r in inf_running
+        ][:20]
+
+        cap = int(getattr(self.finetune_config, "max_saved_finetuning_tokens", 256))
+        if getattr(self, "_ds_ft_anchor", None) is None:
+            self._ds_ft_anchor = time.perf_counter()
+        dt = time.perf_counter() - self._ds_ft_anchor
+        now = datetime.now()
+        gate = "FT OPEN" if is_finetuning_started() else "FT CLOSED"
+
+        logger.info(
+            f"[deltaserve] [batch {now:%H:%M:%S}.{now.microsecond // 1000:03d} "
+            f"t=+{dt:.3f}s] prefill={inf_tok} ft={ft_tok} "
+            f"decode={decode_lens} (n={len(inf_running)}) | eager | "
+            f"running={running_bs} (inf={len(inf_running)}) "
+            f"waiting={len(self.waiting_queue)} | {gate} buf={ft_tok}/{cap}"
+        )
+
     def check_memory(self):
         available_size = (
             self.token_to_kv_pool_allocator.available_size()
@@ -1494,6 +1556,9 @@ class Scheduler(
         # Print stats
         if self.attn_tp_rank == 0:
             self.log_prefill_stats(adder, can_run_list, running_bs)
+            # DeltaServe: extra line whenever this prefill admits FT tokens.
+            if self.finetune_coordinator is not None:
+                self._log_ft_batch(can_run_list, running_bs)
 
         # Create a new batch
         new_batch = ScheduleBatch.init_new(
