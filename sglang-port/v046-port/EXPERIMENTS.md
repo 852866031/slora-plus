@@ -384,3 +384,28 @@ everyone in that batch slows down. Fix: gate eager on FT *prefill* only
     beats vLLM's 269ms. The eager-decode fix was the dominant lever — bigger than MPS.
 - Decision: latency gap with vLLM essentially closed by this one fix. Commit+push+README.
   Remaining: estimator-gated dispatch (TTFT polish + honor the explicit SLO-port ask).
+
+---
+
+### S-slo-live — estimator live in dispatch + opt-in SLO gate   (2026-06-06, H200 ×1)
+
+**Reflection (loop iter 4).** Latency goal already met (735ms ≈ vLLM 697). This
+honors the explicit SLO-estimator ask: make the ported 3-regime estimator LIVE in
+the real (request-tagged) dispatch — model_runner builds StepFeatures per step,
+times each step with deferred CUDA events (no per-step sync), feeds note_step()
+(online refit @256), and consults should_fire_backward() before the LoRA backward.
+Gate is opt-in (SGLANG_DS_SLO_GATE=1); default-off path is byte-unchanged.
+
+- Command: `SGLANG_DS_SLO_GATE=1 auto_benchmark_sglang.py --co --tight --real-backward
+  --backward-subprocess --backward-mps-pct 10 --ft-fraction 0.25 --ft-corpus
+  alpaca_1000_p95.txt --port 30702` (8B, MPS up).
+- Predicted: estimator refits mid-run (log lines); latency stays ≤735 (lightweight
+  timing, no regression); gate may shave a few backward fires under decode load →
+  TTFT neutral-to-slightly-better. FALSIFIED if latency regresses >5% or no refit.
+- **Actual:** TTFT mean=**31ms** p50=30 p95=57 (was 39/31/74), latency mean=**723ms**
+  (was 735), refits=**9** (estimator trained online), 0 errors. Gate-ON improved BOTH:
+  TTFT 39→31 (now +7%% of vLLM's 29; was +34%%), latency 735→723 (+3.7%% of vLLM's 697).
+  p95 TTFT 57ms vs vLLM 269ms.
+- Decision: SLO estimator is now fully ported AND live in dispatch, and it HELPS.
+  **sglang co-serving is at parity with DeltaServe-vLLM** (TTFT 31 vs 29, latency 723
+  vs 697) while keeping faster inference + far tighter TTFT tail. Goal met → wind down.

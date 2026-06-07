@@ -5,3 +5,4 @@ __pycache__/
 # (The port is installed via v046-port/install.sh against a stock sglang, not a
 # vendored source checkout.)
 /sglang/
+sglang-port/v046-port/sglang-fork/sglang.egg-info/
