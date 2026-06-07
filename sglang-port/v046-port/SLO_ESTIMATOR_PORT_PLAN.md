@@ -35,6 +35,13 @@ The success criterion for this port: an sglang A/B run that shows the same
 shape — FT throughput anti-correlated with inference load, near-baseline
 inference latency under bursts, and high FT throughput when inference is idle.
 
+**For the developer:** the `timeline_nutanix.csv` request schedule that produced
+the plot above is placed in this directory. Once the port is implemented, replay
+that timeline against the co-serving sglang server and regenerate this same
+comparison plot — check that the resulting curve matches the desired behavior
+(FT throughput filling the inference troughs and backing off on the bursts,
+inference latency staying near baseline).
+
 ---
 
 Reference files (read these first, all under `DeltaServe-vLLM/`):
