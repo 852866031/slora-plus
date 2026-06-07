@@ -133,8 +133,9 @@ The scaffolding (`finetune_coordinator.py`, `step_time_estimator.py`,
 
 ## 1. Architecture mapping: vLLM V1 → sglang v0.4.6
 
-The port is mostly mechanical *except* for five structural differences that
-shape the design. Read these before touching code.
+The port is mostly mechanical *except* for a few structural points that shape
+the design (mostly vLLM↔sglang differences, plus one shared SLO requirement in
+§1.7). Read these before touching code.
 
 ### 1.1 Batch model — sglang is actually simpler
 
@@ -158,6 +159,33 @@ free:
 keying on `forward_mode` — it's the single source of truth and already handles
 the degenerate `B_d==0`/`K==0` cases. `forward_mode` becomes the observability
 cross-check (the analogue of vLLM's vestigial `was_graph`).
+
+**Use the MIXED (mixed-chunk) batch to match vLLM's behavior — enable
+`--enable-mixed-chunk`.** By default sglang runs prefill-priority:
+`enable_mixed_chunk=False` (`server_args.py:167`), so a new prefill batch and
+the running decode batch execute as *separate* steps and FT prefill never shares
+a step with inference decode. vLLM V1 instead runs one unified step that fuses
+chunked prefill + decode — which is the composition the three-regime estimator
+and `admit_ft_to_step` were designed around. **Enable sglang's mixed-chunk mode**
+so the scheduler fuses the running decode batch into the new prefill batch via
+`mix_with_running()` (`scheduler.py:1587` → `schedule_batch.py:1290`,
+`ForwardMode.MIXED`), reproducing vLLM's unified step. This matters for
+co-serving specifically:
+
+- It lets an **FT prefill ride a step that also carries inference decode** — the
+  `EAGER` `(T_in>0, B_d>0, T_ft>0)` shape the gate admits into. Without
+  mixed-chunk, FT and decode never overlap in one forward, so the co-serving
+  GPU overlap (and the mixed-regime training data) the whole design relies on
+  doesn't happen, and behavior diverges from the reference plot.
+- The estimator already covers MIXED (see the table: MIXED+FT → `EAGER`,
+  MIXED-no-FT → `INF_PREFILL`; the formula's `δ·B_d + ε·K` terms carry the
+  decode part), so no model change is needed — this is purely a
+  scheduling/config assumption the plan adopts. **Treat `--enable-mixed-chunk`
+  (with a sane `--chunked-prefill-size`) as a required setting for the
+  co-serving config** (bake it into the Phase-G YAML / launcher defaults), and
+  size `_current_step_features`'s prefill-budget estimate (Phase D) against
+  `chunked_prefill_size` so the baseline prediction matches what the mixed step
+  will actually run.
 
 ### 1.2 Feature extraction maps to concrete sglang batch fields
 
@@ -242,6 +270,43 @@ on top of the in-process backward. If `enable_finetuning` is on but the
 subprocess is off, the admission gate should fall back to the existing
 synchronous behavior (or refuse to arm — implementer's choice). Make the SLO
 admission gate require `_ds_bwd_client is not None`.
+
+### 1.7 SLO dimensions — TTFT for prefill, TPOT/TBT for decode (both, every step)
+
+The estimator predicts a single number per step — the step's execution time
+`T_step`. The admission gate then has to hold that number against **two
+different latency SLOs**, because a step can carry two kinds of request, and FT
+admission threatens each differently:
+
+| Request kind in the step | SLO it threatens | How `T_step` maps to it |
+|---|---|---|
+| **Waiting prefill** (about to get its first token) | **TTFT** (`ttft_slo`) | a longer step delays this request's first token; admitting FT must keep `arrival + queue_wait + T_step ≤ 0.9·ttft_slo` |
+| **Running decode** (already generating) | **TPOT** = TBT (`max_tbt_slo`, and avg over `avg_tbt_slo`) | `T_step` *is* the inter-token gap for every decode request this step; admitting FT must keep `T_step ≤ max_tbt_slo` |
+
+(TPOT — time-per-output-token — is the same quantity DeltaServe/vLLM call TBT,
+time-between-tokens: the per-step decode latency. The config keeps the `*_tbt_*`
+names; treat "TPOT" and "TBT" as synonyms.)
+
+So the admission gate is a **dual check**, not a single budget:
+
+- A **MIXED** step (the §1.1 target — prefill + decode fused) carries *both* a
+  TTFT-bound waiting request and TPOT-bound decode requests, so `admit_ft_to_step`
+  must satisfy **both** constraints and stop at the **tighter** one. This is
+  exactly what the reference does — `feats.b_d > 0` guards the TBT check and
+  `has_prefill` guards the TTFT check, and Stage 4 re-checks both per admitted
+  sample (`ft_scheduler.py:380-386`). Port both guards verbatim; do not collapse
+  them to one.
+- A **decode-only** step has no waiting prefill → only the TPOT/TBT check
+  applies (this is what `decode_only_ft_safety_margin` tightens under the
+  `both` phase).
+- A **prefill-only / idle** step has no running decode → only the TTFT check
+  (idle has neither, so FT fills freely up to the buffer cap).
+
+Practical consequence for Phase D: `_current_step_features` must surface *both*
+the earliest waiting-request arrival time (for the TTFT deadline) **and** the
+decode request count + KV (`b_d`, `k`, for the TBT prediction) — the sglang
+`_current_step_features` reads decode state from `self.running_batch` and
+prefill state from the `waiting_queue` head, mirroring `ft_scheduler.py:158-188`.
 
 ---
 
@@ -560,8 +625,9 @@ names, which don't match sglang `ServerArgs`, and some invert:
 - Ship a sglang-vocab config: `sglang-port/v046-port/configs/serving_config_finetuning_llama3.yaml`
   — the converted twin of the vLLM file (engine sections in sglang vocab,
   `finetune`/`slo`/`debug` copy-pasted), plus a `_both.yaml` variant for the
-  unified-phase scheduler. Keep the alias map so the *original* vLLM file also
-  loads (with a one-time "translated N legacy keys" log) for cross-checking.
+  unified-phase scheduler. **See Appendix A for the full example config.** Keep
+  the alias map so the *original* vLLM file also loads (with a one-time
+  "translated N legacy keys" log) for cross-checking.
 
 **Decision to confirm:** support the literal vLLM YAML via the alias map
 (convenience, mild brittleness) **and** ship a native sglang-vocab config
@@ -789,3 +855,94 @@ Total ≈ 2,890 LoC + tests. A–D (online-refit MVP) ≈ 1,750 LoC is the
 critical path to a working SLO-aware gate; E is the cold-start optimization;
 F + G are the config/usability layer; H is independent burst protection
 (landable early). All of E/F/G/H are optional relative to the A–D core.
+
+---
+
+## Appendix A — Example sglang co-serving config
+
+The native sglang-vocab twin of `DeltaServe-vLLM/configs/serving_config_finetuning_llama3.yaml`,
+loaded by the Phase-G `--finetune-config` loader. The `finetune` / `slo` /
+`debug` sections are vocab-identical to the vLLM file (they fold into
+`FinetuneConfig`); the `model` / `engine` / `lora` sections use sglang
+`ServerArgs` names (§G translation table). Note `enable_mixed_chunk: true` —
+required for the §1.1 unified-step behavior.
+
+```yaml
+# serving_config_finetuning_llama3.yaml — sglang DeltaServe co-serving (Llama-3).
+# Loaded via:  python -m sglang.launch_server \
+#                --finetune-config configs/serving_config_finetuning_llama3.yaml
+# Sections finetune/slo/debug -> FinetuneConfig; server -> extras;
+# model/engine/lora -> ServerArgs (sglang field names). Relative *path* values
+# under finetune/adapters resolve against THIS file's directory.
+
+finetune:
+  enable_finetuning: true
+  backward_mps_percentage: 10            # CUDA MPS % granted to the backward subprocess
+  finetuning_lora_path: ../adapters/llama3-toy-lora-ft   # the adapter the backward trains
+  data_path: ../alpaca_1000.txt          # corpus: one tokenizable sample per line
+  max_saved_finetuning_tokens: 256       # activation-buffer capacity (FT token budget)
+  num_epochs: 20
+  learning_rate: 0.000005
+  weight_decay: 0.01
+  gamma: 0.9
+  backward_fp32: false
+  backward_cuda_graph: true
+  save_attn_qkv: true
+  start_on_launch: false                 # FT held closed until POST /start_finetuning
+  # --- burst back-off throttles (Phase H; default off) ---
+  fwd_token_throttle_enable: true        # also pause backward on big (decode-heavy) batches
+  fwd_token_throttle: 200                # total tokens (prefill+ft+decode) above which to pause
+  rps_throttle_enable: true              # close FT admission under inference arrival bursts
+  rps_throttle_close_rps: 20             # engage above this RPS
+  rps_throttle_open_rps: 19              # release below this RPS (must be < close)
+  rps_throttle_window_s: 0.75            # arrival-rate sliding window
+  rps_throttle_close_time: 0.5           # min seconds to stay engaged (temporal hysteresis)
+
+slo:
+  # The gate is a DUAL check (§1.7): TTFT for waiting prefill, TPOT/TBT for decode.
+  ttft_slo: 0.3                          # time-to-first-token target (s) — prefill requests
+  avg_tbt_slo: 0.02                      # avg time-per-output-token target (s) — decode
+  max_tbt_slo: 0.1                       # max per-step decode time while admitting FT (s)
+  coserving_admission_phase: both        # "prefill" = FT rides prefill only; "both" = SLO decides every step
+  decode_only_ft_safety_margin: 0.7      # [both] tighten TBT budget on decode-only steps (cold-start safety)
+  profile_on_launch: true                # offline profiling pass seeds the estimator before serving
+  profile_num_repeats: 2                 # recorded passes per profiling shape
+  match_prefill_workload_factor: 0.5     # leaky-bucket admission shaper (0 disables)
+  ft_tokens_admission_constrain_factor: -1   # proportional FT cap vs prefill tokens (-1 disables)
+  # batch_prediction_stats_path: output/scheduler/batch_prediction_stats.csv
+  # validate_estimator: false            # append per-step predicted-vs-actual rows
+
+debug:
+  print_scheduler_add: false
+  print_step_mode: false
+
+server:
+  host: 127.0.0.1
+  port: 30000
+
+model:
+  model_path: meta-llama/Meta-Llama-3-8B
+  tokenizer_mode: auto
+  trust_remote_code: false
+  dtype: auto
+  context_length: 2048                   # vLLM 'max_model_len'
+
+engine:
+  mem_fraction_static: 0.85              # vLLM 'gpu_memory_utilization'
+  tp_size: 1                             # vLLM 'tensor_parallel_size'
+  disable_cuda_graph: false              # vLLM 'enforce_eager: false' (co-serve steps still force eager)
+  enable_mixed_chunk: true               # REQUIRED (§1.1): fuse decode+prefill into one MIXED step
+  chunked_prefill_size: 2048             # prefill chunk budget per step
+
+lora:
+  lora_paths:
+    - ../adapters/llama3-toy-lora        # inference LoRA (served on sglang's multi-LoRA path)
+  max_loras_per_batch: 2                 # vLLM 'max_loras'
+  max_lora_rank: 16
+```
+
+> The original vLLM file also loads (Phase-G alias map translates `model`→
+> `model_path`, `max_model_len`→`context_length`, `enforce_eager`→
+> `disable_cuda_graph`, etc., and warn-drops vLLM-frontend-only keys like
+> `api_server_count` / `disable_log_stats`) — but the native sglang-vocab form
+> above is the canonical config and the one to keep in the repo.
