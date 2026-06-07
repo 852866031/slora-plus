@@ -17,7 +17,7 @@ estimator + admission gate + burst throttles in this plan is to make FT
 throughput dynamically fill the *troughs* of the inference workload without ever
 degrading inference during the *peaks*.
 
-![Desired co-serving behavior — FT throughput fills inference troughs, backs off on spikes](compare_temporal_both_5090.pdf)
+![Desired co-serving behavior — FT throughput fills inference troughs, backs off on spikes](compare_temporal_both_5090.png)
 
 The plot above (the DeltaServe-vLLM reference on the bursty `nutanix` timeline,
 RTX 5090) is the behavior we want to reproduce in sglang:
