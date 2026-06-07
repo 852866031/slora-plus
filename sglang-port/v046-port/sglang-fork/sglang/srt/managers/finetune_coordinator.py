@@ -10,9 +10,17 @@ signals sent to the backward worker over an IPC channel.
 
 from __future__ import annotations
 
+import time
 from typing import Any, Optional
 
-from .step_time_estimator import StepTimeEstimator
+from sglang.srt.deltaserve.estimator import (
+    MergedExecutionEstimator,
+    StepExecutionTracker,
+    StepFeatures,
+    REGIME_EAGER,
+    REGIME_INF_PREFILL,
+    REGIME_DECODE_ONLY,
+)
 
 
 class FinetuneCoordinator:
@@ -74,27 +82,88 @@ class FinetuneCoordinator:
         self._last_injected_batch = None
         self._injection_count: int = 0
 
-        # Phase-8: rolling per-kind step-latency estimator. Consulted by
-        # ``can_admit`` as the SLO predictor signal.
-        self.step_time_estimator = StepTimeEstimator()
+        # Real 3-regime SLO execution-time estimator (ported from vLLM
+        # DeltaServe). The scheduler/model-runner records each served step's
+        # (features, duration) via note_step(); refit fires every REFIT_EVERY.
+        # slo_gate_backward() consults it to decide whether firing the backward
+        # now would blow the inference SLO.
+        self.estimator = MergedExecutionEstimator()
+        self.tracker = StepExecutionTracker()
+        # SLO budgets (seconds). Read from finetune_config when present, else
+        # sensible co-serving defaults (match DeltaServe-vLLM's llama3 YAML).
+        self.ttft_slo = float(getattr(finetune_config, "ttft_slo", 0.35))
+        self.max_tbt_slo = float(getattr(finetune_config, "max_tbt_slo", 0.15))
+        self.avg_tbt_slo = float(getattr(finetune_config, "avg_tbt_slo", 0.10))
+        self._steps_since_refit = 0
+        self._slo_deferrals = 0
+        self._slo_admits = 0
 
     # ------------------------------------------------------------------
     # Admission
     # ------------------------------------------------------------------
     def can_admit(self, *args, **kwargs) -> bool:
-        """SLO admission predictor stub. Phase 8 wires the rolling-mean
-        backward-latency estimator in but does not yet act on it — a real
-        SLO budget comparison is out of scope. Always returns True; the
-        ``estimate("backward")`` read keeps the contract honest so a future
-        change can flip the comparison without touching call sites."""
-        _ = self.step_time_estimator.estimate("backward")
+        """Buffer-level precondition (kept for reserve()'s contract). The real
+        SLO decision is slo_gate_backward(), consulted at backward-dispatch
+        time where the batch composition features are available."""
         return True
 
-    def record_step(self, kind: str, latency_ms: float) -> None:
-        """Publish a measured per-step latency to the estimator. Called by
-        the scheduler's per-step accounting and by the backward worker on
-        completion (Phase 8 hookup)."""
-        self.step_time_estimator.record_step(kind, latency_ms)
+    # ------------------------------------------------------------------
+    # SLO estimator: record served steps + refit
+    # ------------------------------------------------------------------
+    def note_step(self, features: "StepFeatures", duration_s: float,
+                  predicted_s: Optional[float] = None) -> None:
+        """Record one served step's (composition features, measured duration)
+        into the tracker and refit every REFIT_EVERY steps. Called by the
+        model runner after each forward step (inference-only AND co-serve)."""
+        self.tracker.add(features, duration_s, predicted=predicted_s)
+        if self.tracker.check_refit():
+            self.estimator.data_fit(self.tracker)
+
+    def predict_step(self, features: "StepFeatures",
+                     regime: Optional[str] = None,
+                     apply_margin: bool = True) -> float:
+        return self.estimator.predict(features, regime=regime,
+                                      apply_margin=apply_margin)
+
+    def slo_gate_backward(self, baseline: "StepFeatures",
+                          ft_tokens: int,
+                          earliest_arrival: Optional[float] = None) -> bool:
+        """SLO-aware decision: may the backward / FT prefill ride on the
+        UPCOMING step without blowing the inference SLO? Adapts vLLM's
+        admit_ft_to_step headroom check to sglang's request-tagged path.
+
+        Returns True (admit) when the estimator is cold (no fit yet) — matches
+        the pre-redesign cold-start behaviour — or when the predicted EAGER-
+        regime step time (baseline + this FT slice) stays under the TBT budget
+        and leaves TTFT headroom. Returns False (defer) otherwise."""
+        if not self.estimator.is_ready:
+            self._slo_admits += 1
+            return True  # cold start: admit, keep training the estimator
+        # Hypothetical step WITH the FT prefill admitted (forces EAGER regime).
+        hyp = StepFeatures(
+            t_in=baseline.t_in + ft_tokens,
+            p=baseline.p + 1,
+            t_ft=baseline.t_ft + ft_tokens,
+            b_d=baseline.b_d,
+            k=baseline.k,
+            prefill_lens=(list(baseline.prefill_lens) + [ft_tokens])
+            if baseline.prefill_lens else None,
+        )
+        t_with_ft = self.estimator.predict(hyp, regime=REGIME_EAGER)
+        # TBT headroom: if there are decode requests, the step must stay under
+        # the per-token budget.
+        if baseline.b_d > 0 and t_with_ft > self.max_tbt_slo:
+            self._slo_deferrals += 1
+            return False
+        # TTFT headroom: a prefill-carrying step must finish within 0.9·TTFT
+        # of the earliest waiting request's arrival.
+        if baseline.t_in > 0 and earliest_arrival is not None:
+            deadline = earliest_arrival + 0.9 * self.ttft_slo
+            if (deadline - time.time() - t_with_ft) <= 0:
+                self._slo_deferrals += 1
+                return False
+        self._slo_admits += 1
+        return True
 
     def space_remaining(self) -> int:
         return max(0, self.capacity - self.fill_count - self.reserved_fill)
