@@ -1269,11 +1269,17 @@ class ModelRunner:
         # the eager path is the only way to make hooks observable.
         _ft_mask = getattr(forward_batch, "is_finetuning_mask", None)
         _has_ft = _ft_mask is not None and bool(_ft_mask.any().item())
+        # Only FT *prefill* must go eager — that's where the activation-capture
+        # hooks fire. FT *decode* steps capture nothing (the prefill-only gate),
+        # so forcing them eager just strips the CUDA graph off the whole
+        # co-located batch and tanks decode throughput (the dominant co-serving
+        # E2E-latency cost). Let FT-decode batches keep the graph.
+        _ft_prefill = _has_ft and forward_batch.forward_mode.is_extend()
         can_run_cuda_graph = bool(
             forward_batch.forward_mode.is_cuda_graph()
             and self.cuda_graph_runner
             and self.cuda_graph_runner.can_run(forward_batch)
-            and not _has_ft
+            and not _ft_prefill
         )
         if can_run_cuda_graph:
             ret = self.cuda_graph_runner.replay(
