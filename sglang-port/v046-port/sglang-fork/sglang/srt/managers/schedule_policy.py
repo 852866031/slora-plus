@@ -155,6 +155,24 @@ class SchedulePolicy:
         self.waiting_queue_radix_tree.reset()
 
         for r in waiting_queue:
+            # DeltaServe: FT reqs MUST do a full (uncached) prefill. Reusing the
+            # radix cache skips recomputation for the cached prefix, so the
+            # per-token activation hooks don't fire over it and the FT activation
+            # buffer is left near-empty — n_valid collapses to ~1 (degenerate
+            # backward). FT samples also share the alpaca template prefix and get
+            # re-served, so cache hits are near-total. Force an empty prefix so
+            # every FT token is recomputed and captured. (Inference reqs unchanged.)
+            # 中文：微调请求必须做"完整、不走缓存"的 prefill。复用 radix 缓存会跳过被缓存前缀的
+            # 重算，导致逐 token 的激活 hook 不触发、激活缓冲几乎为空 —— n_valid 退化到 ~1
+            # （空反向）。加上微调样本共享 alpaca 模板前缀且会被重复发放，缓存命中近乎 100%。
+            # 这里强制空前缀，保证每个微调 token 都重算并被捕获（推理请求路径不变）。
+            if getattr(r, "is_finetuning", False):
+                r.prefix_indices = []
+                r.last_node = self.tree_cache.root_node
+                if self.enable_hierarchical_cache:
+                    r.last_node_global = self.tree_cache.root_node
+                continue
+
             prefix_ids = r.adjust_max_prefix_ids()
 
             # NOTE: the prefix_indices must always be aligned with last_node

@@ -100,6 +100,13 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
         cmd += ["--disable-cuda-graph"]
     if co:
         cmd += ["--enable-finetuning", "--backward-mps-percentage", str(mps_pct)]
+        # DeltaServe: FT prefills must be FULL (every token recomputed so the
+        # activation hooks fire). The radix prefix cache would reuse cached KV and
+        # leave the FT activation buffer near-empty (n_valid collapses to ~1).
+        # ChunkCache (radix disabled) pure-frees every req on finish — no FT cache
+        # pollution, full FT prefills. Inference loses prefix-cache reuse (fine for
+        # the co-serve benchmark; run the inf-only baseline the same way).
+        cmd += ["--disable-radix-cache"]
         # vLLM-parity: store-driven FT via the production CLI knob (no env var).
         # FT is driven continuously from this corpus instead of client-tagged.
         if store_corpus:

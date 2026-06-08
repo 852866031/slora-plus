@@ -507,12 +507,14 @@ class FinetuneSchedulerMixin:
             # BackwardClient so it's safe alongside the worker-thread poll/submit.
             # 中文：在调度线程每个 tick 也"收割"一次反向子进程 —— 纯空闲窗口里工作线程不跑前向、
             # 不会调用 poll()，这是让在途计数清零、从而让 FT 重新填满空闲的唯一途径。
-            bc = self._ft_backward_client()
-            if bc is not None:
-                try:
-                    bc.poll()
-                except Exception:
-                    pass
+            import os as _os
+            if _os.environ.get("SGLANG_DS_IDLE_DRAIN", "1") == "1":
+                bc = self._ft_backward_client()
+                if bc is not None:
+                    try:
+                        bc.poll()
+                    except Exception:
+                        pass
             try:
                 self._admit_and_inject_ft()
             except Exception as e:
