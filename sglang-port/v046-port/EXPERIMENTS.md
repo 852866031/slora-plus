@@ -437,3 +437,60 @@ is from the eager-fix + MPS, NOT the SLO gate. The gate would matter on a heavie
 non-MPS (in-process) workload where the backward actually pushes decode toward TBT.
 The coordinator's slo_gate_backward (same old double-count) is dead code — the live
 path uses coserve_slo — left as-is, noted here.
+
+---
+
+### S-store-driven — vLLM-parity store-driven FT: backward-cadence admission gate   (2026-06-08)
+
+**Goal.** Make sglang co-serving *behaviorally* identical to DeltaServe-vLLM:
+FT comes from a tokenized **corpus store** with **SLO-gated, continuous** admission
+(vLLM `ft_scheduler.admit_ft_to_step`), NOT client-request-tagged. Built opt-in
+behind `SGLANG_DS_STORE_DRIVEN=1`; the working request-tagged default is untouched.
+
+**Pieces (all committed earlier this loop):** `finetuning_corpus.py` (FinetuningStore,
+faithful port), `ft_inject.py` (make_ft_req → prefill-only Req), `coserve_slo.py`
+(3-regime estimator live), mixin `get_next_batch_to_run` admit+inject.
+
+**Run 1 (store-driven, NO admission pacing) — 8B tight, MPS 10%:**
+`SGLANG_DS_STORE_DRIVEN=1 SGLANG_DS_FT_DATA=alpaca_1000_p95.txt
+auto_benchmark_sglang.py --co --tight --real-backward --backward-subprocess
+--backward-mps-pct 10 --ft-fraction 0`.
+- **Actual:** latency mean=**528ms**, TTFT **20ms**, 224 ok, 0 err, ft_tagged=**0**.
+- **BUT only 5 backward fires, all in the first ~6s, then ZERO** for the remaining
+  ~50s (estimator kept refitting 256→3328 steps → inference ran the whole time).
+  Server log: `backward subprocess busy — dropped 1/51/101 FT samples (throttle)`.
+- **Diagnosis:** the mixin paced injection on the FAST prefill cadence, not the SLOW
+  backward cadence. FT prefills flooded the queue, prefilled+retired fast, but the
+  single-flight backward subprocess **dropped** 100+ of them while busy. So FT
+  stalled after 5 fires — and 528ms looked "faster than vLLM" only because FT barely
+  ran. NOT parity. (Honesty check: a fast number with stalled FT is a regression.)
+
+**Fix — admission gated on backward-subprocess idle (`BackwardClient.is_busy()`):**
+- `BackwardClient.is_busy()` — socket-free in-flight read (GIL-atomic), safe from the
+  scheduler thread. `BackwardClient.poll()` — worker-thread drain hook called every
+  forward step in `model_runner._forward` so the counter self-clears even when not
+  submitting (the zmq PAIR socket has a single owner = the worker thread).
+- mixin `_admit_and_inject_ft` skips admit while `is_busy()` → injection cadence =
+  backward cadence (vLLM-faithful fill-buffer → one backward → admit next).
+
+**Run 2 (busy-gate) — same cmd:**
+- Predicted: drops→~0, fires→continuous (~100+), latency rises toward vLLM (FT now
+  contends all timeline). FALSIFIED if fires stay <10 or drops stay >50.
+- **Actual:** latency mean=**687ms** p50=685 p95=797, TTFT **33ms**, 224 ok, 0 err,
+  ft_tagged=0. **41 backward fires** (was 5), spread across the whole timeline,
+  descending loss. **Drops capped at 1** (was 101+).
+- **Parity:** inference **687ms vs vLLM 697ms (−1.4%)**, TTFT 33 vs 29ms, with FT
+  training *continuously* from the store (ft_tagged=0) — behaviorally like vLLM, not
+  the client-tagged shortcut. Latency rose 528→687 because FT now actually runs the
+  whole window (real contention), which is the point.
+
+**Honest caveat (fire count).** 41 fires vs vLLM's ~151 in the same window. This is
+backward *throughput*, not behavior: the backward is single-flight in an MPS-10%
+subprocess (~400–780ms each on 8B), deliberately throttled to protect inference. The
+admission *mechanism* now matches vLLM; closing the 41→151 gap is a backward-speed
+axis (S2 graphed backward / MPS-% tuning), tracked separately.
+
+**Known limitation.** `claim` without `commit_claimed` on backward-done: samples are
+served once then consumed (one pass through the corpus); fine for this benchmark
+(360 samples ≫ 41 fires) but commit/retire wiring + the FT-only-idle drain edge
+(poll needs a forward step) are the next increments before making the flag default.

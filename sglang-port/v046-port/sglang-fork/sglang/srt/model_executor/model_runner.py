@@ -1262,6 +1262,21 @@ class ModelRunner:
         if self.eplb_manager is not None:
             self.eplb_manager.on_forward_pass_end(self.forward_pass_id)
 
+        # DeltaServe: drain completed-backward replies EVERY step (worker thread
+        # is the sole owner of the subprocess socket). This keeps the client's
+        # in-flight counter fresh so the scheduler-thread store-driven admit can
+        # pace FT injection to the backward cadence via is_busy() — without it,
+        # the counter would only update on submit and the busy gate could stick.
+        # 中文：每个 step 都收割子进程的反向回包（工作线程独占该套接字）。这样客户端的在途
+        # 计数保持新鲜，调度线程的"语料驱动"准入才能通过 is_busy() 把微调注入对齐到反向节奏；
+        # 否则计数只在提交时更新，繁忙门控可能卡死。
+        _bc = getattr(self, "_ds_bwd_client", None)
+        if _bc is not None:
+            try:
+                _bc.poll()
+            except Exception:
+                pass
+
         # DeltaServe Path C: synchronously run faux-backward in-process so
         # we measure realistic co-serving GPU contention. Real backward
         # math wiring follows in next loop iteration (Task A).

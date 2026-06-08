@@ -1,13 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 """Build a sglang `Req` from a FinetuningSample, for store-driven FT injection.
 
+从一个 FinetuningSample（语料样本）构造出 sglang 的 `Req`，用于"语料驱动"的微调注入。
+
 vLLM's ft_injector._make_request builds a vLLM Request (max_tokens=1,
 is_finetuning=True, unique id, cache_salt to defeat prefix-cache). This is the
 sglang equivalent: a prefill-only Req inserted into the scheduler's
 waiting_queue each step, so FT is STORE-DRIVEN like vLLM (not client-tagged).
 
+中文说明：
+vLLM 的 ft_injector._make_request 会构造一个 vLLM Request（max_tokens=1、
+is_finetuning=True、唯一 id、用 cache_salt 来绕过前缀缓存）。本文件是它在 sglang
+里的等价实现：每个调度步把一个"只做 prefill"的 Req 塞进调度器的 waiting_queue，
+从而让微调像 vLLM 一样由"语料库"驱动（而不是由客户端请求打标签来驱动）。
+
 Opt-in: only used when SGLANG_DS_STORE_DRIVEN=1 (the default request-tagged path
 stays untouched).
+
+按需开启：仅当 SGLANG_DS_STORE_DRIVEN=1 时启用；默认的"客户端请求打标签"路径保持不变。
 """
 from __future__ import annotations
 

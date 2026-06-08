@@ -64,8 +64,17 @@ class FinetuneSchedulerMixin:
     # waiting_queue BEFORE the base batch selection picks them up. Hooked on
     # get_next_batch_to_run, which is live under BOTH event loops (default
     # overlap included). Default (flag off) leaves the base path byte-identical.
+    #
+    # 中文：当 SGLANG_DS_STORE_DRIVEN=1 时，微调来自"语料库存储"（与 vLLM 的 ft_scheduler
+    # 一致），而不是客户端打标签的请求：每个调度步我们用 SLO 门控从语料里准入若干样本，构造
+    # "只做 prefill"的 Req，在 base 的批次选择挑走它们之前先塞进 waiting_queue。挂在
+    # get_next_batch_to_run 上 —— 这个方法在两种 event loop（包括默认的 overlap）下都在跑。
+    # 默认（关闭该标志）时 base 路径逐字节不变。
     # ------------------------------------------------------------------
     def _ensure_ft_store(self):
+        """中文：首次调用时按需加载语料库（仅当 SGLANG_DS_STORE_DRIVEN=1）。数据路径取自
+        SGLANG_DS_FT_DATA 或 finetune_config.data_path；token 预算取
+        max_saved_finetuning_tokens。只初始化一次（_ft_store_inited 守卫）。"""
         if getattr(self, "_ft_store_inited", False):
             return
         self._ft_store_inited = True
@@ -98,7 +107,10 @@ class FinetuneSchedulerMixin:
 
     def _ft_in_flight(self) -> bool:
         """True if an FT batch is already waiting/running — throttle to one at a
-        time (mirrors vLLM's fill-buffer-then-backward cadence)."""
+        time (mirrors vLLM's fill-buffer-then-backward cadence).
+
+        中文：若已有微调批次在 waiting/running 队列中，返回 True —— 同一时刻只允许一个
+        微调批次（对齐 vLLM "先填缓冲再反向" 的节奏）。"""
         if any(getattr(r, "is_finetuning", False) for r in self.waiting_queue):
             return True
         rb = getattr(self, "running_batch", None)
@@ -107,7 +119,29 @@ class FinetuneSchedulerMixin:
                 return True
         return False
 
+    def _ft_backward_client(self):
+        """Reach the parent-side BackwardClient (lives in model_runner) from the
+        scheduler. Path differs by worker class: overlap wraps the real worker in
+        ``.worker``; the non-overlap worker exposes ``.model_runner`` directly.
+        Returns None when the subprocess backward isn't in use (in-process path).
+
+        中文：从调度器一路找到父进程侧的 BackwardClient（它挂在 model_runner 上）。不同的
+        worker 实现路径不同：overlap 模式把真正的 worker 包在 ``.worker`` 里；非 overlap
+        模式直接暴露 ``.model_runner``。未启用子进程反向（走进程内路径）时返回 None。"""
+        tw = getattr(self, "tp_worker", None)
+        if tw is None:
+            return None
+        mr = getattr(tw, "model_runner", None) or getattr(
+            getattr(tw, "worker", None), "model_runner", None)
+        if mr is None:
+            return None
+        return getattr(mr, "_ds_bwd_client", None)
+
     def _admit_and_inject_ft(self):
+        """中文：每个调度步的"准入 + 注入"。依次检查：微调门是否已开（is_finetuning_started）、
+        是否已有微调批次在途（一次一个）、反向子进程是否繁忙（按反向节奏配速）、SLO 是否吃紧、
+        语料是否还有样本。通过后用 pop_best_under 贪心装满到 _ft_budget（token 预算），claim
+        这些样本，构造 prefill-only Req 塞进 waiting_queue。"""
         store = getattr(self, "_ft_store", None)
         if store is None:
             return
@@ -116,6 +150,21 @@ class FinetuneSchedulerMixin:
             return
         if self._ft_in_flight():
             return  # one FT batch in flight at a time
+        # Pace injection to the BACKWARD cadence, not the (fast) prefill cadence.
+        # The backward subprocess is single-flight: if we keep injecting FT
+        # prefills while it's still training the previous batch, those backwards
+        # are DROPPED (BackwardClient throttle) and FT silently stalls — exactly
+        # the bug the first 8B store-driven run hit (5 fires then nothing).
+        # Gate on is_busy() so we admit the next FT batch only after the child
+        # consumes the current one (vLLM-faithful fill-then-backward cadence).
+        # 中文：把注入节奏对齐到"反向"节奏，而不是（很快的）prefill 节奏。反向子进程同一时刻
+        # 只跑一个：若在它还在训练上一批时继续灌入微调 prefill，这些反向会被丢弃（见
+        # BackwardClient 的节流），微调就会悄悄停滞 —— 这正是第一次 8B 语料驱动跑出的 bug
+        # （只触发 5 次反向后就再无动静）。用 is_busy() 门控：只有子进程消化完当前批次后，
+        # 才准入下一批微调（与 vLLM 的"先填缓冲、再反向"节奏一致）。
+        bc = self._ft_backward_client()
+        if bc is not None and bc.is_busy():
+            return
         if not store.has_next() and not store.advance_epoch():
             return  # corpus exhausted across all epochs
         # SLO gate: skip admit when inference decode is already SLO-stressed.
@@ -150,6 +199,9 @@ class FinetuneSchedulerMixin:
                 store.release_claimed([s])
 
     def get_next_batch_to_run(self, *args, **kwargs):
+        """中文：在 base 调度器选批之前，先（按需）确保语料已加载，再做一次"准入+注入"，
+        把语料驱动的微调 Req 放进 waiting_queue，然后照常交给 base 的 get_next_batch_to_run。
+        标志关闭时这两步是 no-op，路径与原版一致。"""
         self._ensure_ft_store()
         if getattr(self, "_ft_store", None) is not None:
             try:

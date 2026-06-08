@@ -42,9 +42,38 @@ class BackwardClient:
         self._publish_every = int(publish_every) if publisher is not None else 0
         self._syncs = 0
 
+    def poll(self):
+        """Worker-thread drain hook. Call once per forward step (even when not
+        submitting) so the in-flight counter stays fresh and `is_busy()` —
+        which the scheduler thread reads — self-clears when a backward finishes.
+
+        中文：工作线程的"收割"钩子。每个 forward step 调用一次（即使本步不提交反向），
+        这样在途计数 `_outstanding` 才能及时归零，调度线程读取的 `is_busy()` 才能在
+        反向完成后自动解除繁忙状态。MUST 只在工作线程调用（zmq PAIR 套接字非线程安全）。
+        """
+        self._drain()
+
+    def is_busy(self) -> bool:
+        """Socket-free soft gate readable from ANY thread (plain int read is
+        GIL-atomic). True while a backward is still in flight in the child, so
+        the store-driven admit can pace new FT injection to the backward cadence
+        (vLLM-faithful: fill the activation buffer, run one backward, then admit
+        the next) instead of flooding prefills that get dropped on a busy child.
+
+        中文：不触碰套接字的"软门控"，任何线程都能安全读取（Python 整数读取受 GIL 保护，
+        是原子的）。当子进程里仍有反向在跑时返回 True，于是"语料驱动"的准入逻辑可以把新的
+        微调注入节奏对齐到反向的节奏（与 vLLM 一致：先填满激活缓冲、跑一次反向、再准入下一批），
+        而不是疯狂灌入大量 prefill 然后在繁忙的子进程上被丢弃。
+        """
+        return self._outstanding >= _MAX_INFLIGHT
+
     def _drain(self):
         """Non-blocking: pull completed-backward replies to free in-flight slots,
-        and apply any synced LoRA masters to the parent-side publisher."""
+        and apply any synced LoRA masters to the parent-side publisher.
+
+        中文：非阻塞地把"反向已完成"的回包取出来，释放在途名额；如果带回了同步的 LoRA
+        master 权重，则应用到父进程侧的 publisher（供推理 hook 在 MPS 隔离下生效）。
+        """
         import zmq
         while True:
             try:

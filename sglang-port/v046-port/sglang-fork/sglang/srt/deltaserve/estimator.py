@@ -25,6 +25,19 @@ Three coefficient sets, partitioned by step COMPOSITION:
 Admission is iterative (no closed form): the FT scheduler adds samples one by
 one, calls predict(..., regime=EAGER) on each hypothetical, and stops when the
 SLO would be violated.
+
+中文说明：
+"三区间、按构成"的执行时间估计器，忠实移植自 DeltaServe-vLLM 的 estimator.py，唯一改动是
+日志垫片（dprint）；模型、三个区间、精简后的设计矩阵、lstsq 拟合与"悲观安全余量"都与 vLLM
+原版一致。
+一个步的耗时公式（把分块 prefill 与 decode 混在同一步里）：
+    T_step ≈ α·S + β·T_in + γ·T_ft + δ·B_d + ε·K + c
+按"步的构成"分成三组系数：
+  * INF_PREFILL —— 纯推理 prefill（T_ft==0 且 T_in>0），γ 恒为 0；
+  * EAGER       —— 含微调（T_ft>0），用完整设计矩阵（协同服务批次都落在这里）；
+  * DECODE_ONLY —— 纯 decode（T_in==0 且 T_ft==0 且 B_d>0），α/β/γ 恒为 0。
+准入是迭代式的（没有闭式解）：微调调度器一条条加样本，每加一条就用 predict(regime=EAGER)
+预测，一旦会违反 SLO 就停。
 """
 from __future__ import annotations
 
