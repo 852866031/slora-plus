@@ -33,6 +33,11 @@ class FinetuneSchedulerMixin:
         if not recv_reqs:
             return super().process_input_requests(recv_reqs)
 
+        # [Phase H.1] Note inference arrivals for the RPS burst throttle. Tag
+        # only real inference requests (skip FT/store reqs, which don't arrive
+        # here under store-driven anyway). Cheap: one monotonic() append each.
+        self._rps_note_arrivals(recv_reqs)
+
         ft_reqs = [r for r in recv_reqs if getattr(r, "is_finetune", False)]
         inf_reqs = [r for r in recv_reqs if not getattr(r, "is_finetune", False)]
 
@@ -151,6 +156,75 @@ class FinetuneSchedulerMixin:
             return None
         return getattr(mr, "_ds_bwd_client", None)
 
+    # ------------------------------------------------------------------
+    # Phase H.1 — RPS burst throttle (model-free, reacts faster than the
+    # 256-step estimator refit). A sliding-window inference-arrival-rate gate
+    # that CLOSES FT admission during arrival bursts and reopens after, with
+    # spatial (close/open band) + temporal (close_time) hysteresis. This is the
+    # piece that produces the "back off FT during bursts" anti-correlation
+    # behavior even on fast hardware where the SLO gate's forward-step
+    # prediction never approaches the TBT budget. Default off (config flag).
+    #
+    # NOTE: the vLLM reference code for this throttle is NOT present in the
+    # available DeltaServe-vLLM checkout (the plan cites line numbers, but
+    # check_rps_throttle/RpsTracker are absent), so this is implemented from the
+    # plan's prose spec (SLO_ESTIMATOR_PORT_PLAN §H.1), not a line-by-line port.
+    #
+    # 中文：[H.1] RPS 突发节流（无模型、比 256 步重拟合反应更快）。一个基于滑动窗口的"推理
+    # 到达速率"门控：到达突发时关闭微调准入，突发过后再打开，带空间（close/open 区间）与时间
+    # （close_time）双重迟滞。即使在前向步极快、SLO 门控的预测永远够不到 TBT 预算的硬件上，
+    # 它也能产生"突发时压住微调"的反相关行为。默认关闭。注意：vLLM 参考实现不在可用代码树里，
+    # 故此处按计划书 §H.1 的文字规格实现，而非逐行移植。
+    def _rps_note_arrivals(self, recv_reqs) -> None:
+        cfg = getattr(self, "finetune_config", None)
+        if not getattr(cfg, "rps_throttle_enable", False):
+            return
+        import time as _t
+        dq = getattr(self, "_rps_arrivals", None)
+        if dq is None:
+            from collections import deque
+            dq = self._rps_arrivals = deque()
+        now = _t.monotonic()
+        for r in recv_reqs:
+            if getattr(r, "is_finetune", False) or getattr(r, "is_finetuning", False):
+                continue
+            dq.append(now)
+
+    def _rps_check_throttle(self) -> bool:
+        """Return True if FT admission should be CLOSED (inference burst in
+        progress). Updates the engage/release latch with hysteresis."""
+        cfg = getattr(self, "finetune_config", None)
+        if not getattr(cfg, "rps_throttle_enable", False):
+            return False
+        import time as _t
+        dq = getattr(self, "_rps_arrivals", None)
+        if dq is None:
+            return False
+        window = float(getattr(cfg, "rps_throttle_window_s", 0.75)) or 0.75
+        now = _t.monotonic()
+        cutoff = now - window
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        rps = len(dq) / window
+        engaged = getattr(self, "_rps_engaged", False)
+        close_rps = float(getattr(cfg, "rps_throttle_close_rps", 20.0))
+        open_rps = float(getattr(cfg, "rps_throttle_open_rps", 19.0))
+        close_time = float(getattr(cfg, "rps_throttle_close_time", 0.5))
+        if not engaged:
+            if rps > close_rps:
+                self._rps_engaged = True
+                self._rps_engaged_at = now
+                return True
+            return False
+        # currently engaged — release on idle-bypass or below open_rps after close_time
+        if rps == 0.0:
+            self._rps_engaged = False
+            return False
+        if rps < open_rps and (now - getattr(self, "_rps_engaged_at", now)) >= close_time:
+            self._rps_engaged = False
+            return False
+        return True
+
     def _admit_and_inject_ft(self):
         """中文：每个调度步的"准入 + 注入"。依次检查：微调门是否已开（is_finetuning_started）、
         是否已有微调批次在途（一次一个）、反向子进程是否繁忙（按反向节奏配速）、SLO 是否吃紧、
@@ -161,6 +235,10 @@ class FinetuneSchedulerMixin:
             return
         from sglang.srt.deltaserve.gates import is_finetuning_started
         if not is_finetuning_started():
+            return
+        # [Phase H.1] RPS burst throttle: if inference arrivals are spiking, close
+        # FT admission this tick (model-free, reacts before the SLO estimator).
+        if self._rps_check_throttle():
             return
         # [forward_interruptible / tier A] OPT-IN inference-first guard. When
         # SGLANG_DS_FT_TIER_A=1, do NOT inject FT while any inference (non-FT)

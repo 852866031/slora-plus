@@ -104,6 +104,25 @@ class FinetuneConfig:
     """Leaky-bucket admission shaper: accumulate (unspent_prefill + t_in)·factor
     as credit; admit one FT sample only when credit covers its length. 0 disables."""
 
+    # --- Phase H.1: RPS burst throttle (model-free, reactive) ---
+    rps_throttle_enable: bool = False
+    """Close FT admission under inference arrival bursts (a sliding-window
+    arrival-rate gate, faster-reacting than the SLO estimator). Default off."""
+
+    rps_throttle_close_rps: float = 20.0
+    """Engage the throttle (close FT admission) when inference RPS exceeds this."""
+
+    rps_throttle_open_rps: float = 19.0
+    """Release the throttle when inference RPS falls below this (must be <
+    close_rps — the band between is spatial hysteresis to prevent flapping)."""
+
+    rps_throttle_window_s: float = 0.75
+    """Sliding window (s) over which inference arrival rate is measured."""
+
+    rps_throttle_close_time: float = 0.5
+    """Min seconds to stay engaged once triggered (temporal hysteresis), unless
+    RPS hits 0 (idle-bypass releases immediately — no inference to protect)."""
+
     profile_on_launch: bool = True
     """Run the offline execution-time profiling pass at launch."""
 
