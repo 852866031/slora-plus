@@ -210,6 +210,52 @@ class FinetuneSchedulerMixin:
                 logger.warning(f"[DeltaServe] FT admit/inject failed: {e}")
         return super().get_next_batch_to_run(*args, **kwargs)
 
+    def _commit_finished_ft(self, batch) -> None:
+        """Commit any finished store-driven FT samples back to the corpus, so the
+        store can advance epochs. claim() at inject removed them from the length
+        buckets; commit_claimed() now clears them from the in-flight `_claimed`
+        set and marks them trained — without this, `_claimed` grows unbounded and
+        `advance_epoch()` (which refuses while anything is claimed) can never fire,
+        so the corpus is silently capped at one pass. FT Reqs are prefill-only
+        (max_new_tokens=1) so they finish in the prefill result; `_ft_sample` is
+        cleared after commit to make this idempotent across any re-entry.
+
+        中文：把"已完成"的语料驱动微调样本提交回语料库，使其能推进 epoch。注入时的 claim()
+        把样本从长度桶移除；这里的 commit_claimed() 再把它们从在途集合 `_claimed` 清掉并标记
+        为已训练。否则 `_claimed` 会无限增长，而 advance_epoch()（只要还有在途样本就拒绝推进）
+        永远无法触发，语料就被悄悄限制在"只过一遍"。微调 Req 是 prefill-only（max_new_tokens=1），
+        在 prefill 结果里就 finish；提交后把 `_ft_sample` 置空，保证多次进入也幂等。"""
+        store = getattr(self, "_ft_store", None)
+        if store is None or batch is None:
+            return
+        reqs = getattr(batch, "reqs", None)
+        if not reqs:
+            return
+        done = []
+        for r in reqs:
+            if not getattr(r, "is_finetuning", False):
+                continue
+            s = getattr(r, "_ft_sample", None)
+            if s is not None and r.finished():
+                done.append(s)
+                r._ft_sample = None   # idempotent: don't re-commit on re-entry
+        if done:
+            try:
+                store.commit_claimed(done)
+            except Exception as e:
+                logger.warning(f"[DeltaServe] FT commit_claimed failed: {e}")
+
+    def process_batch_result_prefill(self, batch, result, *args, **kwargs):
+        """中文：先让 base 处理 prefill 结果（设置 finish、缓存、流式输出），再把本批中
+        已完成的微调样本提交回语料库。微调 Req 在这一步 finish，所以提交点选在这里。"""
+        out = super().process_batch_result_prefill(batch, result, *args, **kwargs)
+        if getattr(self, "_ft_store", None) is not None:
+            try:
+                self._commit_finished_ft(batch)
+            except Exception as e:
+                logger.warning(f"[DeltaServe] FT commit hook failed: {e}")
+        return out
+
     # ------------------------------------------------------------------
     # Event loop — wrap prefill with pause/resume signals
     # ------------------------------------------------------------------
