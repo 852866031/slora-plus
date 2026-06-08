@@ -72,23 +72,36 @@ class FinetuneSchedulerMixin:
     # 默认（关闭该标志）时 base 路径逐字节不变。
     # ------------------------------------------------------------------
     def _ensure_ft_store(self):
-        """中文：首次调用时按需加载语料库（仅当 SGLANG_DS_STORE_DRIVEN=1）。数据路径取自
-        SGLANG_DS_FT_DATA 或 finetune_config.data_path；token 预算取
-        max_saved_finetuning_tokens。只初始化一次（_ft_store_inited 守卫）。"""
+        """Lazy-load the FT corpus store on first call. Store-driven FT is now the
+        DEFAULT (vLLM-faithful) whenever a corpus is resolvable — from
+        ``SGLANG_DS_FT_DATA`` or ``finetune_config.data_path`` (the latter wired
+        from ``--finetune-data-path``). Explicit opt-out: ``SGLANG_DS_STORE_DRIVEN=0``.
+        With no corpus configured the store stays None and the legacy
+        client-request-tagged path is untouched, so existing harnesses still work.
+
+        中文：首次调用时懒加载语料库。store-driven 现在是默认行为（与 vLLM 一致）：只要能解析到
+        语料路径（SGLANG_DS_FT_DATA 或 finetune_config.data_path，后者由 --finetune-data-path
+        注入）就开启。显式关闭用 SGLANG_DS_STORE_DRIVEN=0。若没有配置语料，store 保持 None，
+        原有的"客户端请求打标签"路径保持不变，旧脚本照常工作。只初始化一次。"""
         if getattr(self, "_ft_store_inited", False):
             return
         self._ft_store_inited = True
         self._ft_store = None
         import os
-        if os.environ.get("SGLANG_DS_STORE_DRIVEN", "0") != "1":
-            return
+        flag = os.environ.get("SGLANG_DS_STORE_DRIVEN")  # None=auto, "0"=off, "1"=force
+        if flag == "0":
+            return  # explicit opt-out
         try:
             from sglang.srt.deltaserve.finetuning_corpus import FinetuningStore
             data_path = os.environ.get("SGLANG_DS_FT_DATA") or getattr(
                 getattr(self, "finetune_config", None), "data_path", None)
             if not data_path:
-                logger.warning("[DeltaServe] store-driven FT on but no "
-                               "SGLANG_DS_FT_DATA / finetune_config.data_path")
+                # No corpus → default-off (legacy request-tagged path stays live).
+                # Only warn if store-driven was explicitly forced on.
+                if flag == "1":
+                    logger.warning("[DeltaServe] SGLANG_DS_STORE_DRIVEN=1 but no "
+                                   "SGLANG_DS_FT_DATA / finetune_config.data_path "
+                                   "(--finetune-data-path); FT will not run.")
                 return
             cap = int(getattr(self.finetune_config, "max_saved_finetuning_tokens", 256))
             epochs = int(os.environ.get("SGLANG_DS_FT_EPOCHS", "100"))
@@ -147,6 +160,28 @@ class FinetuneSchedulerMixin:
             return
         from sglang.srt.deltaserve.gates import is_finetuning_started
         if not is_finetuning_started():
+            return
+        # [forward_interruptible / tier A] OPT-IN inference-first guard. When
+        # SGLANG_DS_FT_TIER_A=1, do NOT inject FT while any inference (non-FT)
+        # request is waiting to prefill — inference always wins, so the FT prefill
+        # never shares/precedes the inference prefill batch (mirrors vLLM's
+        # would_step_be_ft_only / "if self.waiting: return False"). Default OFF:
+        # under a dense timeline the waiting queue almost always holds inference,
+        # so a blanket guard would STARVE FT and regress the proven continuous-fire
+        # throughput — and parity is already met without it (the backward is
+        # MPS-isolated and FT prefills are tiny). Leave it as a knob for workloads
+        # that value TTFT protection over FT throughput. The heavier tier-C
+        # mid-forward abort is intentionally not ported (marginal on co-serve;
+        # see EXPERIMENTS.md S-store-driven / S-forward-interruptible).
+        # 中文：[tier A] 按需开启的"推理优先"门控。SGLANG_DS_FT_TIER_A=1 时，只要还有推理
+        # （非微调）请求在等待 prefill，就不注入微调 —— 推理永远优先（对应 vLLM 的
+        # would_step_be_ft_only）。默认关闭：密集时间线下等待队列几乎总有推理，一刀切会饿死
+        # 微调、回退掉已验证的连续反向吞吐；而且不开它也已达到 parity（反向被 MPS 隔离、微调
+        # prefill 很小）。保留为"更看重 TTFT 而非微调吞吐"场景的旋钮。更重的 tier-C 前向中途
+        # 中止刻意不移植（协同服务下收益边际，见 EXPERIMENTS.md）。
+        import os as _os
+        if _os.environ.get("SGLANG_DS_FT_TIER_A", "0") == "1" and \
+                any(not getattr(r, "is_finetuning", False) for r in self.waiting_queue):
             return
         if self._ft_in_flight():
             return  # one FT batch in flight at a time

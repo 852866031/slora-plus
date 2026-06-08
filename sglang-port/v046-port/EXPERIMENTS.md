@@ -494,3 +494,53 @@ axis (S2 graphed backward / MPS-% tuning), tracked separately.
 served once then consumed (one pass through the corpus); fine for this benchmark
 (360 samples ≫ 41 fires) but commit/retire wiring + the FT-only-idle drain edge
 (poll needs a forward step) are the next increments before making the flag default.
+
+---
+
+### S-forward-interruptible / store-driven-by-default   (2026-06-08)
+
+**Goal.** Finish "behaviorally identical to vLLM": make store-driven FT the
+**default** (vLLM is store-driven), wire it through a production CLI knob (not just
+env), and decide what of vLLM's `forward_interruptible` 3-tier preemption is worth
+porting.
+
+**Decisions (with rationale).**
+- **Store-driven is now the default** whenever a corpus is resolvable. New
+  `--finetune-data-path` plumbs `server_args → FinetuneConfig.data_path`; the mixin
+  treats store-driven as on unless `SGLANG_DS_STORE_DRIVEN=0`. With no corpus the
+  store stays None and the legacy client-request-tagged path is byte-unchanged, so
+  existing harnesses still work. `SGLANG_DS_FT_DATA` env still overrides.
+- **Request-tag suppression**: when the store is active, client `is_finetuning`
+  tags are dropped (the corpus drives FT) so a request can't be trained twice.
+- **Tier A (inference-first admit guard) ported but OPT-IN** (`SGLANG_DS_FT_TIER_A=1`).
+  Default OFF on purpose: as a blanket "skip FT while any inference is waiting" it
+  would STARVE FT under a dense timeline (waiting queue almost always holds
+  inference) and regress the proven continuous-fire throughput — and parity is
+  already met without it (backward is MPS-isolated, FT prefills are tiny). vLLM uses
+  would_step_be_ft_only only for a grace-poll decision, not a blanket admit gate.
+- **Tier C (mid-forward abort) deliberately NOT ported.** It needs an input-socket
+  thread + abort event + activation hooks that raise mid-forward + a runner rollback
+  path, all wired into vLLM's schedule()/execute_model() split. On this co-serve
+  workload the benefit is marginal: FT prefills are <=cap (256) tokens / ~ms, the
+  backward is MPS-isolated in a subprocess, and inference parity (within ~2%) is
+  already achieved. Ported the mechanism's cheap, high-value parts (store-driven
+  pacing + tier A knob) instead of the heavy, low-ROI interrupt.
+
+**Verification — 8B tight, via the production CLI path (NO env vars):**
+`auto_benchmark_sglang.py --co --tight --store-driven --real-backward
+--backward-subprocess --backward-mps-pct 10` → server gets `--enable-finetuning
+--finetune-data-path <corpus>`, client sends ZERO FT tags.
+- Predicted: store loads from config.data_path (no env), continuous fires, latency
+  ~= the 687ms env-var run. FALSIFIED if store doesn't load or fires <10.
+- **Actual:** `store-driven FT: loaded 360 samples` (from config, no env) ✓;
+  latency mean=**711ms** p50=705 p95=828, TTFT **37ms**, 224 ok, **0 err**,
+  ft_tagged=0, **35 continuous backward fires**, 1 drop, 0 tracebacks.
+- **Parity holds on the default path:** 711ms vs vLLM 697ms (+2.0%), TTFT 37 vs
+  29ms. Store-driven FT is now the out-of-the-box behavior, matching vLLM, with the
+  request-tagged path preserved as a fallback when no corpus is configured.
+
+**State of the port.** sglang DeltaServe co-serving is now behaviorally aligned with
+DeltaServe-vLLM: continuous corpus-driven SLO-admitted FT by default, 3-regime
+estimator live, epoch-correct claim/commit, inference within ~2% of vLLM. Remaining
+deltas are throughput-side (41→151 fire gap = backward speed: S2 graphed backward /
+MPS-% tuning) and the un-ported tier-C interrupt (marginal here), both documented.

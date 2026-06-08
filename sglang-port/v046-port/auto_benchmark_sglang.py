@@ -85,7 +85,8 @@ def load_timeline(path: Path) -> List[TimelineRow]:
 
 
 def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
-                     enable_inference_cuda_graph: bool = True) -> List[str]:
+                     enable_inference_cuda_graph: bool = True,
+                     store_corpus: Optional[str] = None) -> List[str]:
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", model_path,
@@ -98,6 +99,10 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
         cmd += ["--disable-cuda-graph"]
     if co:
         cmd += ["--enable-finetuning", "--backward-mps-percentage", str(mps_pct)]
+        # vLLM-parity: store-driven FT via the production CLI knob (no env var).
+        # FT is driven continuously from this corpus instead of client-tagged.
+        if store_corpus:
+            cmd += ["--finetune-data-path", store_corpus]
     return cmd
 
 
@@ -374,6 +379,11 @@ def main():
                     help="File of distinct FT samples (one per line) for FT-tagged requests, "
                          "resolved against eval/llama3/data/. Distinct prompts avoid radix-cache "
                          "dedup so the backward fires per sample. Empty string = reuse timeline prompts.")
+    ap.add_argument("--store-driven", action="store_true",
+                    help="vLLM-parity: drive FT from the corpus via the server's "
+                         "--finetune-data-path CLI knob (no env vars), and send NO "
+                         "client FT tags (forces --ft-fraction 0). Exercises the "
+                         "production store-driven default path end-to-end.")
     sg = ap.add_mutually_exclusive_group()
     sg.add_argument("--tight", action="store_true")
     sg.add_argument("--loose", action="store_true")
@@ -382,6 +392,18 @@ def main():
                     help="Launch the server (default). Pass --no-launch-server to use an already-running server.")
     ap.add_argument("--no-launch-server", dest="launch_server", action="store_false")
     args = ap.parse_args()
+
+    # vLLM-parity store-driven mode: FT comes from the server's corpus, not client
+    # tags. Force ft_fraction=0 so the client sends pure inference.
+    store_corpus = None
+    if args.store_driven:
+        args.ft_fraction = 0.0
+        p = Path(args.ft_corpus)
+        if not p.is_absolute():
+            p = _REPO / "eval" / "llama3" / "data" / args.ft_corpus
+        store_corpus = str(p)
+        print(f"[bench] STORE-DRIVEN FT via --finetune-data-path {store_corpus} "
+              f"(ft_fraction forced to 0)")
 
     global _FT_CORPUS
     if args.co and args.ft_fraction > 0:
@@ -403,6 +425,7 @@ def main():
         cmd = build_server_cmd(
             args.model, args.port, args.co, args.mps_pct,
             enable_inference_cuda_graph=not args.disable_inference_cuda_graph,
+            store_corpus=store_corpus,
         )
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.

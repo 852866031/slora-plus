@@ -224,6 +224,11 @@ class ServerArgs:
     enable_finetuning: bool = False
     backward_mps_percentage: int = 10
     finetune_config: Optional[str] = None
+    # Corpus for STORE-DRIVEN FT (vLLM-faithful default): one tokenizable sample
+    # per non-empty line. When set, FT is driven continuously from this corpus
+    # (SLO-admitted) instead of client-request-tagged. Env SGLANG_DS_FT_DATA
+    # overrides; SGLANG_DS_STORE_DRIVEN=0 forces the legacy request-tagged path.
+    finetune_data_path: Optional[str] = None
 
     def __post_init__(self):
         # Expert parallelism
@@ -1438,6 +1443,15 @@ class ServerArgs:
             type=str,
             default=ServerArgs.finetune_config,
             help="Path to a YAML file with FinetuneConfig overrides.",
+        )
+        parser.add_argument(
+            "--finetune-data-path",
+            type=str,
+            default=ServerArgs.finetune_data_path,
+            help="Corpus for STORE-DRIVEN FT (one tokenizable sample per line). "
+            "When set, FT is driven continuously from this corpus (vLLM-faithful) "
+            "instead of client-request-tagged. Overridden by env SGLANG_DS_FT_DATA; "
+            "SGLANG_DS_STORE_DRIVEN=0 forces the legacy request-tagged path.",
         )
 
     @classmethod

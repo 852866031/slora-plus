@@ -45,21 +45,30 @@ real FT backward (vLLM loss 4.74→3.10 in-window). The matched result **overtur
 old "vLLM ≈ 0% / sglang +324%" framing (that compared sglang *in-process* to a favorable
 older vLLM run):
 
-| 8B, matched tight | inf TTFT | co TTFT (mean/p50/**p95**) | inf LAT | co LAT (mean) | FT trained |
-|---|---:|---:|---:|---:|---:|
-| **DSV-vLLM** 14/14 | 29 ms | 61 / 32 / **269** ms | 648 ms | **697 ms** | ~24.7k tok |
-| **sglang** (MPS + eager-fix) | 17 ms | 39 / 31 / **74** ms | 497 ms | **735 ms** | ~3.9k tok |
+| 8B, matched tight | co TTFT (mean/p50/**p95**) | co LAT (mean) | FT injection | backward fires |
+|---|---:|---:|---|---:|
+| **DSV-vLLM** 14/14 | 61 / 32 / **269** ms | **697 ms** | store-driven (continuous) | ~151 |
+| **sglang** request-tagged | 39 / 31 / **74** ms | **735 ms** | client-tagged | n/a |
+| **sglang store-driven** (default) | 33–37 / 22 / **100–122** ms | **687–711 ms** | store-driven (continuous) | 35–41 |
 
-**sglang co-serving is at parity with vLLM — and ahead on several axes:**
-- **Faster inference** (17 vs 29 ms TTFT, 497 vs 648 ms latency) — engine advantage.
-- **Co-serving within ~5%**: TTFT 39 vs 29 ms, E2E latency 735 vs 697 ms (+5.5%) —
-  down from the 50%+ gap earlier framings reported. Driven by the eager-fix + MPS.
-- **Far tighter TTFT tail** under load (p95 74 vs 269 ms) — MPS hard-isolation.
-- The 3-regime SLO estimator is ported + live (refits online), but its gate is a
-  ~no-op on this already-SLO-satisfied workload (see the note above + `EXPERIMENTS.md`).
-- vLLM still trains ~6× more FT in the window (continuous store-driven vs sglang's
-  request-tagged injection) and has the lower TTFT mean — closing *that* (more FT
-  throughput at equal SLO) is the remaining §8/§10 work.
+**sglang co-serving is at parity with vLLM and now behaviorally matches it:**
+- **Store-driven FT is the default** (since 2026-06-08): FT is injected continuously
+  from a tokenized corpus under SLO-gated, backward-paced admission — exactly vLLM's
+  model, not the old client-request-tagged shortcut. Enable with
+  `--finetune-data-path <corpus>` (or `SGLANG_DS_FT_DATA`); opt out with
+  `SGLANG_DS_STORE_DRIVEN=0`. With no corpus the legacy request-tagged path is intact.
+- **Co-serving within ~2%**: E2E latency 687–711 vs 697 ms, TTFT 33–37 vs 29 ms,
+  with FT training continuously from the store (ft_tagged=0). The earlier
+  request-tagged path (735 ms) stalled FT throughput; the store-driven path closes
+  that *and* matches inference.
+- **Far tighter TTFT tail** under load (p95 ~100 vs 269 ms) — MPS hard-isolation.
+- The 3-regime SLO estimator is ported + live (refits online); its gate is a ~no-op
+  on this already-SLO-satisfied workload (see `EXPERIMENTS.md`).
+- **Remaining delta is throughput-side**: vLLM lands ~151 backward fires/window vs
+  sglang's ~35–41 — that's backward *speed* (single-flight MPS-10% subprocess), not
+  behavior. Closing it is S2 (graphed backward) / MPS-% tuning. vLLM's
+  `forward_interruptible` tier-C mid-forward abort is intentionally not ported
+  (marginal on the co-serve workload — rationale in `EXPERIMENTS.md`).
 
 > **History:** an earlier version of this table reported +130%/+234% with a *faux*
 > backward (~8 ms/fire placeholder). Those numbers understated the real cost — a
@@ -101,8 +110,14 @@ bash install.sh                 # or: pip install -e "sglang-fork[all]"
 # Run the benchmark (inf-only baseline)
 python auto_benchmark_sglang.py --tight --port 30401
 
-# Run co-serving (10% / 25% / 50% FT)
-python auto_benchmark_sglang.py --co --tight --ft-fraction 0.25 --port 30402
+# Run co-serving, STORE-DRIVEN (vLLM-parity default): FT is driven continuously
+# from the corpus; the client sends pure inference (no FT tags).
+python auto_benchmark_sglang.py --co --tight --store-driven \
+    --real-backward --backward-subprocess --backward-mps-pct 10 --port 30402
+# (needs the MPS daemon up: nvidia-cuda-mps-control -d)
+
+# Run co-serving, legacy client-request-tagged path (10% / 25% / 50% FT)
+python auto_benchmark_sglang.py --co --tight --ft-fraction 0.25 --port 30403
 
 # Output: output/timeline_results_tight_{inf,co}.csv
 ```

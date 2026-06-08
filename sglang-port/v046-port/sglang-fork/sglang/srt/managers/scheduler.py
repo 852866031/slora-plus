@@ -200,7 +200,10 @@ class Scheduler(
             from sglang.srt.configs.finetune import FinetuneConfig
             from sglang.srt.managers.finetune_coordinator import FinetuneCoordinator
             from sglang.srt.managers.finetune_scheduler_mixin import FinetuneSchedulerMixin
-            self.finetune_config = FinetuneConfig(enable_finetuning=True)
+            self.finetune_config = FinetuneConfig(
+                enable_finetuning=True,
+                data_path=getattr(server_args, "finetune_data_path", None),
+            )
             self.__class__ = type(
                 "FinetuneScheduler", (FinetuneSchedulerMixin, self.__class__), {}
             )
@@ -955,17 +958,34 @@ class Scheduler(
             # gate). Lets warmup run with zero FT cost even when reqs carry
             # is_finetuning=True from the harness.
             if getattr(recv_req, "is_finetuning", False):
-                from sglang.srt.deltaserve.gates import is_finetuning_started
-                if is_finetuning_started():
-                    # Section 4: admit-rate throttle. SGLANG_DS_FT_ADMIT_RATE
-                    # (0.0-1.0) is the fraction of FT-tagged requests that
-                    # actually carry the FT tag through. 1.0 = all; 0.5 =
-                    # half; 0.0 = none. Lets the operator cap eager-prefill
-                    # load without changing the request stream.
-                    import os, random
-                    rate = float(os.environ.get("SGLANG_DS_FT_ADMIT_RATE", "1.0"))
-                    if rate >= 1.0 or random.random() < rate:
-                        req.is_finetuning = True
+                # vLLM-parity: when STORE-DRIVEN FT is active, the corpus drives FT
+                # continuously — ignore client FT tags so the same request doesn't
+                # get trained twice (store injection + tagged req). Lazily ensure
+                # the store is loaded so the decision is correct from the first
+                # tagged request. With no corpus configured the store stays None
+                # and the legacy request-tagged path below runs unchanged.
+                # 中文：开启 store-driven 后，微调由语料库持续驱动 —— 忽略客户端的微调标签，
+                # 避免同一请求被训练两次（语料注入 + 打标签请求）。先懒加载 store 以保证从第一个
+                # 打标签请求起判断就正确；未配置语料时 store 为 None，下面的旧打标签路径不变。
+                if hasattr(self, "_ensure_ft_store"):
+                    try:
+                        self._ensure_ft_store()
+                    except Exception:
+                        pass
+                if getattr(self, "_ft_store", None) is not None:
+                    pass  # store-driven: drop the client FT tag (no double-FT)
+                else:
+                    from sglang.srt.deltaserve.gates import is_finetuning_started
+                    if is_finetuning_started():
+                        # Section 4: admit-rate throttle. SGLANG_DS_FT_ADMIT_RATE
+                        # (0.0-1.0) is the fraction of FT-tagged requests that
+                        # actually carry the FT tag through. 1.0 = all; 0.5 =
+                        # half; 0.0 = none. Lets the operator cap eager-prefill
+                        # load without changing the request stream.
+                        import os, random
+                        rate = float(os.environ.get("SGLANG_DS_FT_ADMIT_RATE", "1.0"))
+                        if rate >= 1.0 or random.random() < rate:
+                            req.is_finetuning = True
 
             if self.disaggregation_mode != DisaggregationMode.NULL:
                 # Invalid request for disaggregated mode
