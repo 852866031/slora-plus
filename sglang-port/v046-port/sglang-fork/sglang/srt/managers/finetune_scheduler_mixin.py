@@ -8,7 +8,10 @@ inference fast path stays byte-identical when FT is disabled.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, List
+
+logger = logging.getLogger(__name__)
 
 
 class FinetuneSchedulerMixin:
@@ -53,30 +56,107 @@ class FinetuneSchedulerMixin:
         pending.extend(ft_reqs)
 
     # ------------------------------------------------------------------
-    # Batch selection — additive hook
+    # Store-driven SLO-admitted FT injection (vLLM-parity, opt-in).
+    #
+    # When SGLANG_DS_STORE_DRIVEN=1, FT comes from a corpus store (like vLLM's
+    # ft_scheduler), NOT client-tagged requests: each step we SLO-gate-admit
+    # samples from the store, build prefill-only Reqs, and push them onto the
+    # waiting_queue BEFORE the base batch selection picks them up. Hooked on
+    # get_next_batch_to_run, which is live under BOTH event loops (default
+    # overlap included). Default (flag off) leaves the base path byte-identical.
     # ------------------------------------------------------------------
-    # sglang has no `_select_batch`; the closest equivalent called by
-    # event_loop_normal is `get_next_batch_to_run`. We override it here and
-    # consult coordinator.reserve() before letting FT tokens ride along.
-    def _select_batch(self, *args, **kwargs):
-        """Additive admission gate. Delegates to the base scheduler's batch
-        selection (``get_next_batch_to_run``) and asks the coordinator
-        whether any FT tokens may ride along this step."""
-        batch = super().get_next_batch_to_run(*args, **kwargs)
-        coord = getattr(self, "finetune_coordinator", None)
-        if coord is not None and batch is not None:
-            # Try to admit one capacity-sized FT slice this step. The actual
-            # FT-token attachment to the batch lands in Phase 8 (FinetuneInjector);
-            # here we only consult the gate so the test can verify the contract.
-            if coord.reserve(coord.per_step_budget):
-                coord.note_injection(batch)
-        return batch
+    def _ensure_ft_store(self):
+        if getattr(self, "_ft_store_inited", False):
+            return
+        self._ft_store_inited = True
+        self._ft_store = None
+        import os
+        if os.environ.get("SGLANG_DS_STORE_DRIVEN", "0") != "1":
+            return
+        try:
+            from sglang.srt.deltaserve.finetuning_corpus import FinetuningStore
+            data_path = os.environ.get("SGLANG_DS_FT_DATA") or getattr(
+                getattr(self, "finetune_config", None), "data_path", None)
+            if not data_path:
+                logger.warning("[DeltaServe] store-driven FT on but no "
+                               "SGLANG_DS_FT_DATA / finetune_config.data_path")
+                return
+            cap = int(getattr(self.finetune_config, "max_saved_finetuning_tokens", 256))
+            epochs = int(os.environ.get("SGLANG_DS_FT_EPOCHS", "100"))
+            store = FinetuningStore(
+                data_path, tokenize=lambda s: self.tokenizer.encode(s),
+                total_epochs=epochs, max_saved_finetuning_tokens=cap)
+            n = store.load()
+            self._ft_store = store
+            self._ft_budget = cap
+            self._ft_injected = 0
+            logger.warning(f"[DeltaServe] store-driven FT: loaded {n} samples "
+                           f"from {data_path} (cap={cap}, epochs={epochs})")
+        except Exception as e:
+            logger.warning(f"[DeltaServe] store-driven FT init failed: {e}")
+            self._ft_store = None
+
+    def _ft_in_flight(self) -> bool:
+        """True if an FT batch is already waiting/running — throttle to one at a
+        time (mirrors vLLM's fill-buffer-then-backward cadence)."""
+        if any(getattr(r, "is_finetuning", False) for r in self.waiting_queue):
+            return True
+        rb = getattr(self, "running_batch", None)
+        if rb is not None and getattr(rb, "reqs", None):
+            if any(getattr(r, "is_finetuning", False) for r in rb.reqs):
+                return True
+        return False
+
+    def _admit_and_inject_ft(self):
+        store = getattr(self, "_ft_store", None)
+        if store is None:
+            return
+        from sglang.srt.deltaserve.gates import is_finetuning_started
+        if not is_finetuning_started():
+            return
+        if self._ft_in_flight():
+            return  # one FT batch in flight at a time
+        if not store.has_next() and not store.advance_epoch():
+            return  # corpus exhausted across all epochs
+        # SLO gate: skip admit when inference decode is already SLO-stressed.
+        try:
+            from sglang.srt.deltaserve.coserve_slo import get_slo
+            slo = get_slo()
+            rec = slo._last_decode_dur
+            if slo.estimator.is_ready and rec is not None \
+                    and rec > slo.defer_frac * slo.max_tbt_slo:
+                return
+        except Exception:
+            pass
+        # Greedy pack up to the per-step FT token budget (largest-first).
+        admitted, remaining = [], int(getattr(self, "_ft_budget", 256))
+        while remaining > 0:
+            s = store.pop_best_under(remaining, exclude=admitted)
+            if s is None:
+                break
+            admitted.append(s)
+            remaining -= s.input_len
+        if not admitted:
+            return
+        store.claim(admitted)
+        from sglang.srt.deltaserve.ft_inject import make_ft_req
+        eos = getattr(getattr(self, "model_config", None), "hf_eos_token_id", None)
+        for s in admitted:
+            try:
+                self.waiting_queue.append(make_ft_req(s, self.tokenizer, eos_token_ids=eos))
+                self._ft_injected += 1
+            except Exception as e:
+                logger.warning(f"[DeltaServe] FT inject failed: {e}")
+                store.release_claimed([s])
 
     def get_next_batch_to_run(self, *args, **kwargs):
-        # Route the base call through the FT-aware selector so the event loop
-        # picks up admission decisions without us editing event_loop_normal
-        # in the base Scheduler.
-        return self._select_batch(*args, **kwargs)
+        self._ensure_ft_store()
+        if getattr(self, "_ft_store", None) is not None:
+            try:
+                self._admit_and_inject_ft()
+            except Exception as e:
+                logger.warning(f"[DeltaServe] FT admit/inject failed: {e}")
+        return super().get_next_batch_to_run(*args, **kwargs)
 
     # ------------------------------------------------------------------
     # Event loop — wrap prefill with pause/resume signals
