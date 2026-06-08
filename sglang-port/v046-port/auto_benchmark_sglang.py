@@ -406,6 +406,10 @@ def main():
                          "--finetune-data-path CLI knob (no env vars), and send NO "
                          "client FT tags (forces --ft-fraction 0). Exercises the "
                          "production store-driven default path end-to-end.")
+    ap.add_argument("--inference-mps-pct", type=int, default=0,
+                    help="Cap the inference server's MPS thread %% (e.g. 8) to slow "
+                         "each forward step toward the TBT budget, so the SLO "
+                         "predictor binds on fast HW (H200). 0 = uncapped.")
     ap.add_argument("--finetune-config", default=None,
                     help="Phase G: path to a DeltaServe sectioned YAML (the vLLM "
                          "config). Loads the exact SLO/admission knobs into "
@@ -467,6 +471,16 @@ def main():
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.
         env = {**os.environ, "CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES", "0")}
+        # Optional: cap the INFERENCE server's MPS thread % so each forward step
+        # slows down toward the TBT budget — needed to make the SLO predictor
+        # actually bind on fast HW (H200 steps are ~6ms vs a 120ms budget, so the
+        # gate never fires otherwise). Reproduces vLLM's 5090-regime where
+        # co-serve steps approach max_tbt_slo. Set the inf-only baseline the same
+        # way for a fair comparison.
+        if getattr(args, "inference_mps_pct", 0):
+            env["CUDA_MPS_ACTIVE_THREAD_PERCENTAGE"] = str(args.inference_mps_pct)
+            env.setdefault("CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps")
+            env.setdefault("CUDA_MPS_LOG_DIRECTORY", "/tmp/nvidia-mps-log")
         if args.co:
             env["SGLANG_DS_FT_START_ON_LAUNCH"] = "0"
             # Section 4: optional SLO throttle (minimum interval between faux fires)
