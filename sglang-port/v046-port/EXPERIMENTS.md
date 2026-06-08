@@ -647,3 +647,42 @@ trough-fill/burst-backoff *dynamic*. Demonstrating the anti-correlation SHAPE
 needs a constructed quiet→burst→quiet timeline (the proprietary nutanix one is
 absent) + a temporal FT-throughput-vs-load plot — tracked as the remaining
 demonstration. H.2 (fwd-token backward pause) not yet ported.
+
+---
+
+### S-phaseH-burst — RPS throttle anti-correlation on a bursty timeline   (2026-06-08)
+
+**Goal.** Reproduce the plan's headline success-criterion SHAPE — FT throughput
+fills inference troughs and backs off during bursts — which the steady tight
+timeline + the no-op SLO gate couldn't show. The proprietary nutanix timeline is
+absent, so this uses a CONSTRUCTED bursty timeline.
+
+**Setup.** `eval/llama3/timelines/BURST/timeline_tight.csv` (generated):
+quiet 1 req/s (t5–19) → **burst 12 req/s (t20–29)** → quiet 1 req/s (t30–44),
+150 reqs. 1B, store-driven, real backward in MPS subprocess. A/B on the RPS
+throttle (`SGLANG_DS_RPS_THROTTLE`, close=3/open=2/window=1s). FT fires now log
+`wall=<epoch>` and the bench logs `timeline_anchor_wall=`, so FT throughput is
+aligned onto the inference timeline clock (`timeline_sec = fire_wall - anchor`).
+
+**Result — clean anti-correlation:**
+| | FT during burst (sec20–29) | total FT | E2E latency |
+|---|---|---:|---:|
+| throttle **ON** | **0 tok/s** (admission closed) | 4,575 tok (36 fires) | **132 ms** |
+| throttle OFF | 700–1100 tok/s (FT piles on) | 15,094 tok (104 fires) | 155 ms |
+
+Per-second FT (tok/s), aligned to timeline (burst = sec 20–29):
+```
+ON :  ~120 quiet … sec20:207  sec21–30: 0 0 0 0 0 0 0 0 0 0 … ~120 quiet
+OFF:  ~120 quiet … sec20–29: 718 945 881 1144 886 790 1001 949 1110 1056 …
+```
+
+- **ON: FT drops to exactly 0 during the burst and runs in the quiet windows** →
+  FT throughput anti-correlated with inference load (fills troughs, backs off the
+  spike). This is the desired behavior.
+- **OFF: FT spikes through the burst** (no back-off) → more GPU contention →
+  higher inference latency (155 vs 132 ms).
+
+Plots: `plots/burst_anticorr_on.png` (the success shape) + `plots/burst_anticorr_off.png`
+(baseline). This is the closest reproduction of the plan's nutanix
+`compare_temporal_both` plot achievable without the proprietary timeline; the
+mechanism (RPS throttle, H.1) and the shape are demonstrated.

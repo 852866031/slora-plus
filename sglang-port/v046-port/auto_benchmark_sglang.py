@@ -485,8 +485,12 @@ def main():
         ok = start_finetuning_via_gate(args.port)
         print(f"[bench] POST /start_finetuning → {'OK' if ok else 'FAILED'}")
 
-    print(f"[bench] running timeline...")
     t_anchor = time.monotonic()
+    # Wall-clock of the timeline anchor: lets FT fires (logged with wall=time.time()
+    # by the server, a different process) be aligned onto the timeline clock —
+    # timeline_sec(fire) = fire_wall - anchor_wall. (wall & monotonic tick alike.)
+    print(f"[bench] timeline_anchor_wall={time.time():.3f}")
+    print(f"[bench] running timeline...")
     results = asyncio.run(drive(args.port, timeline, ft_fraction=(args.ft_fraction if args.co else 0.0), t_anchor=t_anchor))
 
     suffix = f"_{shape}{'_co' if args.co else '_inf'}"

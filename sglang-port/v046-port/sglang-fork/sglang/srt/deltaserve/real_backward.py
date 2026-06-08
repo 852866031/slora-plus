@@ -319,7 +319,8 @@ class _RealBackward:
         self._cum_tokens += int(n_valid)
         logger.warning(
             f"[DeltaServe] real_backward #{self._call_count}: {elapsed*1000:.1f}ms "
-            f"loss={loss:.4f} n_valid={n_valid} cum_tokens={self._cum_tokens}"
+            f"loss={loss:.4f} n_valid={n_valid} cum_tokens={self._cum_tokens} "
+            f"wall={time.time():.3f}"   # epoch seconds — lets FT throughput be plotted over time
         )
         return elapsed
 
