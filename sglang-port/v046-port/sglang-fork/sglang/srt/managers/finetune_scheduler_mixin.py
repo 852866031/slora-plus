@@ -391,6 +391,10 @@ class FinetuneSchedulerMixin:
         slo = get_slo()
         est = slo.estimator
         ft_cfg = getattr(self, "finetune_config", None)
+        # SLO targets come from the FinetuneConfig (the YAML, so they match vLLM
+        # exactly) with the coserve_slo singleton's env/defaults as fallback.
+        _ttft_slo = float(getattr(ft_cfg, "ttft_slo", None) or slo.ttft_slo)
+        _max_tbt_slo = float(getattr(ft_cfg, "max_tbt_slo", None) or slo.max_tbt_slo)
 
         # ── Stage 1: features for the upcoming step (no FT yet) ──
         feats, earliest_arrival = self._current_step_features()
@@ -419,11 +423,11 @@ class FinetuneSchedulerMixin:
         now = _time.time()
         queue_wait = 0.0   # sglang overlap depth is shallow; conservative 0
         ttft_deadline = (
-            (earliest_arrival + 0.9 * slo.ttft_slo)
+            (earliest_arrival + 0.9 * _ttft_slo)
             if (has_prefill and earliest_arrival is not None) else None)
 
         if feats.b_d > 0 and est.is_ready:
-            if t_baseline >= slo.max_tbt_slo * decode_only_margin:
+            if t_baseline >= _max_tbt_slo * decode_only_margin:
                 return []   # already over TBT without FT
         if ttft_deadline is not None and est.is_ready:
             if (ttft_deadline - now - queue_wait - t_baseline) <= 0:
@@ -477,7 +481,7 @@ class FinetuneSchedulerMixin:
                 prefill_lens=new_prefill_lens)
             if est.is_ready:
                 t_with_ft = est.predict(hypothetical, regime=REGIME_EAGER)
-                if feats.b_d > 0 and t_with_ft > slo.max_tbt_slo * decode_only_margin:
+                if feats.b_d > 0 and t_with_ft > _max_tbt_slo * decode_only_margin:
                     break
                 if ttft_deadline is not None and \
                         (ttft_deadline - now - queue_wait - t_with_ft) <= 0:

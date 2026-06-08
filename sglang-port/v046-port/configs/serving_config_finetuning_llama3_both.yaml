@@ -1,0 +1,44 @@
+# sglang DeltaServe co-serving — BOTH-PHASE config, the逐字 twin of
+# DeltaServe-vLLM/configs/serving_config_finetuning_llama3_both_A100.yaml.
+# Load via:  --finetune-config configs/serving_config_finetuning_llama3_both.yaml
+# finetune/slo/debug fold into FinetuneConfig (vocab-identical to vLLM); the
+# model/engine/lora sections use sglang ServerArgs names. The benchmark passes
+# --model on the CLI (overrides model_path here).
+
+finetune:
+  enable_finetuning: true
+  backward_mps_percentage: 10
+  data_path: ../eval/llama3/data/alpaca_1000_p95.txt   # resolved vs this file's dir
+  finetuning_lora_path: adapters/llama32-1b-toy-lora
+  max_saved_finetuning_tokens: 256
+  num_epochs: 20
+  learning_rate: 0.000005
+  weight_decay: 0.01
+  gamma: 0.9
+  backward_fp32: false
+  forward_interruptible: true
+  ft_only_admission_grace_ms: 0
+
+slo:
+  ttft_slo: 0.3                       # == vLLM _both_A100
+  avg_tbt_slo: 0.05
+  max_tbt_slo: 0.15
+  profile_on_launch: true
+  profile_num_repeats: 2
+  coserving_admission_phase: both
+  decode_only_ft_safety_margin: 0.8
+  ft_tokens_admission_constrain_factor: -1
+  match_prefill_workload_factor: 1    # leaky-bucket shaper (vLLM's value)
+
+debug:
+  print_scheduler_add: false
+
+model:
+  model_path: meta-llama/Meta-Llama-3-8B
+  dtype: auto
+  context_length: 2048
+
+engine:
+  mem_fraction_static: 0.5
+  tp_size: 1
+  disable_cuda_graph: false

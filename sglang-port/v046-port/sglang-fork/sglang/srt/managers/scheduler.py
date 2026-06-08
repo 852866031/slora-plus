@@ -200,10 +200,34 @@ class Scheduler(
             from sglang.srt.configs.finetune import FinetuneConfig
             from sglang.srt.managers.finetune_coordinator import FinetuneCoordinator
             from sglang.srt.managers.finetune_scheduler_mixin import FinetuneSchedulerMixin
-            self.finetune_config = FinetuneConfig(
-                enable_finetuning=True,
-                data_path=getattr(server_args, "finetune_data_path", None),
-            )
+            # Phase G: if --finetune-config <yaml> is given, build the FinetuneConfig
+            # from the DeltaServe sectioned YAML (finetune/slo/debug sections) so
+            # every SLO/admission knob matches the vLLM config exactly. Else fall
+            # back to the hard-coded defaults (+ --finetune-data-path).
+            # 中文：给了 --finetune-config 就从 vLLM 风格的分节 YAML 构造 FinetuneConfig，
+            # 让所有 SLO/准入旋钮与 vLLM 配置逐字一致；否则用默认值。
+            _yaml = getattr(server_args, "finetune_config", None)
+            self.finetune_config = None
+            if _yaml:
+                try:
+                    from sglang.srt.deltaserve.config_loader import finetune_config_from_yaml
+                    self.finetune_config = finetune_config_from_yaml(_yaml)
+                    self.finetune_config.enable_finetuning = True
+                    logger.warning(f"[DeltaServe] FinetuneConfig loaded from {_yaml}: "
+                                   f"ttft_slo={self.finetune_config.ttft_slo} "
+                                   f"max_tbt_slo={self.finetune_config.max_tbt_slo} "
+                                   f"phase={self.finetune_config.coserving_admission_phase} "
+                                   f"safety={self.finetune_config.decode_only_ft_safety_margin} "
+                                   f"match={self.finetune_config.match_prefill_workload_factor}")
+                except Exception as e:
+                    logger.warning(f"[DeltaServe] --finetune-config load failed ({e}); "
+                                   f"using defaults")
+                    self.finetune_config = None
+            if self.finetune_config is None:
+                self.finetune_config = FinetuneConfig(
+                    enable_finetuning=True,
+                    data_path=getattr(server_args, "finetune_data_path", None),
+                )
             self.__class__ = type(
                 "FinetuneScheduler", (FinetuneSchedulerMixin, self.__class__), {}
             )
