@@ -87,7 +87,8 @@ def load_timeline(path: Path) -> List[TimelineRow]:
 def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
                      enable_inference_cuda_graph: bool = True,
                      store_corpus: Optional[str] = None,
-                     mixed_chunk: bool = False) -> List[str]:
+                     mixed_chunk: bool = False,
+                     disable_radix: bool = False) -> List[str]:
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", model_path,
@@ -98,6 +99,10 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
     ]
     if not enable_inference_cuda_graph:
         cmd += ["--disable-cuda-graph"]
+    if disable_radix and not co:
+        # inference-only baseline: match the co-serving engine config (radix off)
+        # for a fair apples-to-apples latency comparison.
+        cmd += ["--disable-radix-cache"]
     if co:
         cmd += ["--enable-finetuning", "--backward-mps-percentage", str(mps_pct)]
         # DeltaServe: FT prefills must be FULL (every token recomputed so the
@@ -397,6 +402,10 @@ def main():
                          "--finetune-data-path CLI knob (no env vars), and send NO "
                          "client FT tags (forces --ft-fraction 0). Exercises the "
                          "production store-driven default path end-to-end.")
+    ap.add_argument("--no-radix", action="store_true",
+                    help="Disable the radix prefix cache even for inference-only "
+                         "(co-serving already disables it); use for a fair "
+                         "apples-to-apples baseline vs co-serving.")
     ap.add_argument("--mixed-chunk", action="store_true",
                     help="§1.1: enable sglang --enable-mixed-chunk so FT prefill can "
                          "ride a step that also carries inference decode (the EAGER "
@@ -444,6 +453,7 @@ def main():
             enable_inference_cuda_graph=not args.disable_inference_cuda_graph,
             store_corpus=store_corpus,
             mixed_chunk=args.mixed_chunk,
+            disable_radix=args.no_radix,
         )
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.

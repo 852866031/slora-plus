@@ -722,3 +722,25 @@ call `poll()` from the SCHEDULER thread every tick (the event loop spins
 
 Plots: `plots/anticorr_200s_on.png` (success shape) + `plots/anticorr_200s_off.png`.
 This is the plan's headline behavior on a realistic 200s bursty timeline.
+
+---
+
+### S-200s-fixed — anti-correlation with REAL FT throughput (post n_valid fix)   (2026-06-08)
+
+After the FT-radix-cache fix (S-ftfix below / commit bbc2dc4), re-ran the 200s
+A/B with both runs radix-off (fair): inference-only baseline (`--no-radix`) vs
+store-driven co-serving (RPS throttle close=10/open=6).
+
+**FT is now real** — n_valid mean **190.4** (was 1.7), **155,543 tok** trained in
+200s (was ~2.3k), FT peak 1382 / mean 769 tok/s.
+
+| window | inf req/s | FT tok/s (ON) |
+|---|---:|---:|
+| t0–40 idle | 0–2 | **~1200 (fills)** |
+| t60–80 burst | 10–22 | **0 (backs off)** |
+| t150–190 trough | 0.2–5 | **~1200 (fills)** |
+
+Co-serving latency **+10.6 %** vs the inference-only baseline (0.177 vs 0.160 s),
+both radix-off, same model. Clean anti-correlation: FT fills the troughs and
+drops to 0 under the burst. Figure `plots/compare_slora_dserve_200s.png`; CSVs
+`output/{slora,dserve,bwd}_200s.csv`.
