@@ -175,9 +175,29 @@ class FinetuneSchedulerMixin:
     # （close_time）双重迟滞。即使在前向步极快、SLO 门控的预测永远够不到 TBT 预算的硬件上，
     # 它也能产生"突发时压住微调"的反相关行为。默认关闭。注意：vLLM 参考实现不在可用代码树里，
     # 故此处按计划书 §H.1 的文字规格实现，而非逐行移植。
+    def _rps_enabled(self) -> bool:
+        """Env override (SGLANG_DS_RPS_THROTTLE=1) OR config flag. The env knob
+        makes H.1 usable before the Phase-G YAML loader lands; YAML/config wins
+        once that exists. Numeric params likewise read env-first then config."""
+        import os
+        if os.environ.get("SGLANG_DS_RPS_THROTTLE") == "1":
+            return True
+        return bool(getattr(getattr(self, "finetune_config", None),
+                            "rps_throttle_enable", False))
+
+    def _rps_param(self, env_key: str, cfg_key: str, default: float) -> float:
+        import os
+        v = os.environ.get(env_key)
+        if v is not None:
+            try:
+                return float(v)
+            except ValueError:
+                pass
+        return float(getattr(getattr(self, "finetune_config", None),
+                             cfg_key, default))
+
     def _rps_note_arrivals(self, recv_reqs) -> None:
-        cfg = getattr(self, "finetune_config", None)
-        if not getattr(cfg, "rps_throttle_enable", False):
+        if not self._rps_enabled():
             return
         import time as _t
         dq = getattr(self, "_rps_arrivals", None)
@@ -193,23 +213,23 @@ class FinetuneSchedulerMixin:
     def _rps_check_throttle(self) -> bool:
         """Return True if FT admission should be CLOSED (inference burst in
         progress). Updates the engage/release latch with hysteresis."""
-        cfg = getattr(self, "finetune_config", None)
-        if not getattr(cfg, "rps_throttle_enable", False):
+        if not self._rps_enabled():
             return False
         import time as _t
         dq = getattr(self, "_rps_arrivals", None)
         if dq is None:
             return False
-        window = float(getattr(cfg, "rps_throttle_window_s", 0.75)) or 0.75
+        window = self._rps_param("SGLANG_DS_RPS_WINDOW_S",
+                                 "rps_throttle_window_s", 0.75) or 0.75
         now = _t.monotonic()
         cutoff = now - window
         while dq and dq[0] < cutoff:
             dq.popleft()
         rps = len(dq) / window
         engaged = getattr(self, "_rps_engaged", False)
-        close_rps = float(getattr(cfg, "rps_throttle_close_rps", 20.0))
-        open_rps = float(getattr(cfg, "rps_throttle_open_rps", 19.0))
-        close_time = float(getattr(cfg, "rps_throttle_close_time", 0.5))
+        close_rps = self._rps_param("SGLANG_DS_RPS_CLOSE", "rps_throttle_close_rps", 20.0)
+        open_rps = self._rps_param("SGLANG_DS_RPS_OPEN", "rps_throttle_open_rps", 19.0)
+        close_time = self._rps_param("SGLANG_DS_RPS_CLOSE_TIME", "rps_throttle_close_time", 0.5)
         if not engaged:
             if rps > close_rps:
                 self._rps_engaged = True
