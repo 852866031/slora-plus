@@ -90,6 +90,20 @@ class FinetuneConfig:
     ft_tokens_admission_constrain_factor: float = -1.0
     """Cap FT tokens admitted per step relative to that step's INFERENCE PREFILL."""
 
+    coserving_admission_phase: str = "both"
+    """FT admission phase gate (Phase D admit_ft_to_step). ``prefill`` = FT only
+    rides prefill-carrying steps (denies FT on decode-only steps); ``both`` = the
+    SLO estimator decides every step (decode-only steps gated by TBT)."""
+
+    decode_only_ft_safety_margin: float = 0.7
+    """[coserving_admission_phase=both] Tighten the TBT budget by this factor on
+    decode-only steps (cold-start conservatism while the EAGER regime accumulates
+    (T_in=0, T_ft>0, B_d>0) records). 1.0 = no tightening."""
+
+    match_prefill_workload_factor: float = 0.0
+    """Leaky-bucket admission shaper: accumulate (unspent_prefill + t_in)·factor
+    as credit; admit one FT sample only when credit covers its length. 0 disables."""
+
     profile_on_launch: bool = True
     """Run the offline execution-time profiling pass at launch."""
 

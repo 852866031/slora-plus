@@ -86,7 +86,8 @@ def load_timeline(path: Path) -> List[TimelineRow]:
 
 def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
                      enable_inference_cuda_graph: bool = True,
-                     store_corpus: Optional[str] = None) -> List[str]:
+                     store_corpus: Optional[str] = None,
+                     mixed_chunk: bool = False) -> List[str]:
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", model_path,
@@ -103,6 +104,11 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
         # FT is driven continuously from this corpus instead of client-tagged.
         if store_corpus:
             cmd += ["--finetune-data-path", store_corpus]
+        # §1.1: fuse decode+prefill into one MIXED step so FT prefill can ride a
+        # step that also carries inference decode (the EAGER (T_in>0,B_d>0,T_ft>0)
+        # shape the Phase-D dual-SLO gate admits into).
+        if mixed_chunk:
+            cmd += ["--enable-mixed-chunk", "--chunked-prefill-size", "2048"]
     return cmd
 
 
@@ -384,6 +390,10 @@ def main():
                          "--finetune-data-path CLI knob (no env vars), and send NO "
                          "client FT tags (forces --ft-fraction 0). Exercises the "
                          "production store-driven default path end-to-end.")
+    ap.add_argument("--mixed-chunk", action="store_true",
+                    help="§1.1: enable sglang --enable-mixed-chunk so FT prefill can "
+                         "ride a step that also carries inference decode (the EAGER "
+                         "regime Phase-D dual-SLO admission targets).")
     sg = ap.add_mutually_exclusive_group()
     sg.add_argument("--tight", action="store_true")
     sg.add_argument("--loose", action="store_true")
@@ -426,6 +436,7 @@ def main():
             args.model, args.port, args.co, args.mps_pct,
             enable_inference_cuda_graph=not args.disable_inference_cuda_graph,
             store_corpus=store_corpus,
+            mixed_chunk=args.mixed_chunk,
         )
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.

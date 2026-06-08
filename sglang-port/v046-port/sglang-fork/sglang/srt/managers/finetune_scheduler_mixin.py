@@ -112,6 +112,7 @@ class FinetuneSchedulerMixin:
             self._ft_store = store
             self._ft_budget = cap
             self._ft_injected = 0
+            self._ft_unspent_prefill = 0   # leaky-bucket credit (Phase D shaper)
             logger.warning(f"[DeltaServe] store-driven FT: loaded {n} samples "
                            f"from {data_path} (cap={cap}, epochs={epochs})")
         except Exception as e:
@@ -202,27 +203,18 @@ class FinetuneSchedulerMixin:
             return
         if not store.has_next() and not store.advance_epoch():
             return  # corpus exhausted across all epochs
-        # SLO gate: skip admit when inference decode is already SLO-stressed.
-        try:
-            from sglang.srt.deltaserve.coserve_slo import get_slo
-            slo = get_slo()
-            rec = slo._last_decode_dur
-            if slo.estimator.is_ready and rec is not None \
-                    and rec > slo.defer_frac * slo.max_tbt_slo:
-                return
-        except Exception:
-            pass
-        # Greedy pack up to the per-step FT token budget (largest-first).
-        admitted, remaining = [], int(getattr(self, "_ft_budget", 256))
-        while remaining > 0:
-            s = store.pop_best_under(remaining, exclude=admitted)
-            if s is None:
-                break
-            admitted.append(s)
-            remaining -= s.input_len
+        # Phase D: SLO-aware iterative admission (replaces the coarse greedy pack).
+        # admit_ft_to_step() predicts the upcoming step's time and admits FT
+        # samples one-by-one only while BOTH the TTFT (waiting prefill) and TBT
+        # (running decode) SLOs still hold — the dual-SLO controller from vLLM's
+        # ft_scheduler.admit_ft_to_step. It already claim()s the admitted samples.
+        # 中文：[Phase D] SLO 感知的迭代式准入（取代粗粒度的贪心装包）。admit_ft_to_step()
+        # 预测即将执行的这一步的耗时，逐条准入微调样本，且仅在 TTFT（等待中的 prefill）与
+        # TBT（运行中的 decode）两个 SLO 都仍满足时才继续 —— 对应 vLLM ft_scheduler 的
+        # 双 SLO 控制器。它内部已对准入样本做了 claim()。
+        admitted = self.admit_ft_to_step()
         if not admitted:
             return
-        store.claim(admitted)
         from sglang.srt.deltaserve.ft_inject import make_ft_req
         eos = getattr(getattr(self, "model_config", None), "hf_eos_token_id", None)
         for s in admitted:
@@ -232,6 +224,177 @@ class FinetuneSchedulerMixin:
             except Exception as e:
                 logger.warning(f"[DeltaServe] FT inject failed: {e}")
                 store.release_claimed([s])
+
+    def _current_step_features(self):
+        """Estimate the inference composition of the step about to run (BEFORE FT
+        is added): decode part from the running batch (exact), prefill part from
+        the waiting-queue head within the prefill token budget. Returns
+        (StepFeatures, earliest_waiting_arrival_walltime|None). Port of vLLM
+        ft_scheduler._current_step_features (§1.7 dual-SLO surface).
+
+        中文：估计即将执行的这一步在"加入微调之前"的推理构成：decode 部分来自 running_batch
+        （精确），prefill 部分来自 waiting_queue 队首、受 prefill token 预算约束。返回
+        (StepFeatures, 最早等待请求的到达墙钟时间|None)，供 TTFT 截止时间与 TBT 预测使用。"""
+        from sglang.srt.deltaserve.estimator import StepFeatures
+        b_d = 0
+        k = 0.0
+        rb = getattr(self, "running_batch", None)
+        if rb is not None and getattr(rb, "reqs", None):
+            for req in rb.reqs:
+                if getattr(req, "is_finetuning", False):
+                    continue
+                b_d += 1
+                k += float(getattr(req, "seqlen", 0) or 0)   # decode KV context
+        budget = int(getattr(self, "max_prefill_tokens", 0) or 8192)
+        remaining = max(0, budget - b_d)   # decode consumes ~1 token/req
+        t_in = 0.0
+        prefill_lens = []
+        earliest = None
+        for req in self.waiting_queue:
+            if getattr(req, "is_finetuning", False):
+                continue
+            wq = float(getattr(getattr(req, "time_stats", None),
+                               "wait_queue_entry_time", 0.0) or 0.0)
+            if earliest is None and wq > 0:
+                earliest = wq
+            if remaining <= 0:
+                continue
+            prompt_len = len(getattr(req, "origin_input_ids", ()) or ())
+            computed = len(getattr(req, "prefix_indices", ()) or ())
+            n = min(prompt_len - computed, remaining)
+            if n <= 0:
+                continue
+            prefill_lens.append(int(n))
+            t_in += n
+            remaining -= n
+        feats = StepFeatures(t_in=t_in, p=len(prefill_lens), t_ft=0.0,
+                             b_d=b_d, k=k, prefill_lens=prefill_lens or None)
+        return feats, earliest
+
+    def admit_ft_to_step(self):
+        """Three-regime SLO-aware FT admission (port of vLLM ft_scheduler
+        admit_ft_to_step, stages 1–5). Returns the list of admitted+claimed
+        FinetuningSamples (caller builds Reqs). Stage-0 preconditions
+        (ft_started / backward-not-busy / store-has-work) are checked by the
+        caller _admit_and_inject_ft; here we do features → phase gate → baseline
+        headroom → iterative EAGER-regime per-sample dual-SLO admission → claim.
+
+        中文：三区间 SLO 感知准入（移植自 vLLM 的 admit_ft_to_step，阶段 1–5）。返回已准入
+        并 claim 的样本列表。阶段 0 的前置条件（微调已开/反向不忙/语料有货）由调用方
+        _admit_and_inject_ft 检查；这里做：取特征 → 阶段门控 → 基线余量检查 → 用 EAGER
+        区间逐条做"双 SLO（TTFT+TBT）"迭代准入 → claim。冷启动（估计器未就绪）时退化为
+        受 token 预算约束的无 SLO 准入（与旧贪心行为一致）。"""
+        import time as _time
+        from sglang.srt.deltaserve.estimator import (
+            REGIME_DECODE_ONLY, REGIME_EAGER, REGIME_INF_PREFILL, StepFeatures,
+        )
+        from sglang.srt.deltaserve.coserve_slo import get_slo
+        store = self._ft_store
+        slo = get_slo()
+        est = slo.estimator
+        ft_cfg = getattr(self, "finetune_config", None)
+
+        # ── Stage 1: features for the upcoming step (no FT yet) ──
+        feats, earliest_arrival = self._current_step_features()
+        is_decode_only = (feats.t_in == 0 and feats.b_d > 0)
+        is_idle = (feats.t_in == 0 and feats.b_d == 0)
+        has_prefill = (feats.t_in > 0)
+
+        # ── Stage 2: phase gate ──
+        phase = getattr(ft_cfg, "coserving_admission_phase", "both")
+        if phase == "prefill" and is_decode_only:
+            return []
+        decode_only_margin = (
+            float(getattr(ft_cfg, "decode_only_ft_safety_margin", 0.7))
+            if (phase == "both" and is_decode_only) else 1.0)
+
+        # ── Stage 3: baseline-without-FT prediction + headroom check ──
+        if not est.is_ready:
+            t_baseline = 0.0   # cold-start: no SLO gating, token-cap only
+        elif is_decode_only:
+            t_baseline = est.predict(feats, regime=REGIME_DECODE_ONLY)
+        elif is_idle:
+            t_baseline = 0.0
+        else:
+            t_baseline = est.predict(feats, regime=REGIME_INF_PREFILL)
+
+        now = _time.time()
+        queue_wait = 0.0   # sglang overlap depth is shallow; conservative 0
+        ttft_deadline = (
+            (earliest_arrival + 0.9 * slo.ttft_slo)
+            if (has_prefill and earliest_arrival is not None) else None)
+
+        if feats.b_d > 0 and est.is_ready:
+            if t_baseline >= slo.max_tbt_slo * decode_only_margin:
+                return []   # already over TBT without FT
+        if ttft_deadline is not None and est.is_ready:
+            if (ttft_deadline - now - queue_wait - t_baseline) <= 0:
+                return []   # already over TTFT without FT
+
+        # ── Stage 4: shapers (outer pre-filters) + iterative greedy ──
+        _match_factor = float(getattr(ft_cfg, "match_prefill_workload_factor", 0.0))
+        _prop_factor = float(getattr(ft_cfg, "ft_tokens_admission_constrain_factor", -1.0))
+        max_iterations = None
+        leaky_triggered = False
+        if _match_factor > 0 and has_prefill:
+            _peek = store.pop_next()
+            if _peek is None:
+                return []
+            credit = (self._ft_unspent_prefill + feats.t_in) * _match_factor
+            if credit >= _peek.input_len:
+                leaky_triggered = True
+                max_iterations = 1
+            else:
+                self._ft_unspent_prefill += int(feats.t_in)
+                return []
+
+        buffer_cap = int(getattr(self, "_ft_budget", 256))
+        token_cap = buffer_cap
+        if not leaky_triggered and _prop_factor != -1 and has_prefill:
+            token_cap = min(buffer_cap, int(feats.t_in * _prop_factor))
+        if token_cap <= 0:
+            return []
+
+        admitted = []
+        cur_t_in = float(feats.t_in)
+        cur_t_ft = 0.0
+        cur_p = int(feats.p)
+        cur_prefill_lens = list(feats.prefill_lens) if feats.prefill_lens else []
+        while True:
+            if max_iterations is not None and len(admitted) >= max_iterations:
+                break
+            if cur_t_ft >= token_cap:
+                break
+            if not store.has_next() and not store.advance_epoch():
+                break
+            candidate = store.pop_next(exclude=admitted)
+            if candidate is None:
+                break
+            if cur_t_ft + candidate.input_len > token_cap:
+                break
+            new_prefill_lens = cur_prefill_lens + [candidate.input_len]
+            hypothetical = StepFeatures(
+                t_in=cur_t_in + candidate.input_len, p=cur_p + 1,
+                t_ft=cur_t_ft + candidate.input_len, b_d=feats.b_d, k=feats.k,
+                prefill_lens=new_prefill_lens)
+            if est.is_ready:
+                t_with_ft = est.predict(hypothetical, regime=REGIME_EAGER)
+                if feats.b_d > 0 and t_with_ft > slo.max_tbt_slo * decode_only_margin:
+                    break
+                if ttft_deadline is not None and \
+                        (ttft_deadline - now - queue_wait - t_with_ft) <= 0:
+                    break
+            admitted.append(candidate)
+            cur_t_in += candidate.input_len
+            cur_t_ft += candidate.input_len
+            cur_p += 1
+            cur_prefill_lens = new_prefill_lens
+
+        # ── Stage 5: commit (claim; caller builds Reqs) ──
+        if not admitted:
+            return []
+        store.claim(admitted)
+        return admitted
 
     def get_next_batch_to_run(self, *args, **kwargs):
         """中文：在 base 调度器选批之前，先（按需）确保语料已加载，再做一次"准入+注入"，
