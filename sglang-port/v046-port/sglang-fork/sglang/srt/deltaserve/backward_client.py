@@ -41,16 +41,24 @@ class BackwardClient:
         self._publisher = publisher
         self._publish_every = int(publish_every) if publisher is not None else 0
         self._syncs = 0
+        # Serializes socket access so poll() can be called from BOTH the worker
+        # thread (per forward) AND the scheduler thread (per idle tick). Without
+        # the scheduler-side poll, a pure-idle window (no inference forwards →
+        # worker never ticks) leaves _outstanding stuck after the first backward,
+        # so FT can't refill the idle. The lock makes the zmq PAIR socket safe
+        # under serialized cross-thread access (never concurrent).
+        import threading
+        self._lock = threading.Lock()
 
     def poll(self):
-        """Worker-thread drain hook. Call once per forward step (even when not
-        submitting) so the in-flight counter stays fresh and `is_busy()` —
-        which the scheduler thread reads — self-clears when a backward finishes.
+        """Drain hook callable from EITHER thread (lock-serialized). Call once per
+        forward step (worker) AND once per scheduler tick (so the in-flight
+        counter clears during pure-idle windows where no forward runs). Lets
+        `is_busy()` self-clear so FT admission can refill idle troughs.
 
-        中文：工作线程的"收割"钩子。每个 forward step 调用一次（即使本步不提交反向），
-        这样在途计数 `_outstanding` 才能及时归零，调度线程读取的 `is_busy()` 才能在
-        反向完成后自动解除繁忙状态。MUST 只在工作线程调用（zmq PAIR 套接字非线程安全）。
-        """
+        中文：可从任一线程调用的"收割"钩子（加锁串行化）。每个 forward step（工作线程）调用，
+        同时每个调度 tick（调度线程）也调用 —— 这样在"纯空闲"窗口（没有推理前向、工作线程不
+        转）里在途计数也能清零，is_busy() 自动解除，FT 才能把空闲填满。"""
         self._drain()
 
     def is_busy(self) -> bool:
@@ -75,22 +83,23 @@ class BackwardClient:
         master 权重，则应用到父进程侧的 publisher（供推理 hook 在 MPS 隔离下生效）。
         """
         import zmq
-        while True:
-            try:
-                raw = self._sock.recv(flags=zmq.NOBLOCK)
-            except zmq.Again:
-                break
-            except Exception:
-                break
-            self._outstanding = max(0, self._outstanding - 1)
-            if self._publisher is not None:
+        with self._lock:
+            while True:
                 try:
-                    rep = pickle.loads(raw)
-                    if isinstance(rep, dict) and rep.get("masters") is not None:
-                        self._publisher.import_masters(rep["masters"])
-                        self._syncs += 1
-                except Exception as e:
-                    logger.warning(f"[DeltaServe] master sync apply failed: {e}")
+                    raw = self._sock.recv(flags=zmq.NOBLOCK)
+                except zmq.Again:
+                    break
+                except Exception:
+                    break
+                self._outstanding = max(0, self._outstanding - 1)
+                if self._publisher is not None:
+                    try:
+                        rep = pickle.loads(raw)
+                        if isinstance(rep, dict) and rep.get("masters") is not None:
+                            self._publisher.import_masters(rep["masters"])
+                            self._syncs += 1
+                    except Exception as e:
+                        logger.warning(f"[DeltaServe] master sync apply failed: {e}")
 
     def submit(self, snapshot: dict, sample_lens=None) -> bool:
         """Ship one FT-prefill snapshot to the child. Returns True if sent,
@@ -104,11 +113,12 @@ class BackwardClient:
             return False
         cpu_snap = _snapshot_to_cpu(snapshot)
         try:
-            self._sock.send(pickle.dumps({
-                "op": "backward", "snapshot": cpu_snap,
-                "sample_lens": sample_lens or [],
-                "publish_every": self._publish_every,
-            }))
+            with self._lock:
+                self._sock.send(pickle.dumps({
+                    "op": "backward", "snapshot": cpu_snap,
+                    "sample_lens": sample_lens or [],
+                    "publish_every": self._publish_every,
+                }))
         except Exception as e:
             logger.warning(f"[DeltaServe] backward submit failed: {e}")
             return False

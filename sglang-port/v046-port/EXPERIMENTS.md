@@ -686,3 +686,39 @@ Plots: `plots/burst_anticorr_on.png` (the success shape) + `plots/burst_anticorr
 (baseline). This is the closest reproduction of the plan's nutanix
 `compare_temporal_both` plot achievable without the proprietary timeline; the
 mechanism (RPS throttle, H.1) and the shape are demonstrated.
+
+---
+
+### S-200s — full anti-correlation on the 200s timeline + idle-drain fix   (2026-06-08)
+
+**Workload.** `timeline_200s.csv` (1291 reqs, 0–200s): idle t0–40 → big burst
+t50–89 (10–22 rps, peak 27) → moderate t90–159 → trough t160–189 → rise t190+.
+1B, store-driven, real backward in MPS subprocess. A/B on the RPS throttle
+(close=10/open=6/window=2s).
+
+**Bug found + fixed (busy-gate idle-drain).** First ON run: FT filled t0 then
+STALLED through the t10–40 idle (only ~5 fires). Root cause: the backward
+in-flight counter only drained in `BackwardClient.poll()` called from the worker
+thread's forward — during a pure-idle window there are no inference forwards, so
+`poll()` never ran, `is_busy()` stayed True, and FT admission was blocked → the
+idle could not be refilled. Fix: guard the subprocess socket with a lock and also
+call `poll()` from the SCHEDULER thread every tick (the event loop spins
+`get_next_batch_to_run` even when idle). After the fix: **361 fires in t5–39**
+(was ~5). Lock makes the zmq PAIR socket safe under serialized cross-thread use.
+
+**Result — clean fill-troughs / back-off-bursts (per-10s, tok/10s):**
+| window | inf req | FT ON | FT OFF |
+|---|---:|---:|---:|
+| t0–30 idle | 0 | **~180 (filled)** | ~180 |
+| t60–80 burst | 180–221 | **0 (backed off)** | ~175 (flat) |
+| t150–190 trough | low | **~180 (filled)** | ~180 |
+
+- **ON:** FT throughput **anti-correlated** with inference load — fills idle +
+  troughs, drops to **0 during the burst**. Total FT 15.6k tok / 1762 fires,
+  latency 181 ms.
+- **OFF:** FT runs flat ~180 through everything (no back-off). Total 16.8k tok /
+  2470 fires. ON shifts FT OUT of the burst to protect inference while training
+  nearly as much overall.
+
+Plots: `plots/anticorr_200s_on.png` (success shape) + `plots/anticorr_200s_off.png`.
+This is the plan's headline behavior on a realistic 200s bursty timeline.

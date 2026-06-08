@@ -500,6 +500,19 @@ class FinetuneSchedulerMixin:
         标志关闭时这两步是 no-op，路径与原版一致。"""
         self._ensure_ft_store()
         if getattr(self, "_ft_store", None) is not None:
+            # Drain the backward subprocess from the SCHEDULER thread every tick
+            # too — during a pure-idle window (no inference forwards, so the worker
+            # thread never calls poll()) this is the only way the in-flight counter
+            # clears, letting FT admission refill the idle. Lock-serialized in
+            # BackwardClient so it's safe alongside the worker-thread poll/submit.
+            # 中文：在调度线程每个 tick 也"收割"一次反向子进程 —— 纯空闲窗口里工作线程不跑前向、
+            # 不会调用 poll()，这是让在途计数清零、从而让 FT 重新填满空闲的唯一途径。
+            bc = self._ft_backward_client()
+            if bc is not None:
+                try:
+                    bc.poll()
+                except Exception:
+                    pass
             try:
                 self._admit_and_inject_ft()
             except Exception as e:
