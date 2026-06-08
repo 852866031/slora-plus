@@ -744,3 +744,21 @@ Co-serving latency **+10.6 %** vs the inference-only baseline (0.177 vs 0.160 s)
 both radix-off, same model. Clean anti-correlation: FT fills the troughs and
 drops to 0 under the burst. Figure `plots/compare_slora_dserve_200s.png`; CSVs
 `output/{slora,dserve,bwd}_200s.csv`.
+
+---
+
+### S-20m-8B — 8B · 20-min anti-correlation, real FT (post fix)   (2026-06-08)
+
+8B (Meta-Llama-3-8B), 20-min timeline (timeline_20mins.csv, 3803 reqs), both runs
+radix-off. Store-driven co-serving, RPS throttle close=8/open=5, real rank-16 LoRA
+backward in the MPS subprocess.
+
+- FT healthy: n_valid mean **189.9** (median 190, min 127), 1999 fires,
+  **396,807 tok** trained in 20 min. FT mean 315 / peak 437 tok/s (8B backward is
+  slower than 1B, so lower tok/s).
+- Co-serving latency **+18.8 %** vs the inference-only baseline (0.285 vs 0.240 s),
+  both radix-off. (1B was +10.6 %; 8B contends more.)
+- Anti-correlation holds across all 20 min: FT fills the troughs between bursts.
+
+Deliverables: `plots/compare_slora_dserve_20m.png`, CSVs
+`output/{slora,dserve,bwd}_20m.csv` (sglang / sglang-coserve / ft-throughput).
