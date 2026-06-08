@@ -1,5 +1,32 @@
 # Porting DeltaServe-vLLM's SLO estimator + FT admission to the sglang integration
 
+> ## Implementation status — 2026-06-08 (honest audit)
+>
+> | Phase | Status | Notes |
+> |---|---|---|
+> | **A** Analytic 3-regime estimator | ✅ **Done** | `deltaserve/estimator.py` (MergedExecutionEstimator, StepFeatures, tracker), live + online refit. No `test_merged_estimator.py` unit test yet. |
+> | **B** Coordinator admission lifecycle | ⚠️ **Partial** | Pacing is done via a *different* mechanism — `BackwardClient.is_busy()`/`poll()` busy-gate (one backward in flight). The full `next_ft_budget`/`reserve`/`space_remaining`/occupancy/`admission_open`/completion-handshake lifecycle is NOT ported. |
+> | **C** Live trace collection + refit | ✅ **Done** | `coserve_slo.py` deferred CUDA-event timing → tracker → 256-step refit (verified refitting online). Not the exact 4-slot ring. |
+> | **D** SLO-aware `admit_ft_to_step` | ✅ **Done** | Full 5-stage dual TTFT/TBT iterative controller in `finetune_scheduler_mixin.py`; verified gating (TBT sweep 0.5→0.001 drops fires 55→13, latency 660→535ms — see EXPERIMENTS.md S-phaseD). |
+> | **E** Offline profiler | ❌ **Not done** | Estimator cold-starts + refits online (the plan's MVP allows this). |
+> | **F** Config field parity | ⚠️ **Partial** | Added `coserving_admission_phase`, `decode_only_ft_safety_margin`, `match_prefill_workload_factor`, `--finetune-data-path`. The rest (`rps_throttle_*`, `fwd_token_throttle*`, `save_attn_*`, `validate_estimator`, …) NOT added. |
+> | **G** YAML config loader (`--finetune-config`) | ❌ **Not done** | Flag exists but unread; no `config_loader.py`. |
+> | **H** Burst throttles (RPS + fwd-token) | ❌ **Not done** | No `RpsTracker`/`check_rps_throttle`/`fwd_token_throttle`. |
+>
+> **Also done beyond the original gap table:** store-driven self-inject FT (§1.3)
+> is the **default** (`--finetune-data-path`; opt-out `SGLANG_DS_STORE_DRIVEN=0`),
+> epoch-correct claim/commit, `--mixed-chunk` (§1.1) available (not yet A/B'd),
+> request-tag suppression. Tier A of forward_interruptible is an opt-in knob;
+> tier C is intentionally not ported (marginal on co-serve — see EXPERIMENTS.md).
+>
+> **Success criterion NOT met:** the nutanix bursty trough-fill/burst-backoff A/B
+> (the headline plot) is not reproduced — `timeline_nutanix.csv` is
+> proprietary/gitignored and absent. The TBT-budget sweep (S-phaseD) is the
+> substitute proof that the controller gates. On this hardware/workload realistic
+> TBT SLOs don't bind (sub-20ms forward steps; FT is backward-cadence-bound).
+>
+> **MVP (A+C+D, online-refit) is functional;** B-full / E / F-full / G / H remain.
+
 A phased implementation plan to replace the sglang port's stub SLO machinery
 (rolling-mean `StepTimeEstimator`, always-`True` `can_admit`, static
 random admit-rate) with the real three-regime execution-time estimator,

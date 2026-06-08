@@ -544,3 +544,66 @@ DeltaServe-vLLM: continuous corpus-driven SLO-admitted FT by default, 3-regime
 estimator live, epoch-correct claim/commit, inference within ~2% of vLLM. Remaining
 deltas are throughput-side (41→151 fire gap = backward speed: S2 graphed backward /
 MPS-% tuning) and the un-ported tier-C interrupt (marginal here), both documented.
+
+---
+
+### S-phaseD — full predictive dual-SLO FT admission (admit_ft_to_step)   (2026-06-08)
+
+**Goal.** Replace the coarse greedy+busy-gate admission with vLLM's real 5-stage
+iterative SLO controller (`ft_scheduler.admit_ft_to_step`), so FT throughput is
+governed by a *predicted* dual TTFT/TBT budget — the controller behind the plan's
+"FT fills inference troughs, backs off on bursts" success criterion.
+
+**Implemented** (`finetune_scheduler_mixin.py`):
+- `_current_step_features()` — decode part from `running_batch` (b_d, k=Σseqlen),
+  prefill part from `waiting_queue` head within `max_prefill_tokens`, earliest
+  waiting arrival (`time_stats.wait_queue_entry_time`) for the TTFT deadline.
+- `admit_ft_to_step()` — stages 1-5: phase gate (`coserving_admission_phase`),
+  baseline-without-FT prediction + TTFT/TBT headroom, iterative greedy with
+  per-sample **EAGER-regime** prediction admitting while BOTH TTFT (waiting
+  prefill) and TBT (running decode × `decode_only_safety_margin`) hold, then
+  claim. Leaky-bucket + proportional shapers ported (default off). Cold-start →
+  token-cap-only. Reads the same `get_slo()` estimator trained by `model_runner`
+  in the worker thread (shared singleton, same process under overlap).
+
+**Verification 1 — no regression (1B, store-driven CLI, no mixed-chunk):**
+estimator ready=True (online refit, rmse ~0.0015), `admit_ft_to_step` 0 errors /
+0 tracebacks, 211ms/14ms, 224 ok, ft_tagged=0, 116 continuous fires.
+
+**Verification 2 — the gate provably responds to the SLO budget (8B tight, A/B/C
+on `SGLANG_DS_MAX_TBT_SLO`):**
+
+| Run | max_tbt_slo | backward fires | inference latency |
+|---|---:|---:|---:|
+| A loose  | 0.5 s   | 55 | 660 ms |
+| B tight  | 0.02 s  | 53 | 661 ms |
+| C xtight | 0.001 s | **13** | **535 ms** |
+
+- Predicted: tightening TBT below the forward step time makes `admit_ft_to_step`
+  back off (baseline/EAGER predictions exceed the budget → admit 0), dropping
+  fires and freeing GPU for inference. FALSIFIED if fires don't drop.
+- **Actual:** A→C fires **55→13 (−76 %)**, latency **660→535 ms** (FT contention
+  removed) — the controller demonstrably trades FT throughput for inference
+  headroom as the SLO budget tightens. The gate engages once the budget approaches
+  the (small) forward step time.
+
+**Honest caveats:**
+1. **The gate is ~no-op at *realistic* TBT (0.1-0.15 s) on this hardware.** 8B
+   forward steps are sub-20 ms (the 250-340 ms backward is async in the MPS
+   subprocess, NOT part of `T_step`), so a normal TBT SLO never binds; FT cadence
+   is set by the busy-gate/backward cadence + inference interleaving. The gate
+   only bites when TBT is pushed near the step time (run C). On slower/bigger
+   setups (or in-process backward) where co-serve steps approach the TBT budget,
+   it would bind at realistic SLOs — that's the regime vLLM's reference plot is in.
+2. **The nutanix trough-fill/burst-backoff A/B (the plan's headline success plot)
+   is NOT reproduced** — `timeline_nutanix.csv` is proprietary/gitignored and
+   absent from this tree (only the reference PNG is present). Runs A/B/C use the
+   steady `tight` timeline; the budget-sweep above is the substitute proof that
+   the controller gates correctly. Reproducing the exact anti-correlation plot
+   needs the proprietary timeline + a workload that stresses TBT at realistic SLOs.
+
+**Plan status after this:** A (estimator) ✅, C (live trace/refit) ✅, D
+(admit_ft_to_step) ✅ implemented+verified-gating; B partial (busy-gate pacing,
+not the full reserve/occupancy/reopen lifecycle); E (profiler), F (full config
+parity), G (YAML loader), H (RPS/fwd-token throttles) NOT done. Mixed-chunk
+(§1.1) available via `--mixed-chunk` but not yet A/B'd.
