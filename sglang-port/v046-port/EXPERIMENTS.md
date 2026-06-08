@@ -607,3 +607,43 @@ on `SGLANG_DS_MAX_TBT_SLO`):**
 not the full reserve/occupancy/reopen lifecycle); E (profiler), F (full config
 parity), G (YAML loader), H (RPS/fwd-token throttles) NOT done. Mixed-chunk
 (§1.1) available via `--mixed-chunk` but not yet A/B'd.
+
+---
+
+### S-phaseH — H.1 RPS burst throttle (model-free admission gate)   (2026-06-08)
+
+**Goal.** A model-free, fast-reacting gate that closes FT admission under
+inference arrival bursts — the piece that can produce the "back off FT during
+bursts" behavior on hardware where the SLO gate is no-op (forward steps sub-20ms,
+so a realistic TBT never binds — see S-phaseD caveat).
+
+**Implemented** (`finetune_scheduler_mixin.py`, config `finetune.py`): a sliding-
+window inference-arrival-rate tracker (`_rps_note_arrivals` hooked in
+`process_input_requests`, inference reqs only) + `_rps_check_throttle` with
+spatial (close_rps/open_rps band) + temporal (close_time) hysteresis + idle-bypass
+(rps==0 releases immediately), gating the top of `_admit_and_inject_ft`. Config:
+`rps_throttle_{enable,close_rps,open_rps,window_s,close_time}`; env overrides
+`SGLANG_DS_RPS_{THROTTLE,CLOSE,OPEN,WINDOW_S,CLOSE_TIME}` (usable before Phase G).
+
+**NOTE:** the vLLM reference for this throttle (`check_rps_throttle`/`RpsTracker`)
+is NOT present in the available DeltaServe-vLLM checkout — implemented from the
+plan's prose spec (§H.1), not a line-by-line port.
+
+**Verification (1B store-driven, tight timeline ~4.6 RPS):**
+| Config | backward fires | inference latency |
+|---|---:|---:|
+| throttle OFF (baseline) | ~106–116 | ~204 ms |
+| throttle ON (close_rps=3, open=2, window=1s) | **26** | **172 ms** |
+
+- Predicted: with close_rps below the timeline's active RPS, the gate engages and
+  FT admission closes → fewer fires + lower inference latency. FALSIFIED if fires
+  don't drop.
+- **Actual:** fires **~110 → 26 (−75 %)**, latency **204 → 172 ms**, 0 errors. The
+  RPS throttle demonstrably trades FT throughput for inference headroom under load.
+
+**Caveat / follow-up:** the steady `tight` timeline (~4.6 RPS) mostly holds the
+gate *engaged* (RPS > close), so this shows the gate working but not the full
+trough-fill/burst-backoff *dynamic*. Demonstrating the anti-correlation SHAPE
+needs a constructed quiet→burst→quiet timeline (the proprietary nutanix one is
+absent) + a temporal FT-throughput-vs-load plot — tracked as the remaining
+demonstration. H.2 (fwd-token backward pause) not yet ported.
