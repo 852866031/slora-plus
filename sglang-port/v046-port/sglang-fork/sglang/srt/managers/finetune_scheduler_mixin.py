@@ -481,10 +481,22 @@ class FinetuneSchedulerMixin:
                 prefill_lens=new_prefill_lens)
             if est.is_ready:
                 t_with_ft = est.predict(hypothetical, regime=REGIME_EAGER)
+                # Instrument (every 200 admits): does the predicted co-serve step
+                # time approach the TBT budget? On fast HW it may not → SLO never
+                # binds. Lets us honestly report whether the gate is live.
+                self._ft_slo_dbg = getattr(self, "_ft_slo_dbg", 0) + 1
+                if self._ft_slo_dbg % 200 == 1:
+                    logger.warning(f"[DeltaServe] SLO probe: pred EAGER step="
+                                   f"{t_with_ft*1000:.1f}ms  budget(max_tbt*margin)="
+                                   f"{_max_tbt_slo*decode_only_margin*1000:.1f}ms  "
+                                   f"b_d={feats.b_d} -> "
+                                   f"{'WOULD-REJECT' if (feats.b_d>0 and t_with_ft>_max_tbt_slo*decode_only_margin) else 'admit'}")
                 if feats.b_d > 0 and t_with_ft > _max_tbt_slo * decode_only_margin:
+                    self._ft_slo_rejects = getattr(self, "_ft_slo_rejects", 0) + 1
                     break
                 if ttft_deadline is not None and \
                         (ttft_deadline - now - queue_wait - t_with_ft) <= 0:
+                    self._ft_slo_rejects = getattr(self, "_ft_slo_rejects", 0) + 1
                     break
             admitted.append(candidate)
             cur_t_in += candidate.input_len

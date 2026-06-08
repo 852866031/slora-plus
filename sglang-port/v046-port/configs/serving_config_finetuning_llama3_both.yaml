@@ -8,8 +8,8 @@
 finetune:
   enable_finetuning: true
   backward_mps_percentage: 10
-  data_path: ../eval/llama3/data/alpaca_1000_p95.txt   # resolved vs this file's dir
-  finetuning_lora_path: adapters/llama32-1b-toy-lora
+  data_path: /mnt/weka/home/jianshu.she/slora-plus/eval/llama3/data/alpaca_1000_p95.txt
+  finetuning_lora_path: /mnt/weka/home/jianshu.she/slora-plus/sglang-port/v046-port/adapters/llama32-1b-toy-lora
   max_saved_finetuning_tokens: 256
   num_epochs: 20
   learning_rate: 0.000005

@@ -88,7 +88,8 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
                      enable_inference_cuda_graph: bool = True,
                      store_corpus: Optional[str] = None,
                      mixed_chunk: bool = False,
-                     disable_radix: bool = False) -> List[str]:
+                     disable_radix: bool = False,
+                     finetune_config: Optional[str] = None) -> List[str]:
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", model_path,
@@ -105,6 +106,9 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
         cmd += ["--disable-radix-cache"]
     if co:
         cmd += ["--enable-finetuning", "--backward-mps-percentage", str(mps_pct)]
+        if finetune_config:
+            # Phase G: load the exact vLLM-style SLO/admission config from YAML.
+            cmd += ["--finetune-config", finetune_config]
         # DeltaServe: FT prefills must be FULL (every token recomputed so the
         # activation hooks fire). The radix prefix cache would reuse cached KV and
         # leave the FT activation buffer near-empty (n_valid collapses to ~1).
@@ -402,6 +406,10 @@ def main():
                          "--finetune-data-path CLI knob (no env vars), and send NO "
                          "client FT tags (forces --ft-fraction 0). Exercises the "
                          "production store-driven default path end-to-end.")
+    ap.add_argument("--finetune-config", default=None,
+                    help="Phase G: path to a DeltaServe sectioned YAML (the vLLM "
+                         "config). Loads the exact SLO/admission knobs into "
+                         "FinetuneConfig. Passed through to the server.")
     ap.add_argument("--no-radix", action="store_true",
                     help="Disable the radix prefix cache even for inference-only "
                          "(co-serving already disables it); use for a fair "
@@ -454,6 +462,7 @@ def main():
             store_corpus=store_corpus,
             mixed_chunk=args.mixed_chunk,
             disable_radix=args.no_radix,
+            finetune_config=args.finetune_config,
         )
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.
