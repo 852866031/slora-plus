@@ -264,6 +264,40 @@ class FinetuneSchedulerMixin:
             return False
         return True
 
+    def _rps_admit_factor(self) -> float:
+        """Proportional throttle (SGLANG_DS_RPS_PROPORTIONAL=1): instead of the
+        binary close/open gate, return a [0,1] multiplier on the FT token budget
+        that ramps DOWN as inference rps rises — 1.0 at/below open_rps, 0.0 at/
+        above close_rps, linear in between. This makes FT *dial down* with load
+        (graduated 调控) rather than hard on/off, approximating vLLM's SLO-budget
+        admission on hardware (H200) where the SLO gate itself never binds."""
+        if not self._rps_enabled():
+            return 1.0
+        import time as _t
+        dq = getattr(self, "_rps_arrivals", None)
+        if dq is None:
+            return 1.0
+        window = self._rps_param("SGLANG_DS_RPS_WINDOW_S",
+                                 "rps_throttle_window_s", 0.75) or 0.75
+        now = _t.monotonic()
+        cutoff = now - window
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        rps = len(dq) / window
+        close_rps = self._rps_param("SGLANG_DS_RPS_CLOSE", "rps_throttle_close_rps", 20.0)
+        open_rps = self._rps_param("SGLANG_DS_RPS_OPEN", "rps_throttle_open_rps", 19.0)
+        if rps <= open_rps:
+            return 1.0
+        if rps >= close_rps:
+            return 0.0
+        f = (close_rps - rps) / max(1e-6, (close_rps - open_rps))
+        if _os_rps_debug():
+            lastlog = getattr(self, "_rps_pf_lastlog", 0.0)
+            if now - lastlog >= 1.0:
+                self._rps_pf_lastlog = now
+                logger.warning(f"[rps] PROPORTIONAL rps={rps:.1f} factor={f:.2f}")
+        return f
+
     def _admit_and_inject_ft(self):
         """中文：每个调度步的"准入 + 注入"。依次检查：微调门是否已开（is_finetuning_started）、
         是否已有微调批次在途（一次一个）、反向子进程是否繁忙（按反向节奏配速）、SLO 是否吃紧、
@@ -277,8 +311,17 @@ class FinetuneSchedulerMixin:
             return
         # [Phase H.1] RPS burst throttle: if inference arrivals are spiking, close
         # FT admission this tick (model-free, reacts before the SLO estimator).
-        if self._rps_check_throttle():
-            return
+        # SGLANG_DS_RPS_PROPORTIONAL=1 switches from binary close to a graduated
+        # factor (FT budget scaled down with load); else the original on/off gate.
+        import os as _os_pf
+        if _os_pf.environ.get("SGLANG_DS_RPS_PROPORTIONAL") == "1":
+            self._rps_factor = self._rps_admit_factor()
+            if self._rps_factor <= 0.0:
+                return
+        else:
+            self._rps_factor = 1.0
+            if self._rps_check_throttle():
+                return
         # [forward_interruptible / tier A] OPT-IN inference-first guard. When
         # SGLANG_DS_FT_TIER_A=1, do NOT inject FT while any inference (non-FT)
         # request is waiting to prefill — inference always wins, so the FT prefill
@@ -489,6 +532,11 @@ class FinetuneSchedulerMixin:
         token_cap = buffer_cap
         if not leaky_triggered and _prop_factor != -1 and has_prefill:
             token_cap = min(buffer_cap, int(feats.t_in * _prop_factor))
+        # Proportional RPS throttle: dial the FT token budget down with inference
+        # load (graduated 调控) instead of the binary close gate.
+        _rps_f = getattr(self, "_rps_factor", 1.0)
+        if _rps_f < 1.0:
+            token_cap = int(token_cap * _rps_f)
         if token_cap <= 0:
             return []
 
