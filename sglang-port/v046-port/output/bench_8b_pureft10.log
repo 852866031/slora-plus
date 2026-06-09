@@ -1,0 +1,14 @@
+[bench] loaded 360 FT samples from /mnt/weka/home/jianshu.she/slora-plus/eval/llama3/data/alpaca_1000_p95.txt
+[bench] gpu=CUSTOM200 shape=tight rows=1291 co=True ft_frac=0.1
+[bench] launching: /mnt/weka/home/jianshu.she/miniconda3/bin/python -m sglang.launch_server --model-path /mnt/weka/home/jianshu.she/.cache/huggingface/hub/models--meta-llama--Meta-Llama-3-8B/snapshots/8cde5ca8380496c9a6cc7ef3a8b46a0372a1d920/ --host 127.0.0.1 --port 30250 --tp-size 1 --mem-fraction-static 0.5 --enable-finetuning --backward-mps-percentage 20 --finetune-config configs/serving_config_finetuning_llama3_both.yaml --disable-radix-cache
+[bench] server pid=2792786 log= /mnt/weka/home/jianshu.she/slora-plus/sglang-port/v046-port/output/server_tight_co.log
+[bench] server healthy
+[bench] warmup (gate closed, ft_fraction=0)...
+[bench] POST /start_finetuning → OK
+[bench] timeline_anchor_wall=1780966812.717
+[bench] running timeline...
+[bench] wrote /mnt/weka/home/jianshu.she/slora-plus/sglang-port/v046-port/output/timeline_results_tight_co_real_sub.csv
+[bench] ttft_s: mean=0.042  p50=0.022  p95=0.183
+[bench] latency_s: mean=0.716  p50=0.726  p95=0.961
+[bench] reqs ok=1291 err=0; ft_tagged=130
+[bench] cleaning up server process group 2792786...

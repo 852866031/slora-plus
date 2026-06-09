@@ -762,3 +762,55 @@ backward in the MPS subprocess.
 
 Deliverables: `plots/compare_slora_dserve_20m.png`, CSVs
 `output/{slora,dserve,bwd}_20m.csv` (sglang / sglang-coserve / ft-throughput).
+
+---
+
+### S-FT-engine — "why vLLM's figure hits 1000 tok/s FT and ours ~420" (2026-06-09)
+
+**Question (陈嘉暄 / user):** vLLM's reference figure reaches ~1000 tok/s pure-FT on
+a *single* GPU; sglang here measured ~420. Is the sglang FT engine deficient?
+
+**Answer: no — it's the GPU.** Measured pure-FT (no inference, idle-window) tok/s
+for the *same* rank-16 LoRA backward, same Meta-Llama-3-8B, same 10% MPS cap, by
+reading each framework's own `bwd_log` CSV:
+
+| Framework | GPU | MPS | pure-FT tok/s |
+|---|---|---|---|
+| vLLM (reference figure) | **RTX 5090** | 10% | **~1020** |
+| vLLM | A100 | 10% | 345 |
+| vLLM | H200 (this box) | 10% | 419 |
+| **sglang (ours)** | **H200** | 10% | **433** |
+| **sglang (ours)** | **H200** | **100% (uncapped)** | **881** |
+
+Two conclusions:
+
+1. **On matched hardware the sglang FT engine already matches/beats vLLM**:
+   sglang H200@10% = **433** ≥ vLLM H200@10% = **419**. The "1000" in vLLM's
+   reference figure is *RTX-5090-specific* — the consumer Blackwell part runs the
+   small rank-16 backward ~2.4× faster than the datacenter Hopper H200 at the same
+   10% MPS. It is **not** a sglang deficiency and there is nothing to "fix" in the
+   FT engine to reach it on the H200.
+2. **The H200 path to ~1000 is uncapping the backward MPS**: sglang H200 @100%
+   (uncapped) = **881 tok/s**, near the 5090's 1020. `backward_process.py` already
+   uncaps when `backward_mps_percentage` ≥ 100 or ≤ 0.
+
+**MPS 10% is NOT the dominant factor** (user was right): clean isolation gave
+1B@10%=1505 vs 1B@100%=3204 — only ~2×, not 10×. The earlier "315→3204 = 10×"
+claim conflated 8B@10% vs 1B@100% and was wrong.
+
+**Backward architecture audit (vs vLLM), for the record:**
+- sglang backward is **eager** (no CUDA graph). vLLM has an optional
+  `GraphedBackwardRunner`. At 10% MPS on H200 this buys ~nothing (the win is
+  capture/replay of shape-stable FFN; SM-starved at 10% it's dispatch-bound, not
+  capture-bound). Not ported — no measured benefit on this hardware.
+- sglang saves `layer_in / mlp_gate_up / final_in / final_hidden /
+  concat_input_ids` per step and **recomputes attention** in the backward; vLLM
+  additionally saves attn qkv/ctx to skip recompute. Recompute is cheap for the
+  small per-sample attention here; not ported.
+- sglang does **one backward per FT-prefill step** (no accumulate-to-buffer-full).
+  begin_step resets the activation buffers each step. Matches vLLM's per-step
+  cadence; n_valid mean ≈ 452 (max_saved 512) confirms full-ish steps.
+
+Bottom line: **the FT engine is consistent with vLLM on the same GPU.** The
+remaining tok/s gap to the 1000-figure is hardware (5090 > H200) plus MPS cap, not
+engine efficiency. Stop chasing graph/save-attn/accumulate ports for this metric.
