@@ -14,6 +14,11 @@ from typing import Any, List
 logger = logging.getLogger(__name__)
 
 
+def _os_rps_debug() -> bool:
+    import os
+    return os.environ.get("SGLANG_DS_RPS_DEBUG") == "1"
+
+
 class FinetuneSchedulerMixin:
     """FT scheduling hooks. The base ``Scheduler`` is the second base in the
     runtime-synthesised MRO, so every ``super().method(...)`` call here lands
@@ -230,10 +235,24 @@ class FinetuneSchedulerMixin:
         close_rps = self._rps_param("SGLANG_DS_RPS_CLOSE", "rps_throttle_close_rps", 20.0)
         open_rps = self._rps_param("SGLANG_DS_RPS_OPEN", "rps_throttle_open_rps", 19.0)
         close_time = self._rps_param("SGLANG_DS_RPS_CLOSE_TIME", "rps_throttle_close_time", 0.5)
+        # [diag] SGLANG_DS_RPS_DEBUG=1: trace the throttle's live view ~1/sec, plus
+        # the scheduler tick interval (dt) — lets us see if an uncapped backward
+        # starves the loop and corrupts the arrival-rate signal.
+        if _os_rps_debug():
+            last = getattr(self, "_rps_last_check", now)
+            self._rps_last_check = now
+            lastlog = getattr(self, "_rps_last_log", 0.0)
+            if now - lastlog >= 1.0:
+                self._rps_last_log = now
+                logger.warning(
+                    f"[rps] rps={rps:.1f} dq={len(dq)} engaged={engaged} "
+                    f"close={close_rps} window={window} tick_dt={now-last:.3f}s")
         if not engaged:
             if rps > close_rps:
                 self._rps_engaged = True
                 self._rps_engaged_at = now
+                if _os_rps_debug():
+                    logger.warning(f"[rps] ENGAGE (close FT) rps={rps:.1f} > {close_rps}")
                 return True
             return False
         # currently engaged — release on idle-bypass or below open_rps after close_time

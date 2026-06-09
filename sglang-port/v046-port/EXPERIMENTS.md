@@ -844,3 +844,52 @@ isolated backward, `SGLANG_DS_REAL_BACKWARD=1`, fires parsed from
 (bwd_log `total_processed_tokens` / span). All pinned `CUDA_VISIBLE_DEVICES=0`
 (the MPS-served GPU) — without the pin both engines hit
 `device=1, num_gpus=1` under MPS.
+
+---
+
+### S-daemon-off — what removing the MPS daemon actually does (2026-06-09)
+
+Two probes of "what is the MPS daemon load-bearing for", at the user's request.
+Daemon = `nvidia-cuda-mps-control -d`; without it `CUDA_MPS_ACTIVE_THREAD_PERCENTAGE`
+is inert and the backward runs uncapped.
+
+**(1) Pure-FT — the 10% cap is real only with the daemon.** Same
+`--backward-mps-pct=10`, 8B, H200: daemon ON = **422 tok/s**, daemon OFF = **907
+tok/s** (≈ the uncapped 100% reference of 881). So the cap collapses to full-GPU
+without the daemon — proof the daemon is what enforces the SM partition.
+Figure `plots/mps_daemon_effect.png` (`plot_mps_daemon.py`).
+
+**(2) Co-serving (200s, 1B) — daemon OFF costs latency but does NOT break the
+anti-correlation.** Initial read of `compare_slora_dserve_200s_nodaemon.png`
+looked like FT failed to back off during the inference burst. **That was a plot
+clock-alignment artifact, not a real bug** — chased to ground:
+
+- Instrumented `_rps_check_throttle` (`SGLANG_DS_RPS_DEBUG=1` → logs rps / dq /
+  engaged / scheduler `tick_dt`). Re-ran daemon-OFF co-serve.
+- On the scheduler's **own wall clock**, FT drops to 0 **exactly** when the
+  throttle's measured rps crosses `close=10`, bin-for-bin — clean
+  anti-correlation (`plots/daemon_off_coserve_aligned.png`,
+  `plot_daemon_off_aligned.py`). The RPS throttle works.
+- Scheduler is **not** starved: `tick_dt` median **2 ms**, max 0.37 s (the
+  "uncapped backward starves the loop" hypothesis was wrong).
+- Inference stays prompt: E2E p99 **0.35 s**, burst-window mean 0.18 s — not
+  backed up.
+- The original figure looked off because `compare_slora_dserve` plots the FT band
+  on **wall** clock and the inference panel on the **client schedule** clock; the
+  daemon-OFF run is time-dilated (FT ran to t=243 s for a 200 s timeline), so the
+  correctly-timed back-off was drawn ~45 s shifted from the nominal burst.
+
+**Corrected conclusion (supersedes the earlier "daemon-off breaks
+anti-correlation" claim, which was wrong):**
+
+| | daemon ON | daemon OFF |
+|---|---|---|
+| inference E2E vs baseline | +10.6 % | +34 % |
+| FT throughput | ~769 tok/s | ~1478 tok/s |
+| anti-correlation (RPS throttle) | ✓ | **✓ still works** |
+
+The MPS daemon's role is **only** the SM cap → it shrinks the inference latency
+penalty (+10.6 % vs +34 %) and trades FT throughput for it. The anti-correlation
+is a **scheduler-level** mechanism (the RPS burst throttle), independent of MPS —
+it works with or without the daemon. The env-gated `[rps]` debug log is left in
+(`SGLANG_DS_RPS_DEBUG`, default off, zero overhead).
