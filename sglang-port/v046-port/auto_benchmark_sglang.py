@@ -227,7 +227,10 @@ async def stream_one(session: aiohttp.ClientSession, port: int,
         "sampling_params": {
             "max_new_tokens": row.max_new_tokens,
             "temperature": 0,
-            "ignore_eos": True,
+            # SGLANG_BENCH_RESPECT_EOS=1 → let generation stop at EOS (real
+            # variable-length outputs → spread latency). Default keeps the
+            # deterministic fixed-length load (ignore_eos=True).
+            "ignore_eos": os.environ.get("SGLANG_BENCH_RESPECT_EOS") != "1",
         },
         "stream": True,
         "is_finetuning": is_ft,
