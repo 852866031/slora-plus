@@ -770,29 +770,39 @@ Deliverables: `plots/compare_slora_dserve_20m.png`, CSVs
 **Question (陈嘉暄 / user):** vLLM's reference figure reaches ~1000 tok/s pure-FT on
 a *single* GPU; sglang here measured ~420. Is the sglang FT engine deficient?
 
-**Answer: no — it's the GPU.** Measured pure-FT (no inference, idle-window) tok/s
-for the *same* rank-16 LoRA backward, same Meta-Llama-3-8B, same 10% MPS cap, by
-reading each framework's own `bwd_log` CSV:
+**Answer: it is NOT a hardware fact — the cross-GPU "table" below was a
+methodology error, retracted.** The only defensible comparison is same-box.
 
-| Framework | GPU | MPS | pure-FT tok/s |
+**CORRECTION (the earlier framing "H200 loses to 5090" was wrong).** The
+reference logs `temporal_share_output/{5090,A100}/bwd_log_co_factor_off_nutanix.csv`
+carry **no config metadata** — no record of MPS%, model, or sleep setting. "5090"
+and "A100" are just directory names. I wrongly treated them as a controlled
+10%-MPS comparison. They are not.
+
+The per-backward latency (same ~242 tok/batch everywhere, so directly comparable)
+exposes the real story:
+
+| run | per-backward latency | tok/s | provenance |
 |---|---|---|---|
-| vLLM (reference figure) | **RTX 5090** | 10% | **~1020** |
-| vLLM | A100 | 10% | 345 |
-| vLLM | H200 (this box) | 10% | 419 |
-| **sglang (ours)** | **H200** | 10% | **433** |
-| **sglang (ours)** | **H200** | **100% (uncapped)** | **881** |
+| reference `5090/` (co_off) | **236 ms** | 1020 | unknown MPS%/config |
+| reference `A100/` (co_off) | 700 ms | 345 | unknown MPS%/config |
+| sglang H200 @10% MPS | 558 ms | 433 | **measured, this box** |
+| sglang H200 @100% uncapped | **275 ms** | 881 | **measured, this box** |
+| vLLM H200 @10% MPS | ~578 ms | 419 | **measured, this box** (pure_ft_bench) |
 
-Two conclusions:
+The reference "5090" run is **236 ms/backward — faster than my H200 *uncapped*
+(275 ms)**. A 5090 does not out-compute an H200 by 2.4×; what 236 ms lines up with
+is a *near-uncapped* run, not a 10% one. The reference logs were almost certainly
+**not run at 10% MPS**. So "H200 loses to 5090" was an uncapped-vs-capped artifact,
+not silicon. A datacenter H200 at full power beats a 5090; it does not lose to one.
 
-1. **On matched hardware the sglang FT engine already matches/beats vLLM**:
-   sglang H200@10% = **433** ≥ vLLM H200@10% = **419**. The "1000" in vLLM's
-   reference figure is *RTX-5090-specific* — the consumer Blackwell part runs the
-   small rank-16 backward ~2.4× faster than the datacenter Hopper H200 at the same
-   10% MPS. It is **not** a sglang deficiency and there is nothing to "fix" in the
-   FT engine to reach it on the H200.
-2. **The H200 path to ~1000 is uncapping the backward MPS**: sglang H200 @100%
-   (uncapped) = **881 tok/s**, near the 5090's 1020. `backward_process.py` already
-   uncaps when `backward_mps_percentage` ≥ 100 or ≤ 0.
+**What actually holds — controlled, same-box, same-code:**
+1. **sglang FT engine matches vLLM on the same GPU**: sglang H200@10% = **433** ≈
+   vLLM H200@10% = **419**. No engine deficiency.
+2. **Path to ~1000 on H200 is uncapping the backward MPS**: sglang H200 @100%
+   (uncapped) = **881 tok/s**. `backward_process.py` uncaps when
+   `backward_mps_percentage` ≥ 100 or ≤ 0. The "1000" reference is reproduced on
+   H200 by removing the cap — it is an MPS-cap effect, not a 5090 hardware win.
 
 **MPS 10% is NOT the dominant factor** (user was right): clean isolation gave
 1B@10%=1505 vs 1B@100%=3204 — only ~2×, not 10×. The earlier "315→3204 = 10×"
@@ -811,6 +821,8 @@ claim conflated 8B@10% vs 1B@100% and was wrong.
   begin_step resets the activation buffers each step. Matches vLLM's per-step
   cadence; n_valid mean ≈ 452 (max_saved 512) confirms full-ish steps.
 
-Bottom line: **the FT engine is consistent with vLLM on the same GPU.** The
-remaining tok/s gap to the 1000-figure is hardware (5090 > H200) plus MPS cap, not
-engine efficiency. Stop chasing graph/save-attn/accumulate ports for this metric.
+Bottom line: **the FT engine is consistent with vLLM on the same GPU** (433 ≈ 419
+@10%). The 1000-figure is reproduced on H200 by uncapping MPS (→881), so it is an
+MPS-cap effect, not a sglang deficiency and not a 5090 hardware advantage. The
+cross-GPU claim was retracted — the reference logs lack config provenance. Stop
+chasing graph/save-attn/accumulate ports for this metric.
