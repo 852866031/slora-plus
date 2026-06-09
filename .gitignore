@@ -13,3 +13,6 @@ S-LoRA/test/llama3/adapters/llama3-toy-lora-ft/*
 __pycache__/
 *.so
 .claude/*
+# proprietary customer trace — do not commit (see CLAUDE.md)
+eval/llama3/timelines/NUTANIX/
+*nutanix*
