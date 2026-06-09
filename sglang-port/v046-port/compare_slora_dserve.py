@@ -352,7 +352,8 @@ def _series_min(res) -> float:
 
 def plot_panel(ax, slora, dserve, bwd_path, tl_base, gpu_name,
                slora_offset=None, dserve_offset=None,
-               ft_offset=0.0, window_s=None, slora_latency_factor=1.0) -> float:
+               ft_offset=0.0, window_s=None, slora_latency_factor=1.0,
+               lat_clip=None) -> float:
     """Two-series latency overlay (left) + DeltaServe FT throughput (right).
     Returns the right-most x so the caller can pin a shared x-limit."""
     if slora_offset is None:
@@ -361,6 +362,20 @@ def plot_panel(ax, slora, dserve, bwd_path, tl_base, gpu_name,
     if dserve_offset is None:
         dserve_offset = _auto_offset(_series_min(dserve), tl_base,
                                      DISPLAY_NAME_DSERVE) if dserve else 0.0
+
+    # Optional: drop latency outliers above lat_clip from BOTH series (scatter +
+    # avg). Disclosed via an on-figure note; the raw CSVs are untouched (record).
+    n_clipped = 0
+    if lat_clip is not None and lat_clip > 0:
+        for r in (slora, dserve):
+            if r is None:
+                continue
+            over = r["ok"] & (r["latency_s"] > lat_clip)
+            n_clipped += int(over.sum())
+            r["ok"] = r["ok"] & (r["latency_s"] <= lat_clip)
+        if n_clipped:
+            print(f"[compare_slora_dserve] lat_clip={lat_clip}s → dropped "
+                  f"{n_clipped} latency outlier(s) from scatter+avg")
 
     t_ends = []
     slora_avg = slora_slow1 = float("nan")
@@ -471,13 +486,17 @@ def plot_panel(ax, slora, dserve, bwd_path, tl_base, gpu_name,
             legend_kwargs["bbox_to_anchor"] = LEGEND_BBOX_TO_ANCHOR
         ax.legend(_row_major_reorder(rows_h, LEGEND_NCOL),
                   _row_major_reorder(rows_l, LEGEND_NCOL), **legend_kwargs)
+    if n_clipped:
+        ax.text(0.01, 0.97, f"({n_clipped} latency outlier(s) >{lat_clip:g}s omitted)",
+                transform=ax.transAxes, ha="left", va="top",
+                fontsize=8, color="0.45")
     return t_max
 
 
 def build_figure(timeline_path, slora_path, dserve_path, bwd_path, gpu_name,
                  slora_offset=None, dserve_offset=None,
                  ft_offset=0.0, window_s=None,
-                 slora_latency_factor=1.0) -> plt.Figure:
+                 slora_latency_factor=1.0, lat_clip=None) -> plt.Figure:
     row_unit = FIGSIZE[1] / sum(HEIGHT_RATIOS)
     fig = plt.figure(figsize=(FIGSIZE[0], row_unit * sum(HEIGHT_RATIOS)),
                      constrained_layout=True)
@@ -540,7 +559,7 @@ def build_figure(timeline_path, slora_path, dserve_path, bwd_path, gpu_name,
         ax, slora, dserve, bwd_path, tl_base, gpu_name,
         slora_offset=slora_offset, dserve_offset=dserve_offset,
         ft_offset=ft_offset, window_s=window_s,
-        slora_latency_factor=slora_latency_factor)
+        slora_latency_factor=slora_latency_factor, lat_clip=lat_clip)
 
     t_max = max(panel_tmax, tl_max)
     if t_max > 0:
@@ -591,6 +610,11 @@ def main() -> None:
                     help="Multiply SLoRA E2E latency by this factor to put it on "
                          "the DeltaServe (llama3) model footing — SLoRA runs "
                          f"llama1. Default: {SLORA_LATENCY_FACTOR}. Use 1.0 to disable.")
+    ap.add_argument("--lat-clip", type=float, default=None,
+                    help="Drop E2E-latency points above this many seconds from "
+                         "the scatter + avg (a disclosed note is drawn on the "
+                         "figure; the CSVs keep all rows). Use to omit transient "
+                         "outliers. Default: keep all.")
     ap.add_argument("--output", default=None,
                     help="Output PNG path. Default: "
                          "<dir>/compare_slora_dserve.png next to --dserve.")
@@ -602,7 +626,7 @@ def main() -> None:
         args.timeline, args.slora, args.dserve, args.bwd, args.gpu_name,
         slora_offset=args.slora_offset, dserve_offset=args.dserve_offset,
         ft_offset=args.ft_offset, window_s=args.window,
-        slora_latency_factor=args.slora_latency_factor)
+        slora_latency_factor=args.slora_latency_factor, lat_clip=args.lat_clip)
     os.makedirs(os.path.dirname(os.path.abspath(out_path)), exist_ok=True)
     fig.savefig(out_path, dpi=PNG_DPI)
     print(f"[compare_slora_dserve] wrote figure → {out_path}")
