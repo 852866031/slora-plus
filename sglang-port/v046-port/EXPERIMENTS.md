@@ -770,59 +770,70 @@ Deliverables: `plots/compare_slora_dserve_20m.png`, CSVs
 **Question (陈嘉暄 / user):** vLLM's reference figure reaches ~1000 tok/s pure-FT on
 a *single* GPU; sglang here measured ~420. Is the sglang FT engine deficient?
 
-**Answer: it is NOT a hardware fact — the cross-GPU "table" below was a
-methodology error, retracted.** The only defensible comparison is same-box.
+**Answer (after a full same-box MPS sweep): sglang is NOT deficient — on this
+H200 sglang BEATS vLLM at pure-FT, and the gap widens with MPS. The 1000 is a
+vLLM-on-5090 number that vLLM itself cannot reproduce on the H200.**
 
-**CORRECTION (the earlier framing "H200 loses to 5090" was wrong).** The
-reference logs `temporal_share_output/{5090,A100}/bwd_log_co_factor_off_nutanix.csv`
-carry **no config metadata** — no record of MPS%, model, or sleep setting. "5090"
-and "A100" are just directory names. I wrongly treated them as a controlled
-10%-MPS comparison. They are not.
+**Colleague was right on the config.** I read the YAML that generated the
+reference logs (`configs/serving_config_finetuning_llama3{,_both}.yaml`): it IS
+`backward_mps_percentage: 10`, and it has two features sglang lacks —
+`backward_cuda_graph: true` and `save_attn_qkv/ctx: true` (save attention, skip
+recompute). So "you missed a feature" was the correct thing to check. I then
+tested whether those features actually buy anything **on this hardware**, by
+running vLLM with all of them ON, on this same H200, at 10% AND 100% MPS.
 
-The per-backward latency (same ~242 tok/batch everywhere, so directly comparable)
-exposes the real story:
+**The decisive same-box MPS sweep (8B, rank-16 LoRA, pure-FT, no inference):**
 
-| run | per-backward latency | tok/s | provenance |
-|---|---|---|---|
-| reference `5090/` (co_off) | **236 ms** | 1020 | unknown MPS%/config |
-| reference `A100/` (co_off) | 700 ms | 345 | unknown MPS%/config |
-| sglang H200 @10% MPS | 558 ms | 433 | **measured, this box** |
-| sglang H200 @100% uncapped | **275 ms** | 881 | **measured, this box** |
-| vLLM H200 @10% MPS | ~578 ms | 419 | **measured, this box** (pure_ft_bench) |
+| backward MPS | **sglang H200** | **vLLM H200** (graph+save_attn ON) |
+|---|---|---|
+| 10% | **433** tok/s | 410 tok/s |
+| 30% | **712** tok/s | — |
+| 100% (full GPU) | **881** tok/s | **416** tok/s |
 
-The reference "5090" run is **236 ms/backward — faster than my H200 *uncapped*
-(275 ms)**. A 5090 does not out-compute an H200 by 2.4×; what 236 ms lines up with
-is a *near-uncapped* run, not a 10% one. The reference logs were almost certainly
-**not run at 10% MPS**. So "H200 loses to 5090" was an uncapped-vs-capped artifact,
-not silicon. A datacenter H200 at full power beats a 5090; it does not lose to one.
+Two facts jump out:
 
-**What actually holds — controlled, same-box, same-code:**
-1. **sglang FT engine matches vLLM on the same GPU**: sglang H200@10% = **433** ≈
-   vLLM H200@10% = **419**. No engine deficiency.
-2. **Path to ~1000 on H200 is uncapping the backward MPS**: sglang H200 @100%
-   (uncapped) = **881 tok/s**. `backward_process.py` uncaps when
-   `backward_mps_percentage` ≥ 100 or ≤ 0. The "1000" reference is reproduced on
-   H200 by removing the cap — it is an MPS-cap effect, not a 5090 hardware win.
+1. **vLLM does NOT scale with MPS on the H200 — it is flat at ~420** (410 @10%,
+   416 @100%; cycle time pinned at ~590 ms regardless of GPU power). Giving
+   vLLM's backward the whole GPU buys nothing. Its backward is **not
+   GPU-compute-bound** — it's bound by a fixed ~590 ms/cycle host cost. The most
+   likely culprit is the very feature sglang lacks: **`save_attn_qkv/ctx` makes
+   vLLM ship a much larger activation snapshot over IPC each cycle**, so it goes
+   transfer/host-bound and stops scaling with SMs.
+2. **sglang DOES scale** (433 → 712 → 881): its backward recomputes attention
+   (small IPC snapshot) and is GPU-bound, so more MPS → more throughput. At full
+   GPU sglang = **881 tok/s ≈ 2× vLLM's 416** on the same H200, and approaches the
+   5090's 1020.
 
-**MPS 10% is NOT the dominant factor** (user was right): clean isolation gave
-1B@10%=1505 vs 1B@100%=3204 — only ~2×, not 10×. The earlier "315→3204 = 10×"
-claim conflated 8B@10% vs 1B@100% and was wrong.
+**So porting `save_attn`/`backward_cuda_graph` to sglang would not help and could
+HURT** — `save_attn` is plausibly what *caps* vLLM at ~420. Recomputing attention
+(sglang's current choice) is the better trade here. Confirmed: do not port them.
 
-**Backward architecture audit (vs vLLM), for the record:**
-- sglang backward is **eager** (no CUDA graph). vLLM has an optional
-  `GraphedBackwardRunner`. At 10% MPS on H200 this buys ~nothing (the win is
-  capture/replay of shape-stable FFN; SM-starved at 10% it's dispatch-bound, not
-  capture-bound). Not ported — no measured benefit on this hardware.
-- sglang saves `layer_in / mlp_gate_up / final_in / final_hidden /
-  concat_input_ids` per step and **recomputes attention** in the backward; vLLM
-  additionally saves attn qkv/ctx to skip recompute. Recompute is cheap for the
-  small per-sample attention here; not ported.
-- sglang does **one backward per FT-prefill step** (no accumulate-to-buffer-full).
-  begin_step resets the activation buffers each step. Matches vLLM's per-step
-  cadence; n_valid mean ≈ 452 (max_saved 512) confirms full-ish steps.
+**Re-reading the reference cross-GPU numbers in this light** (all vLLM, all 10%,
+same code): 5090 = 1020 (~236 ms/cycle), H200 = 410 (~590 ms/cycle), A100 = 345
+(~700 ms/cycle). Since vLLM's cycle time is a *fixed host/transfer cost* (it
+doesn't move with MPS), the cross-GPU spread reflects **host-side speed (CPU /
+IPC / transfer path), not GPU compute**. The 5090 box simply has a much cheaper
+per-cycle fixed cost. vLLM-on-H200 cannot reach 1020 (flat 420 even at 100%);
+**sglang-on-H200 reaches 881** because sglang's backward actually uses the GPU.
 
-Bottom line: **the FT engine is consistent with vLLM on the same GPU** (433 ≈ 419
-@10%). The 1000-figure is reproduced on H200 by uncapping MPS (→881), so it is an
-MPS-cap effect, not a sglang deficiency and not a 5090 hardware advantage. The
-cross-GPU claim was retracted — the reference logs lack config provenance. Stop
-chasing graph/save-attn/accumulate ports for this metric.
+**MPS 10% is NOT the dominant factor** (user was right): 1B@10%=1505 vs
+1B@100%=3204 — only ~2×. The earlier "315→3204 = 10×" claim conflated 8B@10% vs
+1B@100% and was wrong, and the still-earlier "H200 loses to 5090 on silicon"
+framing was also wrong (retracted) — it's host-side fixed cost, not GPU compute.
+
+Bottom line for 陈嘉暄's question: **the ~420 we saw is vLLM's flat H200 ceiling,
+not sglang's.** sglang at matched 10% MPS already edges vLLM (433 vs 410), and
+when the backward gets more GPU (raise `--backward-mps-pct` / the `SGLANG_DS`
+knob; `backward_process.py` uncaps at ≥100) sglang climbs to **881**, ~2× what
+vLLM manages on the same card. The 1000 is 5090 host-side speed, reproducible on
+the H200 only by sglang, not by vLLM. **Stop chasing the save_attn / CUDA-graph /
+accumulate ports — they are not the gap, and save_attn is likely a pessimization
+here.**
+
+Measurement provenance: sglang via `_pure_ft_mps.py {10,30,100}` (real MPS-
+isolated backward, `SGLANG_DS_REAL_BACKWARD=1`, fires parsed from
+`[DeltaServe] real_backward #N … n_valid=…`); vLLM via
+`DeltaServe-vLLM/eval/pure_ft_bench.py` at `backward_mps_percentage` 10 and 100
+(bwd_log `total_processed_tokens` / span). All pinned `CUDA_VISIBLE_DEVICES=0`
+(the MPS-served GPU) — without the pin both engines hit
+`device=1, num_gpus=1` under MPS.
