@@ -428,9 +428,25 @@ class FinetuneSchedulerMixin:
 
         if feats.b_d > 0 and est.is_ready:
             if t_baseline >= _max_tbt_slo * decode_only_margin:
+                # Stage-3 TBT reject: the inference decode step alone already meets
+                # the TBT budget, so no FT this step. Log it (this is the SLO
+                # binding — the mechanism that makes FT back off under load).
+                self._ft_slo_rejects = getattr(self, "_ft_slo_rejects", 0) + 1
+                self._ft_s3_dbg = getattr(self, "_ft_s3_dbg", 0) + 1
+                if self._ft_s3_dbg % 100 == 1:
+                    logger.warning(f"[DeltaServe] SLO BIND (stage3 TBT): decode "
+                                   f"pred={t_baseline*1000:.1f}ms >= budget="
+                                   f"{_max_tbt_slo*decode_only_margin*1000:.1f}ms "
+                                   f"b_d={feats.b_d} k={feats.k:.0f} -> FT denied")
                 return []   # already over TBT without FT
         if ttft_deadline is not None and est.is_ready:
             if (ttft_deadline - now - queue_wait - t_baseline) <= 0:
+                self._ft_slo_rejects = getattr(self, "_ft_slo_rejects", 0) + 1
+                self._ft_s3t_dbg = getattr(self, "_ft_s3t_dbg", 0) + 1
+                if self._ft_s3t_dbg % 100 == 1:
+                    logger.warning(f"[DeltaServe] SLO BIND (stage3 TTFT): "
+                                   f"deadline-now-pred<=0 (pred={t_baseline*1000:.1f}ms) "
+                                   f"-> FT denied (queue/wait too deep)")
                 return []   # already over TTFT without FT
 
         # ── Stage 4: shapers (outer pre-filters) + iterative greedy ──
