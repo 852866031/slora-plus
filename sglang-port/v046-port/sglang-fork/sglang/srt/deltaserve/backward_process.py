@@ -137,7 +137,18 @@ def spawn_backward_process(
     The parent's ``os.environ`` is *not* mutated — only the child's env dict.
     """
     child_env = dict(os.environ if env is None else env)
-    child_env[_MPS_PERCENTAGE_ENV] = str(int(mps_pct))
+    # mps_pct >= 100 or <= 0 → UNCAPPED: don't pin the backward to a fixed MPS
+    # partition. A fixed cap (e.g. 10%) permanently FLOORS FT throughput — even
+    # when inference is idle the backward can only use that % of the GPU, so it
+    # can't fill the trough (FT throughput stays low with no inference, which is
+    # backwards). Uncapped, the backward uses the idle GPU at full speed and the
+    # SLO scheduler throttles FT when inference is busy (the real co-serving
+    # design). 中文：固定 MPS 上限会把 FT 吞吐永久焊死，空闲也填不满谷；放开后反向能吃满
+    # 空闲 GPU，繁忙时由 SLO 调度器节流。
+    if 0 < int(mps_pct) < 100:
+        child_env[_MPS_PERCENTAGE_ENV] = str(int(mps_pct))
+    else:
+        child_env.pop(_MPS_PERCENTAGE_ENV, None)
     return subprocess.Popen(
         [sys.executable, __file__, channel_addr, model_name, str(int(mps_pct))],
         env=child_env,
