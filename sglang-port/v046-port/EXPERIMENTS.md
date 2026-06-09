@@ -790,6 +790,13 @@ running vLLM with all of them ON, on this same H200, at 10% AND 100% MPS.
 | 30% | **712** tok/s | — |
 | 100% (full GPU) | **881** tok/s | **416** tok/s |
 
+**Re-verified on current vLLM `main` (`83c91b3`)** — the first vLLM run was on a
+checkout 3 commits behind, whose new commits rewrote the FT path
+(`coordinator.py +200`, `gpu_model_runner.py +120`). Re-ran on up-to-date `main`:
+vLLM 10% = **417**, 100% = **418** tok/s — still dead flat, conclusion unchanged.
+(The new commits are co-serving throttle knobs `fwd_token_throttle*`, default off,
+which don't fire in pure-FT.)
+
 Two facts jump out:
 
 1. **vLLM does NOT scale with MPS on the H200 — it is flat at ~420** (410 @10%,
