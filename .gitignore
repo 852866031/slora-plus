@@ -2,7 +2,6 @@
 .vscode
 .DS_Store
 *.safetensors
-*.csv
 # Track request-schedule CSVs under eval/llama3/timelines/<gpu>/, but
 # never track the nutanix variant (proprietary trace). The negation
 # below re-includes the timeline files; the wildcard after it re-ignores
