@@ -89,14 +89,15 @@ def build_server_cmd(model_path: str, port: int, co: bool, mps_pct: int,
                      store_corpus: Optional[str] = None,
                      mixed_chunk: bool = False,
                      disable_radix: bool = False,
-                     finetune_config: Optional[str] = None) -> List[str]:
+                     finetune_config: Optional[str] = None,
+                     mem_fraction: float = 0.5) -> List[str]:
     cmd = [
         sys.executable, "-m", "sglang.launch_server",
         "--model-path", model_path,
         "--host", "127.0.0.1",
         "--port", str(port),
         "--tp-size", "1",
-        "--mem-fraction-static", "0.5",
+        "--mem-fraction-static", str(mem_fraction),
     ]
     if not enable_inference_cuda_graph:
         cmd += ["--disable-cuda-graph"]
@@ -287,7 +288,10 @@ async def drive(port: int, timeline: List[TimelineRow], ft_fraction: float,
     results: List[RequestResult] = []
     pending: List[asyncio.Task] = []
     sent_count = 0
-    async with aiohttp.ClientSession() as session:
+    # limit=0 -> unlimited concurrent connections (default is 100, which caps the
+    # server's decode batch at ~100 and prevents the SLO from binding on fast HW).
+    async with aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=0, limit_per_host=0)) as session:
         for i, row in enumerate(timeline):
             target_t = t_anchor + row.timestamp_s
             now = time.monotonic()
@@ -414,6 +418,8 @@ def main():
                     help="Phase G: path to a DeltaServe sectioned YAML (the vLLM "
                          "config). Loads the exact SLO/admission knobs into "
                          "FinetuneConfig. Passed through to the server.")
+    ap.add_argument("--mem-fraction", type=float, default=0.5,
+                    help="--mem-fraction-static for the server (more KV headroom for big batches).")
     ap.add_argument("--no-radix", action="store_true",
                     help="Disable the radix prefix cache even for inference-only "
                          "(co-serving already disables it); use for a fair "
@@ -467,6 +473,7 @@ def main():
             mixed_chunk=args.mixed_chunk,
             disable_radix=args.no_radix,
             finetune_config=args.finetune_config,
+            mem_fraction=args.mem_fraction,
         )
         print(f"[bench] launching: {' '.join(cmd)}")
         # Section 11: launch with FT gate CLOSED so warmup runs without FT cost.
